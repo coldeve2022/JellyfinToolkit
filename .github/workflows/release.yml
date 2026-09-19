@@ -46,8 +46,12 @@ jobs:
             exit 1
           fi
 
-      - name: 构建（图标 + 版本资源 + 测试 + PyInstaller + zip + SHA256）
-        run: python scripts/build_release.py
+      # 这里**不重复跑测试**：tests workflow 已经在同一个提交上跑过全平台矩阵
+      # （而且那边装了真 ffmpeg，这边没装 —— 环境不一致反而容易制造假问题，
+      # 实测就是这一步跑了 30 分钟以上不结束）。
+      # 产物本身由下一步 smoke_exe 真实启动验证，那才是"这个包能不能用"的关键。
+      - name: 构建（图标 + 版本资源 + PyInstaller + zip + SHA256）
+        run: python scripts/build_release.py --skip-tests
 
       - name: 验证打包产物真的能启动
         run: python tools/dev/smoke_exe.py
