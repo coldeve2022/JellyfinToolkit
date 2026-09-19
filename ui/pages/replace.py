@@ -1,4 +1,5 @@
 """破解视频自动替换页面 — 匹配 restored 视频并覆盖媒体库原文件。"""
+from __future__ import annotations
 
 import os
 import shutil

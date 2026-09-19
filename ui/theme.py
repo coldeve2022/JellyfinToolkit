@@ -3,6 +3,7 @@
 所有控件颜色一律通过 token 获取，禁止在页面代码中硬编码颜色值。
 切换主题 = 切换 token 集 + 重新应用全局 QSS。
 """
+from __future__ import annotations
 
 from typing import Any
 

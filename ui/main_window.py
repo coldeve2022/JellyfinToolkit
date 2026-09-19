@@ -1,4 +1,5 @@
 """主窗口 — 侧边栏导航 + 堆叠页面路由 + 主题管理。"""
+from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,

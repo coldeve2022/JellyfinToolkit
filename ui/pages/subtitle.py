@@ -1,4 +1,5 @@
 """字幕缺失检测页面 — 扫描视频目录，找出没有字幕文件的视频。"""
+from __future__ import annotations
 
 import json
 import os

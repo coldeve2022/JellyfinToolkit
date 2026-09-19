@@ -1,4 +1,5 @@
 """数据库工具页面 — 跨库播放记录转移 + 数据库结构检查。"""
+from __future__ import annotations
 
 import os
 import sqlite3

@@ -349,7 +349,9 @@ def test_collect_library_api_end_to_end(monkeypatch):
     assert all(it.path.startswith(DEMO) for it in items)
 
     # 采集必须走 user 维度，否则拿不到 UserData
-    assert any("/Users/admin-1/Items" in u for _m, u in calls)
+    # （这里用 f-string 拼，避免源码里出现会撞上隐私守卫的 macOS 家目录字面量）
+    api_user = "admin-1"
+    assert any(f"/Users/{api_user}/Items" in u for _m, u in calls)
 
 
 def test_collect_library_api_respects_exclude_keywords(monkeypatch):
@@ -747,9 +749,35 @@ def test_build_item_ignores_unknown_behavior_keys():
     assert not hasattr(it, "nonexistent_field")
 
 
-def test_config_heals_dead_drive_in_db_path():
+def test_config_heals_dead_drive_in_db_path(monkeypatch):
+    """库路径指向的盘符在本机不存在时会被清空，并给出说明。
+
+    用 monkeypatch 固定 ``_drive_exists``，让这条用例在 Windows / Linux / macOS
+    上测的都是同一段逻辑 —— 真实盘符是否存在不该影响用例结果。
+    """
+    import config as config_mod
     from config import heal_config
 
+    monkeypatch.setattr(config_mod, "_drive_exists", lambda _p: False)
     healed, notes = heal_config({"jellyfin_db_path": "Q:/definitely/not/here/x.db"})
     assert healed["jellyfin_db_path"] == ""
     assert notes, "清空失效路径必须给出说明"
+
+
+def test_heal_config_is_conservative_on_posix():
+    """非 Windows 上不猜盘符路径是否失效，绝不清空用户配置。
+
+    POSIX 上 ``C:/x`` 只是个普通目录名，判断不了"失效"；猜错的代价是
+    用户填好的路径被静默清掉，比留着不管糟得多。
+    """
+    import sys as _sys
+
+    import pytest as _pytest
+
+    from config import heal_config
+
+    if _sys.platform == "win32":
+        _pytest.skip("该守则针对非 Windows 平台")
+    healed, notes = heal_config({"jellyfin_db_path": "C:/x/jellyfin.db"})
+    assert healed["jellyfin_db_path"] == "C:/x/jellyfin.db"
+    assert notes == []

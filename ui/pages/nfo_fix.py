@@ -1,4 +1,5 @@
 """NFO 关联修复页面 — 修复 .ts → .mp4 后的 NFO 文件和关联资源。"""
+from __future__ import annotations
 
 import os
 

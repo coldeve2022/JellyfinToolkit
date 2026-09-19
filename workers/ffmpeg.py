@@ -5,6 +5,7 @@
 - Worker 线程仅负责包装纯函数 + 信号发射；
 - 修复/转码操作保证数据安全：先产出新文件，确认成功后才替换原文件。
 """
+from __future__ import annotations
 
 import json
 import os

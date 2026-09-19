@@ -188,12 +188,18 @@ _DRIVE_RE = re.compile(r"^([A-Za-z]):([\\/]|$)")
 
 
 def _drive_exists(path: str) -> bool:
-    """Windows 盘符是否存在；非 Windows 或非盘符路径一律视为"不判断"。"""
+    """Windows 盘符路径是否可达。
+
+    **非 Windows 一律返回 True（即"不判断"）**：POSIX 上 ``C:/x`` 只是一个名叫
+    "C:" 的普通相对目录，根本无从判断它是否"失效"。在这里替用户做决定的风险是
+    **把填好的配置静默清掉**，比留着不管糟得多；真读不到时
+    ``utils.library_source.resolve()`` 会给出明确提示并回退到服务器 API。
+    """
     match = _DRIVE_RE.match(path.strip())
     if not match:
         return True
     if sys.platform != "win32":
-        return False
+        return True
     return Path(f"{match.group(1).upper()}:\\").exists()
 
 

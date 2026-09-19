@@ -6,6 +6,7 @@ build_stylesheet(theme_name) 生成的 QSS。
 字体族按平台**探测**后给出（见 utils.fonts），不能写死 "Microsoft YaHei" ——
 没有该字体的机器上 Qt 会静默回退，中文可能变方块。
 """
+from __future__ import annotations
 
 from ui import theme
 from utils.fonts import mono_family, ui_family

@@ -1,4 +1,5 @@
 """通用组件 — 可拖拽列表、日志面板、条形图等复用组件。"""
+from __future__ import annotations
 
 import os
 import subprocess

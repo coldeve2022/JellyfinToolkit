@@ -1,4 +1,5 @@
 """视频修复转码页面 — 合并了坏帧修复 + Jellyfin 兼容性转码两个功能。"""
+from __future__ import annotations
 
 import os
 from pathlib import Path

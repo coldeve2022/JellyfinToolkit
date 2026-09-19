@@ -1,4 +1,5 @@
 """视频有码检测页面 — 拖入文件/文件夹，自动分类有码/无码视频。"""
+from __future__ import annotations
 
 import datetime
 import os

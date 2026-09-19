@@ -3,6 +3,7 @@
 核心逻辑 `transfer_userdata()` 为纯函数（不依赖 Qt），可单元测试；
 `CrossDBTransferWorker` 仅负责线程包装与信号发射。
 """
+from __future__ import annotations
 
 import shutil
 import sqlite3

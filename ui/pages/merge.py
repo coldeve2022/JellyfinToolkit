@@ -1,4 +1,5 @@
 """分集合并页面 — 分层树形列表：番号为父节点，CD1/CD2 等分集为子节点，直接勾选合并或删除。"""
+from __future__ import annotations
 
 import os
 import subprocess
