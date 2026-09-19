@@ -114,3 +114,37 @@ def test_real_changelog_has_current_version():
     sec = release_notes.extract_section(text, __version__)
     assert sec.strip(), f"CHANGELOG.md 里找不到 {__version__} 这一节"
     assert "新增" in sec or "修复" in sec
+
+
+def test_standalone_script_survives_cp1252_stdout(tmp_path):
+    """以子进程方式真跑一遍脚本，模拟 CI 的 Windows runner。
+
+    这条守则来自一次真实事故：脚本用 ``python scripts/xxx.py`` 运行时，
+    ``sys.path[0]`` 是 ``scripts/`` 而不是仓库根，于是脚本里那句
+    ``from utils.console import force_utf8_stdout`` 失败 —— 而它当时被
+    ``except Exception: pass`` **静默吞掉**，编码修复等于没做，
+    接着 print 中文就撞上 runner 的 cp1252：
+
+        UnicodeEncodeError: 'charmap' codec can't encode characters
+
+    所以这里用 ``PYTHONIOENCODING=cp1252`` 1:1 复现那个条件，
+    并断言脚本仍以退出码 0 正常产出正文。**换成别的入口脚本时也照这个来测。**
+    """
+    import os
+    import subprocess
+
+    from version import __version__
+
+    out = tmp_path / "body.md"
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "cp1252"
+
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "release_notes.py"),
+         "--version", __version__, "--out", str(out)],
+        capture_output=True, text=True, env=env, timeout=180)
+
+    assert proc.returncode == 0, (
+        f"脚本在 cp1252 环境下失败：\n{proc.stdout[-500:]}\n{proc.stderr[-800:]}")
+    assert out.is_file() and out.read_text(encoding="utf-8").strip()
+

@@ -31,6 +31,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 __all__ = ["extract_section", "build_body", "VERSION_HEAD_RE"]
 
+
+def _force_utf8_stdout() -> None:
+    """把 stdout/stderr 切到 UTF-8（仅在被管道/重定向时）。
+
+    **这里刻意不去 import ``utils.console``**：以 ``python scripts/xxx.py`` 方式运行时
+    ``sys.path[0]`` 是 ``scripts/`` 而不是仓库根，那条 import 会失败 ——
+    实测就这么在 CI 上把编码修复静默丢掉了，后面打印中文时直接
+    ``UnicodeEncodeError: 'charmap' codec can't encode``（runner 的 stdout 是 cp1252）。
+    所以这个脚本保持**自包含**，顺便也让它能被单独拷出去用。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            if getattr(stream, "isatty", lambda: False)():
+                continue
+            enc = (getattr(stream, "encoding", "") or "").lower().replace("-", "_")
+            if enc in {"utf8", "utf_8", "u8", "cp65001"}:
+                continue
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            continue
+
 #: 版本小节标题：``## [3.8.0] — 2026-09-19`` / ``## [3.8.0]`` / ``## 3.8.0``
 VERSION_HEAD_RE = re.compile(r"^##\s+\[?(\d+(?:\.\d+)*)\]?", re.M)
 
@@ -99,12 +122,8 @@ def main() -> int:
     ap.add_argument("--out", default="", help="写入文件；留空则打印到标准输出")
     args = ap.parse_args()
 
-    try:
-        from utils.console import force_utf8_stdout
-
-        force_utf8_stdout()
-    except Exception:  # noqa: BLE001  独立运行时也该能用
-        pass
+    # 必须在任何 print 之前：CI 的 Windows runner 上 stdout 是 cp1252
+    _force_utf8_stdout()
 
     path = Path(args.changelog)
     if not path.is_file():
