@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from config import ToolkitConfig
     from utils.fonts import ui_font
-    from utils.tools import configure_tools
+    from utils.tools import configure_tools, resolve_tool
     from ui.main_window import MainWindow
     from ui.pages.onboarding import OnboardingPage
     from ui.pages.insight import InsightPage
@@ -137,7 +137,9 @@ def main(argv: list[str] | None = None) -> int:
     from ui.pages.dedup import DedupPage
     from ui.pages.censorship import CensorshipPage
     from ui.pages.subtitle import SubtitlePage
+    from ui.pages.subtitle_gen import SubtitleGenPage
     from ui.pages.replace import ReplacePage
+    from ui.pages.lada import LadaPage
     from ui.pages.repair import RepairPage
     from ui.pages.nfo_fix import NFOPage
     from ui.pages.db_tools import DBToolsPage
@@ -169,7 +171,12 @@ def main(argv: list[str] | None = None) -> int:
     window.register_page(DedupPage(cfg))
     window.register_page(CensorshipPage(cfg))
     window.register_page(SubtitlePage(cfg))
+    window.register_page(SubtitleGenPage(cfg))
     window.register_page(ReplacePage(cfg))
+    # Lada 需要 ffprobe 校验产出时长，用与 ffmpeg 同一套解析逻辑取它的路径
+    lada_page = LadaPage(cfg)
+    lada_page.set_ffprobe(resolve_tool("ffprobe") or "ffprobe")
+    window.register_page(lada_page)
     window.register_page(RepairPage(cfg))
     window.register_page(NFOPage(cfg))
     window.register_page(DBToolsPage(cfg))

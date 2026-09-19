@@ -409,6 +409,45 @@ class SettingsPage(QWidget):
         mg.addWidget(merge_hint)
         layout.addWidget(merge_group)
 
+        # ── 第三方工具（批量生成字幕 / 马赛克破解）──
+        # 这两项功能的主体都在**别人写的程序**里，所以这里最重要的是
+        # "告诉我在哪" + "去哪儿拿"。路径留空 = 自动查找，不写死任何目录。
+        ext_group = QGroupBox("第三方工具（批量生成字幕 / 马赛克破解）")
+        ext_lay = QVBoxLayout(ext_group)
+        ext_hint = QLabel(
+            "这两项功能依赖你自己安装的第三方程序，本程序不附带也不下载它们。\n"
+            "路径留空 = 自动查找常见位置；填 exe 的完整路径或它所在的文件夹都可以。\n"
+            "拿不准去哪儿下载，就去对应功能页点「怎么获取？」看指引。")
+        ext_hint.setWordWrap(True)
+        ext_lay.addWidget(ext_hint)
+
+        w1 = QHBoxLayout()
+        w1.addWidget(QLabel("字幕识别 infer.exe："))
+        self.input_whisper_tool = QLineEdit(self.cfg.whisper_tool_path)
+        self.input_whisper_tool.setPlaceholderText("留空 = 自动查找")
+        w1.addWidget(self.input_whisper_tool, 1)
+        b1 = QPushButton("浏览")
+        b1.clicked.connect(lambda: self._browse(self.input_whisper_tool,
+                                                "选择 infer.exe", "可执行文件 (*.exe)"))
+        w1.addWidget(b1)
+        ext_lay.addLayout(w1)
+
+        w2 = QHBoxLayout()
+        w2.addWidget(QLabel("马赛克破解 lada-cli.exe："))
+        self.input_lada_cli = QLineEdit(self.cfg.lada_cli_path)
+        self.input_lada_cli.setPlaceholderText("留空 = 自动查找")
+        w2.addWidget(self.input_lada_cli, 1)
+        b2 = QPushButton("浏览")
+        b2.clicked.connect(lambda: self._browse(self.input_lada_cli,
+                                                "选择 lada-cli.exe", "可执行文件 (*.exe)"))
+        w2.addWidget(b2)
+        ext_lay.addLayout(w2)
+
+        self.lbl_ext_tools = QLabel()
+        self.lbl_ext_tools.setWordWrap(True)
+        ext_lay.addWidget(self.lbl_ext_tools)
+        layout.addWidget(ext_group)
+
         # 服务器同步（Jellyfin / Emby 通用：清洗脏前缀标签 + 全库刷新）
         jf_group = QGroupBox("服务器同步 · Jellyfin / Emby（清洗脏前缀标签 + 全库刷新）")
         jf_lay = QVBoxLayout(jf_group)
@@ -469,6 +508,25 @@ class SettingsPage(QWidget):
         root.addWidget(scroll)
 
         self._refresh_source_hint()
+        self._refresh_ext_tools()
+
+    # ── 第三方工具 ──
+    def _refresh_ext_tools(self) -> None:
+        """显示**实际解析到的**工具位置（而不是复述输入框内容）。"""
+        from utils import lada_tool, whisper_tool
+
+        whisper = whisper_tool.find_infer_exe(self.input_whisper_tool.text().strip())
+        lada = lada_tool.find_lada_cli(self.input_lada_cli.text().strip())
+        self.lbl_ext_tools.setText(
+            "实际状态：\n"
+            f"· 字幕识别：{'✅ ' + str(whisper) if whisper else '❌ 未找到（该页会给出下载指引）'}\n"
+            f"· 马赛克破解：{'✅ ' + str(lada) if lada else '❌ 未找到（该页会给出下载指引）'}")
+
+    def _refresh_ext_tools_safe(self) -> None:
+        try:
+            self._refresh_ext_tools()
+        except Exception:  # noqa: BLE001  设置页不该因为探测失败而崩掉
+            pass
 
     # ── 媒体库数据源 ──
     def _refresh_source_hint(self) -> None:
@@ -816,6 +874,8 @@ class SettingsPage(QWidget):
         self.cfg.merge_output_container = self.combo_merge_container.currentData() or "mp4"
         # 留空表示"自动落到数据目录下的 backups/"，不能塞一个本机可能不存在的盘符
         self.cfg.merge_backup_root = self.input_merge_backup.text().strip()
+        self.cfg.whisper_tool_path = self.input_whisper_tool.text().strip()
+        self.cfg.lada_cli_path = self.input_lada_cli.text().strip()
         self.cfg.merge_original_subfolder = self.input_merge_subfolder.text().strip() or "_merged_originals"
         self.cfg.merge_rename_to_number = self.check_merge_rename.isChecked()
         self.cfg.merge_max_parts = self.spin_merge_max_parts.value()
@@ -882,6 +942,8 @@ class SettingsPage(QWidget):
         self.combo_merge_container.setCurrentIndex(
             self.combo_merge_container.findData(DEFAULT_CONFIG["merge_output_container"]))
         self.input_merge_backup.setText(DEFAULT_CONFIG["merge_backup_root"])
+        self.input_whisper_tool.setText(DEFAULT_CONFIG["whisper_tool_path"])
+        self.input_lada_cli.setText(DEFAULT_CONFIG["lada_cli_path"])
         self.input_merge_subfolder.setText(DEFAULT_CONFIG["merge_original_subfolder"])
         self.check_merge_rename.setChecked(DEFAULT_CONFIG["merge_rename_to_number"])
         self.spin_merge_max_parts.setValue(DEFAULT_CONFIG["merge_max_parts"])

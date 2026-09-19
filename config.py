@@ -22,7 +22,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 
 from version import APP_ID
 
@@ -93,6 +93,49 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "merge_max_parts": 20,
     "merge_min_part_seconds": 3.0,
     "merge_timeout_per_file": 3600,
+
+    # ── 批量生成字幕（第三方 Faster-Whisper / TransWithAI 工具）──────────
+    # 这些字段都**不指向任何具体路径**：留空表示"自动探测"或"沿用工具默认"。
+    # 真正可用的取值由 utils.whisper_tool.probe() 读工具自己的 --help 得出，
+    # 所以换一个版本/换一台机器都不需要改代码。
+    "whisper_tool_path": "",              # infer.exe 或其所在目录；留空 = 自动探测
+    "whisper_model": "",                  # 留空 = 用工具自带模型（models/ 目录）
+    "whisper_device": "cuda",             # cuda / cpu / auto
+    "whisper_compute_type": "",           # 留空 = 工具默认（如 float16 / int8）
+    "whisper_language": "",               # 留空 = 不指定（工具不支持的版本会自动跳过）
+    "whisper_sub_formats": "srt",         # srt,vtt,txt,lrc 任意组合
+    "whisper_audio_suffixes": "",         # 留空 = 复用主程序视频扩展名 + 常见音频扩展名
+    "whisper_output_dir": "",             # 留空 = 与视频同目录
+    "whisper_overwrite": True,
+    "whisper_batching": True,             # 显存不足时关掉
+    "whisper_batch_size": 8,
+    "whisper_max_batch_size": 0,          # 0 = 工具默认（8）
+    "whisper_generation_config": "",      # 高级：generation_config.json5 的路径
+    "whisper_vad_threshold": 0.0,         # 0 = 工具默认（0.5）
+    "whisper_merge_segments": None,       # null = 不指定；true/false = 显式覆盖
+    "whisper_cleanup": True,              # 生成后做去重 / 长句拆分
+    "whisper_cleanup_max_duration": 20.0, # 单条字幕最长秒数
+    "whisper_cleanup_similarity": 0.88,   # 相邻两条视为重复的相似度阈值
+
+    # ── 马赛克破解（第三方 Lada）─────────────────────────────────────
+    "lada_cli_path": "",                  # lada-cli.exe 或其所在目录；留空 = 自动探测
+    "lada_device": "cuda:0",              # 取值以工具 --list-devices 为准
+    "lada_encoding_preset": "",           # 留空 = 用 Lada 默认（hevc-nvidia-gpu-hq）
+    "lada_detection_model": "",           # 留空 = 用 Lada 默认（v4-fast）
+    "lada_restoration_model": "",         # 留空 = 用 Lada 默认（basicvsrpp-v1.2）
+    "lada_max_clip_length": 0,            # 0 = 用 Lada 默认（180 帧）
+    "lada_fp16": True,                    # 省显存、现代 GPU 上通常更快
+    "lada_detect_face_mosaics": False,    # 检测并跳过面部马赛克（v3+ 模型支持）
+    "lada_mp4_fast_start": False,
+    "lada_output_dir": "",                # 留空 = 与视频同目录
+    "lada_output_pattern": "{orig_file_name}.restored.mp4",
+    "lada_temp_dir": "",                  # 留空 = 输出目录下的 _tmp
+    "lada_parallel_workers": 1,           # 并发数；显存不够就保持 1
+    "lada_pin_to_p_core": True,           # 绑定到 P 核，避免被系统调度到 E 核
+    "lada_validate_output": True,         # 产出后用 ffprobe 校验时长，防"静默产出坏文件"
+    "lada_vram_gate": False,              # 显存门控：占用超过阈值时暂停队列（默认关）
+    "lada_vram_high": 10.5,               # 以上两个阈值原为 12GB 显卡调的，按需调整
+    "lada_vram_low": 8.5,
 }
 
 PORTABLE_MARKER = "portable.txt"
@@ -291,6 +334,46 @@ class ToolkitConfig:
     merge_max_parts: int = DEFAULT_CONFIG["merge_max_parts"]
     merge_min_part_seconds: float = DEFAULT_CONFIG["merge_min_part_seconds"]
     merge_timeout_per_file: int = DEFAULT_CONFIG["merge_timeout_per_file"]
+
+    # ── 批量生成字幕（第三方工具）──
+    whisper_tool_path: str = DEFAULT_CONFIG["whisper_tool_path"]
+    whisper_model: str = DEFAULT_CONFIG["whisper_model"]
+    whisper_device: str = DEFAULT_CONFIG["whisper_device"]
+    whisper_compute_type: str = DEFAULT_CONFIG["whisper_compute_type"]
+    whisper_language: str = DEFAULT_CONFIG["whisper_language"]
+    whisper_sub_formats: str = DEFAULT_CONFIG["whisper_sub_formats"]
+    whisper_audio_suffixes: str = DEFAULT_CONFIG["whisper_audio_suffixes"]
+    whisper_output_dir: str = DEFAULT_CONFIG["whisper_output_dir"]
+    whisper_overwrite: bool = DEFAULT_CONFIG["whisper_overwrite"]
+    whisper_batching: bool = DEFAULT_CONFIG["whisper_batching"]
+    whisper_batch_size: int = DEFAULT_CONFIG["whisper_batch_size"]
+    whisper_max_batch_size: int = DEFAULT_CONFIG["whisper_max_batch_size"]
+    whisper_generation_config: str = DEFAULT_CONFIG["whisper_generation_config"]
+    whisper_vad_threshold: float = DEFAULT_CONFIG["whisper_vad_threshold"]
+    whisper_merge_segments: Optional[bool] = DEFAULT_CONFIG["whisper_merge_segments"]
+    whisper_cleanup: bool = DEFAULT_CONFIG["whisper_cleanup"]
+    whisper_cleanup_max_duration: float = DEFAULT_CONFIG["whisper_cleanup_max_duration"]
+    whisper_cleanup_similarity: float = DEFAULT_CONFIG["whisper_cleanup_similarity"]
+
+    # ── 马赛克破解（第三方 Lada）──
+    lada_cli_path: str = DEFAULT_CONFIG["lada_cli_path"]
+    lada_device: str = DEFAULT_CONFIG["lada_device"]
+    lada_encoding_preset: str = DEFAULT_CONFIG["lada_encoding_preset"]
+    lada_detection_model: str = DEFAULT_CONFIG["lada_detection_model"]
+    lada_restoration_model: str = DEFAULT_CONFIG["lada_restoration_model"]
+    lada_max_clip_length: int = DEFAULT_CONFIG["lada_max_clip_length"]
+    lada_fp16: bool = DEFAULT_CONFIG["lada_fp16"]
+    lada_detect_face_mosaics: bool = DEFAULT_CONFIG["lada_detect_face_mosaics"]
+    lada_mp4_fast_start: bool = DEFAULT_CONFIG["lada_mp4_fast_start"]
+    lada_output_dir: str = DEFAULT_CONFIG["lada_output_dir"]
+    lada_output_pattern: str = DEFAULT_CONFIG["lada_output_pattern"]
+    lada_temp_dir: str = DEFAULT_CONFIG["lada_temp_dir"]
+    lada_parallel_workers: int = DEFAULT_CONFIG["lada_parallel_workers"]
+    lada_pin_to_p_core: bool = DEFAULT_CONFIG["lada_pin_to_p_core"]
+    lada_validate_output: bool = DEFAULT_CONFIG["lada_validate_output"]
+    lada_vram_gate: bool = DEFAULT_CONFIG["lada_vram_gate"]
+    lada_vram_high: float = DEFAULT_CONFIG["lada_vram_high"]
+    lada_vram_low: float = DEFAULT_CONFIG["lada_vram_low"]
 
     # 非持久化：加载时的自愈提示，供界面显示一次
     load_notes: List[str] = field(default_factory=list, compare=False, repr=False)
