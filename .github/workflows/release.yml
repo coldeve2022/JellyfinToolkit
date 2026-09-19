@@ -18,6 +18,7 @@ permissions:
 jobs:
   build-windows:
     name: 构建 Windows 包
+    timeout-minutes: 60
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
