@@ -544,20 +544,34 @@ def test_no_personal_data_files_present():
 
 
 def test_all_python_files_compile():
-    """整仓语法自检：改坏文件比漏改文件更糟。"""
-    import py_compile
+    """整仓语法自检：改坏文件比漏改文件更糟。
+
+    这条比"能不能编译"更严一点，**把 SyntaxWarning 也当成失败**：
+    非法转义序列（文档字符串里的反斜杠后面跟了非转义字符）在 3.12+ 只是警告，
+    但一旦它出现在被导入的模块里，开着 ``-W error`` 就会让整模块导入失败 ——
+    实测就是这么把 CI 的测试收集阶段搞挂的（改文件时一个反斜杠没转义）。
+
+    用 ``compile()`` 而不是 ``py_compile``：后者会往磁盘写 ``.pyc-check`` 临时文件，
+    而"测试不许污染仓库"是另一条硬规则。
+    """
+    import warnings
 
     failures: list[str] = []
     for path in ROOT.rglob("*.py"):
         if any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts):
             continue
+        source = path.read_text(encoding="utf-8", errors="replace")
         try:
-            py_compile.compile(str(path), doraise=True, cfile=str(path) + ".pyc-check")
-        except py_compile.PyCompileError as e:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                compile(source, str(path), "exec")
+        except SyntaxError as e:
             failures.append(f"{path.relative_to(ROOT)}: {e}")
-        finally:
-            Path(str(path) + ".pyc-check").unlink(missing_ok=True)
-    assert not failures, "存在无法编译的文件：\n" + "\n".join(failures)
+            continue
+        bad = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+        if bad:
+            failures.append(f"{path.relative_to(ROOT)}: {bad[0].message}")
+    assert not failures, "存在无法编译或含非法转义的文件：\n" + "\n".join(failures)
 
 
 def test_gitignore_exists_and_covers_personal_data():
@@ -569,36 +583,50 @@ def test_gitignore_exists_and_covers_personal_data():
 
 
 def test_demo_seeder_root_is_absolute_on_every_platform():
-    """演示库根目录在两个平台上都必须是**绝对路径**。
+    """演示库根目录在**两个平台上**都必须是绝对路径。
 
-    带盘符的路径（形如"C: 后跟斜杠"）在 POSIX 上只是一个**相对目录名**，占位文件会被写进
-    当前工作目录 —— 实测在 CI 上把仓库工作区搞脏了，紧接着
-    "确认测试没有污染工作区"那一步就红了。
+    带盘符的路径在 POSIX 上只是一个**相对目录名**，占位文件会被写进当前工作目录 ——
+    实测在 CI 上把仓库工作区搞脏了，紧接着"确认测试没有污染工作区"那一步就红了。
 
-    这里显式传 ``os_name`` 而不是 monkeypatch ``os.name``：改 ``os.name`` 会连带
-    扰乱 pathlib 的内部判定（实测报 UnsupportedOperation）。
+    踩过的两个坑，都写在这里防止后人重犯：
+
+    1. 用宿主平台的 ``Path.is_absolute()`` 判断**另一个平台**的路径是错的：
+       形如"盘符 + 反斜杠"的路径在 PosixPath 下不是绝对路径，反之亦然。要按目标平台语义判断，
+       即 ``ntpath.isabs`` / ``posixpath.isabs``。
+    2. monkeypatch ``os.name`` 也不可行 —— 会连带扰乱 pathlib 的内部判定
+       （实测报 UnsupportedOperation）。所以要允许显式传 ``os_name``。
     """
     import importlib.util
+    import ntpath
+    import posixpath
 
     spec = importlib.util.spec_from_file_location(
         "seed_demo_probe", ROOT / "tools" / "dev" / "seed_demo.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
+    # 本平台实际用于截图的那条：绝对、中性、不含用户名
     native = module.demo_root_for()
     assert module.DEMO_ROOT == native
-    # 本平台实际发布用于截图的那条路径：绝对、中性、且不含用户名
     assert Path(native).is_absolute(), native
     assert "MediaDemo" in native, native
     assert os.environ.get("USERNAME", "\x00") not in native, native
 
-    # 另一平台的分支：至少必须绝对（否则会往当前工作目录写文件）且仍然中性。
-    # 这里不断言"不含用户名" —— tempfile 的基础目录是跟着**真实**平台走的，
-    # Windows 上它本来就在用户目录下，模拟 posix 分支时这条会误伤。
-    for os_name in ("nt", "posix"):
-        value = module.demo_root_for(os_name)
-        assert Path(value).is_absolute(), (os_name, value)
-        assert "MediaDemo" in value, (os_name, value)
+    # nt 分支：按 Windows 语义必须是绝对路径
+    win = module.demo_root_for("nt")
+    assert ntpath.isabs(win), win
+    assert "MediaDemo" in win, win
+
+    # posix 分支：显式给一个 POSIX 基准目录，按 POSIX 语义判断。
+    # 不能直接用 tempfile.gettempdir() —— 在 Windows 宿主上它本身就是 Windows 路径，
+    # 拿它拼出来的东西不可能是 POSIX 绝对路径。
+    posix = module.demo_root_for("posix", temp_base="/tmp")
+    assert posixpath.isabs(posix), posix
+    assert posix == "/tmp/MediaDemo/Library", posix
+
+    # 回归钉：原来写死的那条 Windows 路径在 POSIX 语义下**不是**绝对路径。
+    # 一旦有人把 posix 分支改回去，上面两条会立刻红。
+    assert not posixpath.isabs(win), win
 
 
 def test_demo_seeder_produces_neutral_paths(tmp_path):

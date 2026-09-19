@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import posixpath
 import sqlite3
 import sys
 import tempfile
@@ -42,11 +43,17 @@ STUDIOS = ["示例工作室一", "示例工作室二", "示例工作室三"]
 # （git status 里冒出一串 `?? "C:\MediaDemo\Library\..."`），
 # 紧跟着"确认测试没有污染工作区"那一步就红了。
 # 非 Windows 改用系统临时目录下的同名路径：同样中性、不含用户名，而且是绝对路径。
-def demo_root_for(os_name: str = os.name) -> str:
-    """按平台给出演示库根目录（显式传 os_name 便于跨平台测试）。"""
+def demo_root_for(os_name: str = os.name, temp_base: str | None = None) -> str:
+    """按平台给出演示库根目录。
+
+    显式传 ``os_name`` / ``temp_base`` 是为了能跨平台单测：用宿主平台的 ``Path``
+    去构造**另一个平台**的路径是不对的（Windows 上 ``Path`` 永远是 WindowsPath，
+    给不出 POSIX 绝对路径），所以 POSIX 分支用 ``posixpath`` 拼接。
+    """
     if os_name == "nt":
         return r"C:\MediaDemo\Library"
-    return str(Path(tempfile.gettempdir()) / "MediaDemo" / "Library")
+    base = temp_base if temp_base is not None else tempfile.gettempdir()
+    return posixpath.join(base, "MediaDemo", "Library")
 
 
 DEMO_ROOT = demo_root_for()

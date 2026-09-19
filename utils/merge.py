@@ -628,11 +628,24 @@ def extract_frame_hashes(ffmpeg: str, path: str, timestamps: list,
     return hashes
 
 
+if hasattr(int, "bit_count"):
+    def popcount(value: int) -> int:
+        """二进制里 1 的个数。"""
+        return value.bit_count()
+else:
+    # Python 3.9：int.bit_count() 还不存在（3.10 才加）。
+    # 项目声明支持 3.9，所以这里留一条等价回退 —— 实测 CI 的 3.9 job
+    # 就是被这一行打成 AttributeError 的。
+    def popcount(value: int) -> int:
+        """二进制里 1 的个数（3.9 兼容实现）。"""
+        return bin(value).count("1")
+
+
 def hamming_similarity(a: list, b: list, max_distance: int = 10) -> float:
     """两帧哈希序列的相似比例（Hamming 距离 ≤ max_distance 的帧占比）。"""
     if not a or not b or len(a) != len(b):
         return 0.0
-    similar = sum(1 for x, y in zip(a, b) if (x ^ y).bit_count() <= max_distance)
+    similar = sum(1 for x, y in zip(a, b) if popcount(x ^ y) <= max_distance)
     return similar / len(a)
 
 
