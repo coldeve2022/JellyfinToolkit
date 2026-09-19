@@ -54,21 +54,6 @@ Jellyfin 本身是个很好的媒体服务器，这个软件主要优化以下�
 | 🧩 分集合并 | 把分集作品（尤其是fc2）无损合并为单文件|
 | 🤖 自动化工作台 | 把上面的步骤串成一条可无人值守的流水线（默认 dry-run） | 这个功能暂时没做好，先不要使用
 
-另外提供两个无界面 CLI 入口：`auto_orchestrator.py`（全库审计/编排）与 `auto_pipeline.py`（合并流水线）。
-
----
-
-## 截图
-
-| 库概览 | 快速打标 | 分集合并 |
-| --- | --- | --- |
-| ![库概览](docs/images/01_insight.png) | ![快速打标](docs/images/03_review.png) | ![分集合并](docs/images/12_merge.png) |
-
-<sub>截图使用 `tools/dev/seed_demo.py` 生成的**虚构**演示库，不含任何真实数据。</sub>
-
-其余页面截图在 [`docs/images/`](docs/images/)。
-
----
 
 ## 系统要求
 
@@ -117,13 +102,8 @@ python main.py
 
 Windows 下还可以双击 `start-silent.vbs` 无控制台启动。
 
-
-
 ---
 
-## 数据与隐私
-
-这一节请认真看 —— 这个工具会读取你的媒体库路径和观看记录。
 
 **它不会做的事：**
 
