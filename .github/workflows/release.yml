@@ -65,33 +65,23 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
 
+      # 把 CHANGELOG 里**本版本那一节**抽出来嵌进 Release 正文 ——
+      # 用户第一眼就能看到这版改了什么，不必再点一次链接。
+      - name: 生成 Release 正文（嵌入本次更新内容）
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          python scripts/release_notes.py --version "${tag#v}" --out release_body.md
+          echo "---- 正文预览 ----"
+          head -30 release_body.md
+
       - name: 创建 / 更新 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: "Jellyfin Toolkit ${{ github.event.inputs.tag || github.ref_name }}"
           generate_release_notes: true
-          body: |
-            ## 安装
-
-            1. 下载下面的 `JellyfinToolkit-*.zip`
-            2. 解压到任意目录
-            3. 双击 `JellyfinToolkit.exe`
-
-            > 首次运行前请核对压缩包的 SHA256（见 Release 附件里的 `.sha256` 文件）。
-
-            ## 系统要求
-
-            - Windows 10/11（64 位）
-            - FFmpeg / ffprobe（可选，但视频修复、转码、分集合并需要）
-              下载后放到程序目录的 `bin/` 子目录，或在「设置 → FFmpeg 转码设置」里指定路径
-
-            ## 数据位置
-
-            `%APPDATA%\JellyfinToolkit\`
-            想做成便携版：在程序目录里新建一个空的 `portable.txt`。
-
-            完整变更见 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)。
+          body_path: release_body.md
           files: |
             dist/*.zip
             dist/*.sha256
