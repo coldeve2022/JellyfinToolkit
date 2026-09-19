@@ -42,7 +42,7 @@ jobs:
         run: |
           set -e
           # 排除 CI 配置自身（它列举了这些关键词）与文档目录
-          hits=$(git grep -nI -E 'C:\\\\Users\\\\|/Users/[a-z]|迅雷|\.workbuddy' \
+          hits=$(git grep -nI -E 'C:\\Users\\|/Users/[a-z]|迅雷|\\.workbuddy' \
                    -- '*.py' '*.vbs' '*.bat' '*.sh' '*.json' '*.toml' '*.yml' \
                    ':!CONTRIBUTING.md' ':!.github/workflows/tests.yml' \
                    ':!tests/test_portability.py' || true)
@@ -68,7 +68,7 @@ jobs:
           # 允许的例外：Windows 默认安装位置、示例、文档
           hits=$(git grep -nI -E '[A-Z]:[\\/]' -- '*.py' \
                    ':!tests/*' ':!tools/dev/*' ':!config.example.json' \
-                 | grep -vE 'C:\\\\ProgramData|C:\\\\Program Files|C:\\\\Windows|C:\\\\ffmpeg|C:\\\\Media|C:\\\\Demo|C:\\\\data|C:\\\\fake|C:\\\\App' \
+                 | grep -vE 'C:\\ProgramData|C:\\Program Files|C:\\Windows|C:\\ffmpeg|C:\\Media|C:\\Demo|C:\\data|C:\\fake|C:\\App' \
                  || true)
           if [ -n "$hits" ]; then
             echo "$hits"

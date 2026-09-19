@@ -246,8 +246,8 @@ def split_path_name(p: str) -> str:
     """取路径末端的文件名 —— **同时认 ``/`` 和 ``\\``**。
 
     Jellyfin / Emby 库里存的路径可能是另一个平台写下的（库在 Windows 上刮削、
-    之后服务迁到 Linux，路径仍是 ``C:////media////...``），而 POSIX 的
-    ``os.path.basename`` 不把 ``\\`` 当分隔符，会把整串当成文件名 ——
+    之后服务迁到 Linux，库里存的仍是反斜杠分隔的路径），而 POSIX 的
+    ``os.path.basename`` 不把反斜杠当分隔符，会把整串当成文件名 ——
     于是附属文件判定、封面查找全部失效。这是实测出来的，不是理论问题。
     """
     return str(p).replace(chr(92), "/").rstrip("/").rsplit("/", 1)[-1]

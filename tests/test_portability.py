@@ -568,6 +568,39 @@ def test_gitignore_exists_and_covers_personal_data():
         assert must in text, f".gitignore 缺少 {must}"
 
 
+def test_demo_seeder_root_is_absolute_on_every_platform():
+    """演示库根目录在两个平台上都必须是**绝对路径**。
+
+    带盘符的路径（形如"C: 后跟斜杠"）在 POSIX 上只是一个**相对目录名**，占位文件会被写进
+    当前工作目录 —— 实测在 CI 上把仓库工作区搞脏了，紧接着
+    "确认测试没有污染工作区"那一步就红了。
+
+    这里显式传 ``os_name`` 而不是 monkeypatch ``os.name``：改 ``os.name`` 会连带
+    扰乱 pathlib 的内部判定（实测报 UnsupportedOperation）。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "seed_demo_probe", ROOT / "tools" / "dev" / "seed_demo.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    native = module.demo_root_for()
+    assert module.DEMO_ROOT == native
+    # 本平台实际发布用于截图的那条路径：绝对、中性、且不含用户名
+    assert Path(native).is_absolute(), native
+    assert "MediaDemo" in native, native
+    assert os.environ.get("USERNAME", "\x00") not in native, native
+
+    # 另一平台的分支：至少必须绝对（否则会往当前工作目录写文件）且仍然中性。
+    # 这里不断言"不含用户名" —— tempfile 的基础目录是跟着**真实**平台走的，
+    # Windows 上它本来就在用户目录下，模拟 posix 分支时这条会误伤。
+    for os_name in ("nt", "posix"):
+        value = module.demo_root_for(os_name)
+        assert Path(value).is_absolute(), (os_name, value)
+        assert "MediaDemo" in value, (os_name, value)
+
+
 def test_demo_seeder_produces_neutral_paths(tmp_path):
     """演示数据必须落在中性路径，否则 README 截图会泄露构建环境。"""
     import importlib.util

@@ -36,6 +36,7 @@ dist/
 dist[0-9]/
 *.spec.bak
 __pycache__/
+*.pyc
 *.py[cod]
 *$py.class
 *.egg-info/

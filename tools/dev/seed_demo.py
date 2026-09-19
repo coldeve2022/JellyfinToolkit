@@ -1,9 +1,12 @@
 """生成一套**完全虚构**的演示库，让任何人都能在没有真实数据的前提下试用/截图。
 
 产出：
-    <out>/jellyfin.db                      最小可用的 Jellyfin 结构（只含本工具用到的表）
-    <out>/data/library/<番号>/...          占位的视频/NFO/字幕文件（0 字节，仅用于展示路径逻辑）
-    <out>/config.json                      指向上面这套演示数据的配置
+    <out>/jellyfin.db                        最小可用的 Jellyfin 结构（只含本工具用到的表）
+    <out>/config.json                        指向上面这套演示数据的配置
+    <DEMO_ROOT>/<厂牌>/<番号>/...             占位的视频/NFO/字幕文件（0 字节，仅用于展示路径逻辑）
+
+其中 DEMO_ROOT 是中性路径（Windows 用程序盘下的 MediaDemo 目录，
+其它平台用系统临时目录下的 MediaDemo），**不会**写进当前工作目录。
 
 用法：
     python tools/dev/seed_demo.py                    # 默认写到 ./demo/
@@ -16,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,8 +35,21 @@ GENRES = ["剧情", "记录", "合集", "特典", "重制"]
 ACTORS = ["示例演员甲", "示例演员乙", "示例演员丙", "示例演员丁", "示例演员戊"]
 STUDIOS = ["示例工作室一", "示例工作室二", "示例工作室三"]
 
-# 演示用根目录：中性路径，不出现构建目录、也不指向任何真实库
-DEMO_ROOT = r"C:\MediaDemo\Library"
+# 演示用根目录：中性路径，不出现构建目录、也不指向任何真实库。
+#
+# Windows 上用 r"C:\MediaDemo\Library"；但 POSIX 上 "C:\..." 只是一个
+# **相对目录名**，占位文件会被写进当前工作目录 —— 实测在 CI 上把仓库工作区搞脏了
+# （git status 里冒出一串 `?? "C:\MediaDemo\Library\..."`），
+# 紧跟着"确认测试没有污染工作区"那一步就红了。
+# 非 Windows 改用系统临时目录下的同名路径：同样中性、不含用户名，而且是绝对路径。
+def demo_root_for(os_name: str = os.name) -> str:
+    """按平台给出演示库根目录（显式传 os_name 便于跨平台测试）。"""
+    if os_name == "nt":
+        return r"C:\MediaDemo\Library"
+    return str(Path(tempfile.gettempdir()) / "MediaDemo" / "Library")
+
+
+DEMO_ROOT = demo_root_for()
 
 
 def _build_items(count: int):
