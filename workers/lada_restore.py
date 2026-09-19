@@ -16,7 +16,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from utils import lada_tool
+from utils import cpu_affinity, gpu, lada_tool
 
 
 class LadaProbeWorker(QThread):
@@ -43,30 +43,8 @@ class LadaProbeWorker(QThread):
         self.done.emit(info)
 
 
-def gpu_vram_used_gb() -> float:
-    """当前 GPU 已用显存（GB）。读不到返回 ``-1``。
-
-    用 ``nvidia-smi`` 而不是额外的 Python 库：只要装了 NVIDIA 驱动就有它，
-    不必再给用户加一个依赖。读不到时调用方应当**放行**（不做门控），
-    而不是把队列卡死。
-    """
-    import subprocess
-
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=15,
-            creationflags=(0x08000000 if __import__("os").name == "nt" else 0),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return -1.0
-    if out.returncode != 0 or not (out.stdout or "").strip():
-        return -1.0
-    try:
-        first = out.stdout.strip().splitlines()[0].strip()
-        return float(first) / 1024.0
-    except (ValueError, IndexError):
-        return -1.0
+#: 兼容旧名字（有调用方按这个名字引用过）
+gpu_vram_used_gb = gpu.vram_used_gb
 
 
 class LadaRestoreWorker(QThread):
@@ -99,6 +77,9 @@ class LadaRestoreWorker(QThread):
         self.options = options
         self.ffprobe = ffprobe
         self._stopped = False
+        #: 绑核用的核心列表（run() 里按配置解析一次，避免每个文件都重算）
+        self.affinity_info: dict = {}
+        self.affinity_cores: list = []
 
     def stop(self) -> None:
         self._stopped = True
@@ -110,6 +91,17 @@ class LadaRestoreWorker(QThread):
         total = len(self.videos)
         self.log.emit(f"开始破解：共 {total} 个文件，并发 {n}")
         self.log.emit(f"破解工具：{lada_tool.describe_cli(self.cli_path)}")
+
+        # 绑核：按配置解析一次，并把**判定来源**明确告诉用户 ——
+        # 这项优化只对 Intel 混合架构有明显效果，别的 CPU 上会自动退回全部核心。
+        self.affinity_info = cpu_affinity.detect_affinity(
+            cfg.lada_cpu_affinity, cfg.lada_cpu_affinity_cores)
+        self.affinity_cores = list(self.affinity_info.get("cores") or [])
+        self.log.emit(f"CPU 绑定：{cpu_affinity.describe_affinity(self.affinity_info)}")
+        if self.affinity_info.get("mode") == "auto" and \
+                self.affinity_info.get("source") != cpu_affinity._SRC_API:
+            self.log.emit("    （自动探测没拿到精确拓扑，已按说明退回；"
+                          "想让任务跑在特定核心上，可在设置里改成自定义）")
         if cfg.lada_vram_gate:
             self.log.emit(f"显存门控已开启：占用超过 {cfg.lada_vram_high:.1f} GB 时暂停，"
                           f"低于 {cfg.lada_vram_low:.1f} GB 时继续")
@@ -128,7 +120,7 @@ class LadaRestoreWorker(QThread):
             if not cfg.lada_vram_gate:
                 return False
             while not self._stopped:
-                used = gpu_vram_used_gb()
+                used = gpu.vram_used_gb()
                 if used < 0 or used <= cfg.lada_vram_high:
                     return False
                 stats["gated"] = True
@@ -215,7 +207,7 @@ class LadaRestoreWorker(QThread):
             on_line=self._on_tool_line,
             progress=lambda pct, p=path: self.file_progress.emit(p, pct),
             should_stop=lambda: self._stopped,
-            cpu_affinity=p_core_threads() if cfg.lada_pin_to_p_core else None,
+            cpu_affinity=self.affinity_cores or None,
         )
         if result.get("error"):
             return False, result["error"]
@@ -247,21 +239,11 @@ def n_slots(cfg) -> int:
 
 
 def p_core_threads() -> list:
-    """P 核逻辑线程号列表；取不到返回空（表示不绑核）。
+    """兼容旧名字：等价于自动模式的绑核结果。
 
-    直接复用系统调度也行，但实测不绑核时 Windows 会把后台进程甩到 E 核上跑，
-    长任务（几十分钟）的差距很明显。
+    真正的判定逻辑在 :mod:`utils.cpu_affinity` —— 那边会先走 Windows API 读
+    真实拓扑，读不到才退回启发式。**这里原来的启发式在本机的混合架构 CPU 上
+    算不出 P 核（逻辑核数 ≠ 物理核数 × 2），会静默退回"全部核心"，
+    等于绑核没生效**，所以换成精确探测。
     """
-    try:
-        import psutil
-
-        if not hasattr(psutil, "cpu_count"):
-            return []
-        phys = psutil.cpu_count(logical=False) or 0
-        logical = psutil.cpu_count(logical=True) or 0
-        if logical and phys and logical == phys * 2:
-            # 有超线程：前 2*phys 个逻辑核通常就是含 HT 的 P 核
-            return list(range(min(logical, phys * 2)))
-        return list(range(logical)) if logical else []
-    except Exception:  # noqa: BLE001
-        return []
+    return cpu_affinity.detect_affinity("auto")["cores"]

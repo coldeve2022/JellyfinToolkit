@@ -131,10 +131,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "lada_output_pattern": "{orig_file_name}.restored.mp4",
     "lada_temp_dir": "",                  # 留空 = 输出目录下的 _tmp
     "lada_parallel_workers": 1,           # 并发数；显存不够就保持 1
-    "lada_pin_to_p_core": True,           # 绑定到 P 核，避免被系统调度到 E 核
+    # 绑核：auto = 自动探测 P 核（Intel 混合架构才有效，别的 CPU 自动退回全部核心）；
+    # off = 交给系统调度；custom = 用下面的核心列表，如 "0-11"
+    "lada_cpu_affinity": "auto",
+    "lada_cpu_affinity_cores": "",
     "lada_validate_output": True,         # 产出后用 ffprobe 校验时长，防"静默产出坏文件"
-    "lada_vram_gate": False,              # 显存门控：占用超过阈值时暂停队列（默认关）
-    "lada_vram_high": 10.5,               # 以上两个阈值原为 12GB 显卡调的，按需调整
+    # 显存门控：占用超过高水位就暂缓启动新任务，低于低水位再继续。
+    # 默认关 —— 开着会让任务"看起来停住了"，新用户容易困惑；
+    # 默认阈值按 12GB 显卡推算，界面上有「按本机显卡推荐」按钮可一键换算。
+    "lada_vram_gate": False,
+    "lada_vram_high": 10.5,
     "lada_vram_low": 8.5,
 }
 
@@ -369,7 +375,8 @@ class ToolkitConfig:
     lada_output_pattern: str = DEFAULT_CONFIG["lada_output_pattern"]
     lada_temp_dir: str = DEFAULT_CONFIG["lada_temp_dir"]
     lada_parallel_workers: int = DEFAULT_CONFIG["lada_parallel_workers"]
-    lada_pin_to_p_core: bool = DEFAULT_CONFIG["lada_pin_to_p_core"]
+    lada_cpu_affinity: str = DEFAULT_CONFIG["lada_cpu_affinity"]
+    lada_cpu_affinity_cores: str = DEFAULT_CONFIG["lada_cpu_affinity_cores"]
     lada_validate_output: bool = DEFAULT_CONFIG["lada_validate_output"]
     lada_vram_gate: bool = DEFAULT_CONFIG["lada_vram_gate"]
     lada_vram_high: float = DEFAULT_CONFIG["lada_vram_high"]

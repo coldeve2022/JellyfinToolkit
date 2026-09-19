@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from config import ToolkitConfig
 from ui.widgets import DragDropListWidget, InfoCard, LogPanel
-from utils import lada_tool
+from utils import cpu_affinity, gpu, lada_tool
 from workers.lada_restore import LadaProbeWorker, LadaRestoreWorker
 
 
@@ -75,6 +75,8 @@ class LadaPage(QWidget):
         self.tool_options = None
         self._ffprobe = "ffprobe"
         self._setup_ui()
+        self.input_affinity.setEnabled(
+            (self.cfg.lada_cpu_affinity or "auto") == "custom")
         self._refresh_tool_status()
 
     # ── 界面 ──
@@ -208,9 +210,14 @@ class LadaPage(QWidget):
         r4.addWidget(btn_out)
         lay.addLayout(r4)
 
+        # ── 性能相关的两项：都只对特定硬件有意义，所以默认保守、可关、可手填 ──
         r5 = QHBoxLayout()
-        self.chk_gate = QCheckBox("显存门控（占用过高时暂缓新任务）")
+        self.chk_gate = QCheckBox("显存门控")
         self.chk_gate.setChecked(self.cfg.lada_vram_gate)
+        self.chk_gate.setToolTip(
+            "开着时：显存占用超过「高水位」就暂缓启动新任务，低于「低水位」再继续。\n"
+            "适合边玩游戏边挂机，代价是任务会看起来「停住了」。\n"
+            "默认关闭 —— 阈值与显卡容量有关，可点右边的按钮按本机推算。")
         r5.addWidget(self.chk_gate)
         r5.addWidget(QLabel("高水位："))
         self.spin_high = QDoubleSpinBox()
@@ -226,8 +233,45 @@ class LadaPage(QWidget):
         self.spin_low.setValue(float(self.cfg.lada_vram_low or 8.5))
         self.spin_low.setSuffix(" GB")
         r5.addWidget(self.spin_low)
+        btn_rec = QPushButton("按本机显卡推荐")
+        btn_rec.setToolTip("读取显卡总显存，按比例推算一组阈值（会同时填好上下两个值）")
+        btn_rec.clicked.connect(self._recommend_vram)
+        r5.addWidget(btn_rec)
         r5.addStretch()
         lay.addLayout(r5)
+
+        r6 = QHBoxLayout()
+        r6.addWidget(QLabel("CPU 绑定："))
+        self.combo_affinity = QComboBox()
+        self.combo_affinity.addItem("自动探测 P 核", "auto")
+        self.combo_affinity.addItem("不绑定（交给系统）", "off")
+        self.combo_affinity.addItem("自定义核心", "custom")
+        idx = self.combo_affinity.findData(self.cfg.lada_cpu_affinity or "auto")
+        self.combo_affinity.setCurrentIndex(idx if idx >= 0 else 0)
+        self.combo_affinity.setToolTip(
+            "把破解进程绑定到指定 CPU 核心。\n"
+            "· 只对 Intel 12 代及以后的混合架构（P 核 + E 核）有明显效果；\n"
+            "· 其他 CPU 上会自动退回「全部核心」（等同于不绑）；\n"
+            "· 绑错了可能更慢 —— 拿不准就选「不绑定」。")
+        self.combo_affinity.currentIndexChanged.connect(self._on_affinity_changed)
+        r6.addWidget(self.combo_affinity)
+
+        self.input_affinity = QLineEdit(self.cfg.lada_cpu_affinity_cores)
+        self.input_affinity.setPlaceholderText("如 0-11 或 0-5,12-15")
+        self.input_affinity.setToolTip("线程号从 0 开始；范围和逗号都可以写")
+        r6.addWidget(self.input_affinity, 1)
+        self.btn_detect_affinity = QPushButton("检测")
+        self.btn_detect_affinity.setToolTip("读一次本机 CPU 拓扑，看看自动模式会绑到哪些核心")
+        self.btn_detect_affinity.clicked.connect(self._detect_affinity)
+        r6.addWidget(self.btn_detect_affinity)
+        r6.addStretch()
+        lay.addLayout(r6)
+
+        self.lbl_perf = QLabel()
+        self.lbl_perf.setWordWrap(True)
+        self.lbl_perf.setProperty("cssClass", "subtitle")
+        lay.addWidget(self.lbl_perf)
+        self._refresh_perf_hint()
         return box
 
     def _build_files_group(self) -> QGroupBox:
@@ -288,6 +332,52 @@ class LadaPage(QWidget):
         return wrap
 
     # ── 工具定位与探测 ──
+    # ── 性能相关的小工具（只做「告诉你 + 帮你填」，不替用户拍板）──
+    def _on_affinity_changed(self) -> None:
+        mode = self.combo_affinity.currentData()
+        self.input_affinity.setEnabled(mode == "custom")
+        if mode == "custom" and not self.input_affinity.text().strip():
+            info = cpu_affinity.detect_affinity("auto")
+            self.input_affinity.setText(cpu_affinity.format_core_spec(info.get("cores")))
+        self._refresh_perf_hint()
+
+    def _detect_affinity(self) -> None:
+        info = cpu_affinity.detect_affinity("auto")
+        self.log_panel.log_info("CPU 拓扑检测：" + cpu_affinity.describe_affinity(info))
+        self.log_panel.log("    " + info.get("reason", ""))
+        if info.get("cores"):
+            self.log_panel.log(
+                "    如果这个结果不对，把「CPU 绑定」改成「自定义核心」，"
+                "填上你想用的线程号（如 0-11）。")
+        self._refresh_perf_hint()
+
+    def _recommend_vram(self) -> None:
+        total = gpu.vram_total_gb()
+        if total <= 0:
+            self.log_panel.log_warning(
+                "读不到显卡显存（需要 NVIDIA 驱动自带的 nvidia-smi）。"
+                "请按自己显卡的容量手动填 —— 参考比例：高水位约 87%、低水位约 71%。")
+            return
+        high, low = gpu.recommend_vram_thresholds(total)
+        self.spin_high.setValue(high)
+        self.spin_low.setValue(low)
+        used = gpu.vram_used_gb()
+        self.log_panel.log_success(
+            f"按本机显卡（{total:.0f} GB）推算：高水位 {high:.1f} GB / 低水位 {low:.1f} GB"
+            + (f"；当前已用 {used:.1f} GB" if used >= 0 else ""))
+
+    def _refresh_perf_hint(self) -> None:
+        """把这两项"程序实际会怎么做"写在界面上 —— 用户才知道要不要改。"""
+        info = cpu_affinity.detect_affinity(
+            self.combo_affinity.currentData() or "auto", self.input_affinity.text())
+        total = gpu.vram_total_gb()
+        vram = f"显卡 {total:.0f} GB" if total > 0 else "显存读不到"
+        gate = "开启" if self.chk_gate.isChecked() else "关闭"
+        self.lbl_perf.setText(
+            "这两项都只对特定硬件有意义，拿不准就用默认值：\n"
+            f"· CPU 绑定 → {cpu_affinity.describe_affinity(info)}\n"
+            f"· 显存门控 → {gate}（{vram}；阈值可点「按本机显卡推荐」自动填）")
+
     def _fill_combo(self, combo: QComboBox, rows: list, current: str,
                     empty_label: str = "（默认）") -> None:
         combo.clear()
@@ -504,6 +594,8 @@ class LadaPage(QWidget):
         self.cfg.lada_detect_face_mosaics = self.chk_face.isChecked()
         self.cfg.lada_validate_output = self.chk_validate.isChecked()
         self.cfg.lada_parallel_workers = int(self.spin_workers.value())
+        self.cfg.lada_cpu_affinity = self.combo_affinity.currentData() or "auto"
+        self.cfg.lada_cpu_affinity_cores = self.input_affinity.text().strip()
         self.cfg.lada_output_dir = self.input_out.text().strip()
         self.cfg.lada_vram_gate = self.chk_gate.isChecked()
         self.cfg.lada_vram_high = float(self.spin_high.value())
@@ -544,8 +636,11 @@ class LadaPage(QWidget):
         self.btn_scan.setEnabled(not running)
         self.btn_replace.setEnabled(not running)
         for w in (self.combo_device, self.combo_preset, self.combo_detect,
-                  self.combo_restore, self.spin_clip, self.spin_workers):
+                  self.combo_restore, self.spin_clip, self.spin_workers,
+                  self.combo_affinity, self.btn_detect_affinity):
             w.setEnabled(not running)
+        self.input_affinity.setEnabled(
+            not running and self.combo_affinity.currentData() == "custom")
         if running:
             self.lbl_status.setText("正在运行…")
 
