@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
+    QScrollArea,
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QStackedWidget, QPushButton, QLabel, QFrame,
     QMessageBox, QSizePolicy,
@@ -130,8 +131,7 @@ class MainWindow(QMainWindow):
             self.cfg.theme = theme_name
         self.apply_stylesheet()
         # 通知各页面刷新自绘/内联样式的动态色（无此方法的页面自动跳过）
-        for i in range(self.stack.count()):
-            page = self.stack.widget(i)
+        for page in self._pages:
             apply_theme = getattr(page, "apply_theme", None)
             if callable(apply_theme):
                 apply_theme()
@@ -190,6 +190,8 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         root.addWidget(self.stack)
+        #: 真实的功能页面（stack 里放的是套了滚动区的容器，见 register_page）
+        self._pages: list = []
 
     def _navigate(self, idx: int) -> None:
         """切换页面，更新按钮选中状态。"""
@@ -198,14 +200,29 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(idx)
 
     def register_page(self, page: QWidget) -> None:
-        """向堆叠组件注册功能页面。"""
-        self.stack.addWidget(page)
+        """向堆叠组件注册功能页面（自动套一层滚动区）。
+
+        为什么要滚动区：默认窗口只有 1100x720，左边栏固定占掉约 200px，
+        内容区实际不到 900px。密集的参数行（一行 4~6 个控件）在这个宽度下
+        放不下，Qt 会把控件**压到比最小尺寸还小** —— 结果是标签被截断、
+        控件互相叠压。套上滚动区之后，内容按自己的最小宽度排版，
+        窗口不够宽就出现滚动条，控件不再被挤压。
+
+        注意 ``stack`` 里放的是滚动区而不是页面本身，所以另外用 ``_pages``
+        记住真实页面 —— ``closeEvent`` 要按页面调 ``shutdown()``。
+        """
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(page)
+        self._pages.append(page)
+        self.stack.addWidget(scroll)
 
     def closeEvent(self, event):
         """保存配置并停止所有后台线程，避免 "QThread destroyed while running" 崩溃。"""
         # 通知各页面优雅停止后台线程
-        for i in range(self.stack.count()):
-            page = self.stack.widget(i)
+        for page in self._pages:
             shutdown = getattr(page, "shutdown", None)
             if callable(shutdown):
                 shutdown()
