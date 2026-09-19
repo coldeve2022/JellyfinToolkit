@@ -24,6 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from utils.console import force_utf8_stdout  # noqa: E402
+
+force_utf8_stdout()
+
 ICON_SIZES = (256, 128, 64, 48, 40, 32, 24, 20, 16)
 
 BG_TOP = "#1F2937"

@@ -31,6 +31,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from utils.console import force_utf8_stdout  # noqa: E402
+
+force_utf8_stdout()
+
 from version import APP_NAME, __version__  # noqa: E402
 
 
@@ -41,6 +45,9 @@ def _run(cmd: list[str], extra_env: dict[str, str] | None = None, **kwargs) -> i
     # 导致打包中途失败；清空会话变量即可禁用它。
     env.pop("CODEBUDDY_SESSION_ID", None)
     env.pop("CLAUDE_SESSION_ID", None)
+    # 子脚本也要能打印中文：GitHub 的 Windows runner 上 stdout 默认是 cp1252，
+    # 打一个中文字符就会 UnicodeEncodeError（实测把 release workflow 打死了）。
+    env["PYTHONIOENCODING"] = "utf-8"
     if extra_env:
         env.update(extra_env)
     return subprocess.call(cmd, cwd=str(ROOT), env=env, **kwargs)

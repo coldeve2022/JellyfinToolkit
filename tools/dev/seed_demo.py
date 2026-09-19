@@ -30,6 +30,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from utils.console import force_utf8_stdout  # noqa: E402
+
+force_utf8_stdout()
+
 # 全部为虚构编号；前缀刻意避开真实厂商代号
 PREFIXES = ["DEMO", "SAMPLE", "MOCK", "FAKE", "TESTX"]
 GENRES = ["剧情", "记录", "合集", "特典", "重制"]

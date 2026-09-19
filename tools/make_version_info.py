@@ -19,6 +19,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from utils.console import force_utf8_stdout  # noqa: E402
+
+force_utf8_stdout()
+
 from version import (  # noqa: E402
     APP_DESCRIPTION,
     APP_NAME,

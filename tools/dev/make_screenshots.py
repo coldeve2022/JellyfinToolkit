@@ -29,6 +29,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from utils.console import force_utf8_stdout  # noqa: E402
+
+force_utf8_stdout()
+
 # 中性演示路径：不带用户名、不带构建目录
 DEMO_DIR = Path(r"C:\MediaDemo")
 

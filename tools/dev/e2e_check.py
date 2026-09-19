@@ -28,6 +28,10 @@ os.environ.setdefault("PYSIDE_ABORT_ON_EXCEPTION", "0")
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from utils.console import force_utf8_stdout  # noqa: E402
+
+force_utf8_stdout()
 sys.path.insert(0, str(ROOT / "tools" / "dev"))
 
 DEFAULT_DEMO = Path(r"C:\MediaDemo")

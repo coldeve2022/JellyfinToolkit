@@ -447,6 +447,69 @@ def test_doctor_output_forced_utf8_only_when_piped(monkeypatch):
     m._force_utf8_when_piped()
 
 
+def test_force_utf8_stdout_only_when_piped_and_not_utf8(monkeypatch):
+    """``force_utf8_stdout()`` 的判定边界。"""
+    from utils.console import force_utf8_stdout
+
+    class Fake:
+        encoding = "cp1252"
+
+        def __init__(self, tty=False):
+            self._tty = tty
+            self.calls = []
+
+        def isatty(self):
+            return self._tty
+
+        def reconfigure(self, **kw):
+            self.calls.append(kw)
+
+    piped = Fake(tty=False)
+    monkeypatch.setattr(sys, "stdout", piped)
+    monkeypatch.setattr(sys, "stderr", None)
+    force_utf8_stdout()
+    assert piped.calls and piped.calls[0]["encoding"] == "utf-8"
+
+    tty = Fake(tty=True)
+    monkeypatch.setattr(sys, "stdout", tty)
+    force_utf8_stdout()
+    assert tty.calls == [], "交互式控制台必须保持系统编码，否则中文会花屏"
+
+    already = Fake(tty=False)
+    already.encoding = "utf-8"
+    monkeypatch.setattr(sys, "stdout", already)
+    force_utf8_stdout()
+    assert already.calls == [], "已经是 UTF-8 就不必重复设置"
+
+    # GUI 版 exe 没有控制台时 stdout/stderr 可能是 None
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    force_utf8_stdout()
+
+
+@pytest.mark.parametrize("rel", [
+    "main.py",
+    "scripts/build_release.py",
+    "tools/make_icon.py",
+    "tools/make_version_info.py",
+    "tools/dev/seed_demo.py",
+    "tools/dev/smoke_exe.py",
+    "tools/dev/make_screenshots.py",
+    "tools/dev/e2e_check.py",
+])
+def test_entry_scripts_force_utf8_stdout(rel):
+    """所有会打印中文的入口脚本都必须调用 ``force_utf8_stdout()``。
+
+    GitHub 的 Windows runner 上 ``sys.stdout.encoding`` 是 **cp1252**，
+    打印任何中文都会 ``UnicodeEncodeError: 'charmap' codec can't encode characters``
+    —— 实测把 release workflow 的构建步骤直接打死了（第一步 make_icon.py 就挂）。
+    """
+    text = (ROOT / rel).read_text(encoding="utf-8")
+    assert "force_utf8_stdout()" in text, (
+        f"{rel} 没有调用 force_utf8_stdout()：在 cp1252 的 Windows 环境里"
+        "打印中文会直接抛 UnicodeEncodeError")
+
+
 def test_pyproject_version_matches_version_py():
     """pyproject 的版本号必须与 version.py 一致。
 

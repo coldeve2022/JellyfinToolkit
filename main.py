@@ -59,24 +59,16 @@ def _goto(window, label: str) -> None:
 
 
 def _force_utf8_when_piped() -> None:
-    """输出被管道/重定向时改用 UTF-8。
+    """输出被管道/重定向时改用 UTF-8（实现在 utils.console，供各入口脚本共用）。
 
-    冻结的 exe 在中文 Windows 上默认按 GBK 输出，
-    ``JellyfinToolkit.exe --doctor > out.txt`` 会得到一份在 GitHub 上显示成乱码的
-    文件 —— 而 Issue 模板恰好要求用户粘贴这段输出（实测确实乱码）。
-
-    只在**非交互**（管道/重定向）时切换：直接跑在控制台里时保持系统编码，
-    否则中文控制台自己的显示反而会花屏。
+    冻结的 exe 在中文 Windows 上默认按 GBK 输出，``--doctor > out.txt`` 会得到
+    一份在 GitHub 上显示成乱码的文件 —— 而 Issue 模板恰好要求粘贴这段输出。
     """
-    for stream in (sys.stdout, sys.stderr):
-        if stream is None:          # GUI 版 exe 没有控制台时 stdout 可能是 None
-            continue
-        try:
-            if stream.isatty():
-                continue
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError, OSError):
-            continue
+    from utils.console import force_utf8_stdout
+
+    force_utf8_stdout()
+
+
 def print_doctor() -> int:
     """打印环境自检结果（发布前/用户报障时收集环境用），不启动界面。"""
     from config import doctor
