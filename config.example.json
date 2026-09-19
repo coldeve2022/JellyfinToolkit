@@ -1,0 +1,63 @@
+{
+  "_comment": "配置模板。复制为 config.json 后按自己的环境修改；真实的 config.json 已被 .gitignore 排除，不要提交。",
+  "_comment_data_dir": "程序的数据目录：打包运行默认在 %APPDATA%/JellyfinToolkit，源码运行在项目目录；也可用环境变量 JELLYFIN_TOOLKIT_DATA_DIR 覆盖。",
+
+  "_comment_source": "库数据来源：auto = 有可读的库文件就用库文件，否则走服务器 API；db = 只读本地库文件；api = 只走 REST API（Emby 推荐）。",
+  "library_source": "auto",
+  "_comment_server_type": "服务端类型：auto = 由 /System/Info/Public 自动识别（推荐）；也可手填 jellyfin / emby。",
+  "server_type": "auto",
+
+  "_comment_db_path": "留空 = 自动检测本机常见安装位置（Jellyfin 与 Emby 都会扫）。Windows 默认 C:/ProgramData/Jellyfin/Server/data/jellyfin.db。",
+  "jellyfin_db_path": "",
+  "jellyfin_data_dir": "",
+
+  "uncensored_keywords": [
+    "fc2", "1pondo", "carib", "10mu", "pacopaco", "heydouga",
+    "tokyo hot", "tokyohot", "heyzo", "muramura", "luxu", "gachinco",
+    "无码", "流出", "破解", "uncensored", "hack", "decensored"
+  ],
+  "subtitle_extensions": [".srt", ".vtt", ".ass", ".ssa", ".sub"],
+  "video_extensions": [".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".ts", ".rmvb"],
+  "min_video_size_mb": 10,
+
+  "theme": "dark",
+
+  "_comment_codec": "留空 = 自动探测本机真正可用的编码器（推荐）。也可填 h264_nvenc / h264_qsv / h264_amf / libx264。",
+  "ffmpeg_gpu_codec": "",
+  "_comment_hwaccel": "留空 = 自动。可选 cuda / d3d11va / dxva2 / qsv / amf / vaapi / videotoolbox / none。",
+  "ffmpeg_hardware_accel": "",
+  "transcode_crf": 23,
+  "ffmpeg_timeout": 900,
+  "restored_suffix_marker": "restored",
+
+  "_comment_exclude": "路径包含这些关键词的目录不参与分析；留空表示不过滤。",
+  "exclude_path_keywords": [],
+
+  "score_th_keep": 55,
+  "score_th_delete": 25,
+  "enhance_match": true,
+  "engine": "v2",
+  "onboarding_done": false,
+
+  "ai_enabled": true,
+  "ai_base_url": "http://localhost:11434/v1",
+  "ai_model": "qwen3:8b",
+  "ai_key": "",
+
+  "_comment_server": "Jellyfin 与 Emby 用同一套接口与同一个认证头（X-Emby-Token），填好即可。Emby 默认端口同为 8096。",
+  "jellyfin_server": "http://localhost:8096",
+  "jellyfin_api_key": "",
+
+  "merge_ffmpeg_path": "",
+  "merge_output_container": "mp4",
+  "merge_original_subfolder": "_merged_originals",
+  "_comment_backup_root": "留空 = 落到数据目录下的 backups/（推荐，任何机器都能用）。也可填一个大容量盘路径。",
+  "merge_backup_root": "",
+  "merge_rename_to_number": true,
+  "merge_dup_frame_count": 9,
+  "merge_dup_hash_distance": 10,
+  "merge_dup_sim_threshold": 0.8,
+  "merge_max_parts": 20,
+  "merge_min_part_seconds": 3.0,
+  "merge_timeout_per_file": 3600
+}

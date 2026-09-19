@@ -1,0 +1,33 @@
+# 统一换行符：仓库里一律 LF，避免 Windows/Linux 来回改行尾造成整文件 diff
+* text=auto eol=lf
+
+# Windows 脚本必须保持 CRLF，否则 cmd.exe 解析会出问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.vbs text eol=crlf
+
+# 二进制资源不要让 git 试图做行尾转换
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.db binary
+*.mp4 binary
+*.mkv binary
+
+# 生成物：折叠进 diff / 标记为生成，便于 review 时跳过
+build/version_info.txt linguist-generated=true
+assets/icon.ico linguist-generated=true
+assets/icon.png linguist-generated=true
+
+# 让 GitHub 的语言统计不把测试算成主语言
+tests/* linguist-documentation=false
+docs/* linguist-documentation=true
+
+# 缩进风格标注
+*.py text diff=python

@@ -1,0 +1,102 @@
+name: Bug 报告
+description: 报告一个可以复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。**请先附上环境自检结果** —— 没有它很难判断问题出在代码还是本机环境。
+
+        获取方式：在程序目录执行
+
+        ```
+        python main.py --doctor
+        ```
+
+        或打开「⚙️ 设置 → FFmpeg 转码设置 → 🩺 环境自检」截图。
+
+        > ⚠️ 贴日志/截图前请**抹掉个人路径**（用户名、媒体库目录、API Key）。
+        > 这个项目非常在意隐私，请不要把真实库路径发上来。
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: 环境自检输出
+      description: 粘贴 `python main.py --doctor` 的完整输出
+      render: text
+      placeholder: |
+        Jellyfin Toolkit v3.7.0
+        ------------------------------------------------
+        data_dir    : ...
+        ffmpeg      : ...
+        encoders    : ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 界面左下角显示，或 `python main.py --version`
+      placeholder: v3.7.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: 运行方式
+      options:
+        - 下载的 Release 压缩包（exe）
+        - 源码运行（start.bat / start.sh）
+        - 源码运行（手动 python main.py）
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      placeholder: Windows 11 23H2 64 位 / Ubuntu 24.04 / macOS 14
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 尽量具体。用了哪个页面、点了哪个按钮、操作的是什么类型的文件
+      placeholder: |
+        1. 打开「分集合并」页
+        2. 拖入包含 CD1/CD2 的目录
+        3. 点「扫描」
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望的行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际的行为
+      description: |
+        有报错就把日志贴上来。错误日志在数据目录下的 `app-error.log`：
+        - Windows: `%APPDATA%\JellyfinToolkit\app-error.log`
+        - 源码运行: 项目目录下的 `data/app-error.log`
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息（可选）
+      description: 截图、是否可稳定复现、换台机器是否也有、最近改过什么设置
+    validations:
+      required: false

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 安全 / 隐私问题
+    url: https://github.com/coldeve2022/JellyfinToolkit/security/advisories/new
+    about: 涉及数据泄露、未声明的网络出口等问题，请走私密通道，不要开公开 issue
+  - name: 📖 先看文档
+    url: https://github.com/coldeve2022/JellyfinToolkit#常见问题
+    about: 常见问题（找不到 ffmpeg、硬编报错、中文变方块、备份去哪了）大多在 README 里已有答案
+  - name: 🩺 环境自检怎么做
+    url: https://github.com/coldeve2022/JellyfinToolkit#环境自检
+    about: 报 Bug 前请先跑一次 python main.py --doctor 并附上输出

@@ -1,0 +1,64 @@
+name: 功能建议
+description: 提一个想法或改进
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提想法。为了让讨论有落点，请尽量说清"你现在怎么做的、卡在哪"。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题
+      description: 描述场景和痛点，而不是直接给方案 —— 说不定有更简单的做法
+      placeholder: |
+        我每次整理完都要手动去 Jellyfin 里刷新一遍，很麻烦……
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你设想的做法（可选）
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及页面
+      multiple: true
+      options:
+        - 库概览
+        - 喜好画像
+        - 快速打标
+        - 删除暂存
+        - 重复处理
+        - 视频有码检测
+        - 字幕缺失检测
+        - 破解视频替换
+        - 视频修复转码
+        - NFO 关联修复
+        - 数据库工具
+        - 分集合并
+        - 自动化工作台
+        - 设置
+        - 其他 / 新增页面
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ### 如果是"想要支持某个新的 Jellyfin 版本 / 新的目录结构"
+
+        请附上一小段**脱敏后**的目录结构示例（把真实番号、演员名、盘符换掉）：
+
+        ```
+        C:\Media\Library\StudioA\MIXX-001\
+          MIXX-001.mp4
+          MIXX-001.nfo
+        ```
