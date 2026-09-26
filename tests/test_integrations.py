@@ -114,10 +114,16 @@ def test_build_command_without_probe_is_optimistic():
 
 
 def test_default_audio_suffixes_reuses_app_video_extensions():
-    """扩展名要复用主程序的配置，而不是另抄一份常量。"""
+    """扩展名要复用主程序的配置，而不是另抄一份常量。
+
+    且**只含视频**：这个参数（上游叫 ``--audio_suffixes``）实际传的是视频扩展名，
+    混入 mp3/wav 会让上游真的去处理音频 —— 用户实测就撞到过
+    "为什么 wav 也要生成字幕"。
+    """
     out = whisper_tool.default_audio_suffixes([".mp4", ".mkv", ".ts"])
-    assert out.startswith("mp4,mkv,ts")
-    assert "mp3" in out.split(",")
+    assert out == "mp4,mkv,ts"
+    for audio in ("mp3", "wav", "flac", "m4a", "aac", "ogg", "wma"):
+        assert audio not in out.split(","), audio
 
 
 @pytest.mark.parametrize("code,expect", [

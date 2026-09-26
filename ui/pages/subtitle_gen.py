@@ -52,6 +52,8 @@ class _MissingSubtitleScan(QThread):
         aux = 0
         checker = getattr(self.cfg, "subtitle_extensions", None) or [".srt"]
         want = [str(f).lstrip(".") for f in self.formats]
+        video_exts = {str(e).lower() for e in (self.cfg.video_extensions or [])}
+        skipped_audio = 0
         for it in items:
             if not it.path or not Path(it.path).is_file():
                 continue
@@ -59,12 +61,23 @@ class _MissingSubtitleScan(QThread):
             if is_junk_attachment_path(it.path):
                 aux += 1
                 continue
+            # Jellyfin 库里也有音频条目（.wav/.mp3…）—— 这不是"缺字幕的视频"
+            if video_exts and Path(it.path).suffix.lower() not in video_exts:
+                skipped_audio += 1
+                continue
+            # 兜底：配置为空时至少排除明显的音频扩展名
+            if not video_exts and Path(it.path).suffix.lower().lstrip(".") in (
+                    "mp3", "wav", "flac", "m4a", "aac", "ogg", "wma"):
+                skipped_audio += 1
+                continue
             found = subtitle_clean.find_subtitles(
                 it.path, want, self.cfg.whisper_output_dir or None)
             if not found:
                 missing.append(it.path)
         if aux:
             self.log.emit(f"已忽略 {aux} 个预告片 / 主题视频（它们不需要字幕）")
+        if skipped_audio:
+            self.log.emit(f"已忽略 {skipped_audio} 个音频文件（只对视频生成字幕）")
         self.log.emit(f"其中 {len(missing)} 个没有同名字幕文件"
                       f"（按扩展名 {'/'.join(want)} 判断；设置里的"
                       f"「字幕扩展名」共 {len(checker)} 项）")
@@ -136,7 +149,19 @@ class SubtitleGenPage(QWidget):
         self.lbl_tool.setProperty("cssClass", "subtitle")
         lay.addWidget(self.lbl_tool)
 
+        self.lbl_patch = QLabel()
+        self.lbl_patch.setWordWrap(True)
+        self.lbl_patch.setProperty("cssClass", "subtitle")
+        lay.addWidget(self.lbl_patch)
+
         row2 = QHBoxLayout()
+        self.btn_patch = QPushButton("修补编码问题")
+        self.btn_patch.setToolTip(
+            "这个第三方工具在中文 Windows 上有个已知 bug：它在开工前打印带 emoji 的\n"
+            "声明，而冻结后的 stdout 编码是 GBK → 一跑就报 UnicodeEncodeError、\n"
+            "实际什么活都没干。这个按钮会给它打一个最小补丁（自动备份原文件）。")
+        self.btn_patch.clicked.connect(self._apply_encoding_patch)
+        row2.addWidget(self.btn_patch)
         btn_help = QPushButton("怎么获取？")
         btn_help.clicked.connect(self._show_hint)
         row2.addWidget(btn_help)
@@ -366,6 +391,42 @@ class SubtitleGenPage(QWidget):
             text += "　（建议点一下「探测能力」，参数会按实际支持情况发送）"
         self.lbl_tool.setText("当前工具：" + text)
 
+        # 编码补丁状态：中文 Windows 上不打这个补丁，工具一跑就崩
+        if not exe:
+            self.lbl_patch.setText("")
+            self.btn_patch.setEnabled(False)
+            return
+        src = whisper_tool.find_infer_source(str(exe))
+        if not src:
+            self.lbl_patch.setText(
+                "⚠️ 没找到该工具的可修补源码（_internal/…/infer.py）。"
+                "如果运行时报 UnicodeEncodeError，说明需要修补但找不到目标。")
+            self.btn_patch.setEnabled(False)
+            return
+        patched = whisper_tool.is_encoding_patched(src)
+        self.btn_patch.setEnabled(not patched)
+        self.lbl_patch.setText(
+            ("✅ 编码补丁：已打（这个工具在中文系统上能正常跑）"
+             if patched else
+             "❌ 编码补丁：未打 —— 这个工具在中文 Windows 上会一跑就报 "
+             "UnicodeEncodeError，实际什么活都不干。点左边「修补编码问题」修一下。")
+            + "\n　　（第三方工具重新解压/升级后需要再打一次）")
+
+    def _apply_encoding_patch(self) -> None:
+        exe = whisper_tool.find_infer_exe(self.input_tool.text().strip())
+        if not exe:
+            self._show_hint()
+            return
+        changed, note, src = whisper_tool.patch_encoding(str(exe))
+        if src:
+            self.log_panel.log(f"目标文件：{src}")
+        if changed:
+            self.log_panel.log_success(note)
+            self.log_panel.log_info("现在可以开始生成字幕了。")
+        else:
+            self.log_panel.log_info(note)
+        self._refresh_tool_status()
+
     def _show_hint(self) -> None:
         QMessageBox.information(self, "怎么获取识别工具",
                                 whisper_tool.prerequisites_hint())
@@ -383,7 +444,7 @@ class SubtitleGenPage(QWidget):
     def _add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self, "选择媒体文件", "",
-            "媒体文件 (*.mp4 *.mkv *.avi *.mov *.ts *.wmv *.flv *.mp3 *.wav *.m4a);;所有文件 (*)")
+            "视频文件 (*.mp4 *.mkv *.avi *.mov *.ts *.wmv *.flv *.webm *.rmvb);;所有文件 (*)")
         self._add_paths(paths)
 
     def _add_dir(self) -> None:
@@ -402,8 +463,11 @@ class SubtitleGenPage(QWidget):
         （仅当「只加入缺字幕的」勾选时才会发生）。两个数都汇报给用户，
         否则"我明明加了一个目录，怎么少了几百个"会变成新的困惑。
         """
+        # 只收**视频**：这是"给视频生成字幕"的功能，音频文件（.wav/.mp3 等）
+        # 混进来只会让人困惑"为什么音频也要字幕"。扩展名以配置为准。
         exts = {it.lower() for it in (self.cfg.video_extensions or [])}
-        exts |= {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".wma"}
+        if not exts:
+            exts = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".wmv", ".flv"}
         formats = self._wanted_formats() or ["srt"]
         out_dir = self.cfg.whisper_output_dir or None
         only_missing = bool(getattr(self, "chk_only_missing", None)

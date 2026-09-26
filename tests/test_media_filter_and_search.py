@@ -11,6 +11,7 @@
    而不是往清单上继续堆 —— 否则表格里始终是那上万个文件。
 """
 
+import ast
 import sys
 from pathlib import Path
 
@@ -217,3 +218,83 @@ def _cfg():
     cfg.whisper_output_dir = ""
     cfg.video_extensions = [".mp4", ".mkv"]
     return cfg
+
+
+# ── 4. 只对视频生成字幕（音频不该混进来）────────────────────
+
+def test_add_paths_rejects_audio_files(qapp, tmp_path):
+    """**用户报的问题**：为什么 .wav 这种音频也被当成"需要字幕"？
+
+    本功能是给**视频**生成字幕，音频文件混进清单只会让人困惑。
+    """
+    from ui.pages.subtitle_gen import SubtitleGenPage
+
+    (tmp_path / "A-001.mp4").write_bytes(b"x")
+    (tmp_path / "voice.wav").write_bytes(b"x")
+    (tmp_path / "music.mp3").write_bytes(b"x")
+    (tmp_path / "track.flac").write_bytes(b"x")
+
+    page = SubtitleGenPage(_cfg())
+    stats = page._add_paths([tmp_path], quiet=True)
+    assert stats["added"] == 1, "只应加入那个 mp4"
+    names = [page.list_files.item(i).text() for i in range(page.list_files.count())]
+    assert names == [str(tmp_path / "A-001.mp4")], names
+
+
+def test_default_suffixes_pass_only_video_extensions():
+    """传给引擎的 ``--audio_suffixes`` 不该含音频扩展名。
+
+    实测上游拿到 ``wav: True`` 就真的会去处理音频 —— 源头不该给。
+    """
+    from utils import whisper_tool
+
+    got = whisper_tool.default_audio_suffixes([".mp4", ".mkv"])
+    assert got == "mp4,mkv"
+    for audio in ("wav", "mp3", "flac", "m4a"):
+        assert audio not in got.split(","), audio
+
+
+# ── 5. 第三方工具的编码补丁 ─────────────────────────────────
+
+_FAKE_INFER = """#!/usr/bin/env python3
+import argparse
+import sys
+from typing import Any
+
+def main():
+    print("=" * 70)
+    print("\u26a0\ufe0f  重要声明 / IMPORTANT NOTICE")
+    print("=" * 70)
+"""
+
+
+def test_patch_encoding_is_idempotent_and_backed_up(tmp_path):
+    """补丁要能重复执行、要留备份，且插在 import 之后（sys 已可用）。"""
+    from utils import whisper_tool
+
+    src = tmp_path / "infer.py"
+    src.write_text(_FAKE_INFER, encoding="utf-8")
+
+    changed, note, target = whisper_tool.patch_encoding(str(src))
+    assert changed and target == src
+    body = src.read_text(encoding="utf-8")
+    assert whisper_tool.PATCH_MARKER in body
+    # 补丁必须在 `import sys` 之后，否则 reconfigure 时 sys 还不存在
+    assert body.index(whisper_tool.PATCH_MARKER) > body.index("import sys")
+    assert (tmp_path / "infer.py.orig").read_text(encoding="utf-8") == _FAKE_INFER
+    # 语法仍然合法 + 已经幂等
+    ast.parse(body)
+    changed2, note2, _ = whisper_tool.patch_encoding(str(src))
+    assert changed2 is False and "已经打过" in note2
+    assert whisper_tool.is_encoding_patched(src) is True
+
+
+def test_patch_encoding_handles_unexpected_structure(tmp_path):
+    """结构变了也不能把文件改坏 —— 宁可放弃并说明。"""
+    from utils import whisper_tool
+
+    src = tmp_path / "infer.py"
+    src.write_text("print('no imports here')\n", encoding="utf-8")
+    changed, note, _ = whisper_tool.patch_encoding(str(src))
+    assert changed is False
+    assert src.read_text(encoding="utf-8") == "print('no imports here')\n"

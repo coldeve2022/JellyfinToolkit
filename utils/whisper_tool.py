@@ -29,7 +29,8 @@ from typing import Optional
 
 __all__ = [
     "TOOL_NAME", "EXE_NAME", "HOMEPAGE", "MODEL_CHOICES",
-    "candidate_dirs", "find_infer_exe", "probe", "build_command",
+    "candidate_dirs", "find_infer_exe", "search_infer_exe", "probe", "build_command",
+    "find_infer_source", "is_encoding_patched", "patch_encoding", "PATCH_MARKER",
     "default_audio_suffixes", "prerequisites_hint", "describe_exe",
 ]
 
@@ -243,13 +244,17 @@ def _no_window_flags() -> int:
 
 
 def default_audio_suffixes(video_extensions=None) -> str:
-    """``--audio_suffixes`` 的默认值。
+    """``--audio_suffixes`` 的默认值（这个参数名是上游叫法，实际传的是**视频**扩展名）。
 
     刻意**复用主程序已有的视频扩展名配置**，而不是再抄一份常量 ——
     用户在「设置」里加了新扩展名时，字幕工具这边跟着生效才符合直觉。
+
+    这里**不再混入音频扩展名**（``mp3``/``wav``…）：本功能是"给视频生成字幕"，
+    音频文件混进清单只会让人困惑"为什么 wav 也要字幕"。实测上游拿到
+    ``wav: True`` 就真的会去处理音频 —— 源头不该给。
     """
     exts = []
-    for e in list(video_extensions or []) + list(_AUDIO_EXTS):
+    for e in list(video_extensions or []):
         e = str(e).strip().lstrip(".").lower()
         if e and e not in exts:
             exts.append(e)
@@ -429,3 +434,94 @@ def run_one(infer_exe, media_path, *, on_line=None, should_stop=None,
     if not result["error"] and result["code"] not in (0, None):
         result["error"] = describe_exit_code(result["code"])
     return result
+
+# ── 编码补丁（中文 Windows 上不打必崩）──────────────────────
+
+#: 补丁标记 —— 用它判断是否已经打过
+PATCH_MARKER = "# [JellyfinToolkit 补丁]"
+
+#: 插入到 infer.py 里的代码。
+#: 上游在 main() 开头**无条件**打印带 emoji 的开源声明，而它冻结后的 stdout 编码是
+#: 系统 ANSI 代码页（中文 Windows = GBK）→ UnicodeEncodeError → 进程在任何实际工作
+#: **之前**就退出。表现为"一跑就报错、什么活都没干"。
+#: （`--help` 反而是好的：argparse 在打印通知之前就退出了 —— 所以"能探测出参数"
+#: 不代表"能干活"。）
+#: 实测 PYTHONIOENCODING / PYTHONUTF8 对该打包版**全部无效**（冻结后的解释器不读
+#: 这些变量），所以只能改文件 —— 好在它把源码放在 _internal 下，改了就生效。
+_PATCH_BODY = '''{marker}
+# 中文 Windows 上这个打包版会在开工前打印带 emoji 的开源声明，而它冻结后的
+# stdout 编码是 GBK → UnicodeEncodeError，**每次运行必崩、实际什么活都没干**。
+# 下面让编码错误不再抛异常；输出是管道时（调用方按 UTF-8 读）切成 UTF-8，
+# 这样中文与 emoji 都能原样传回去。详见 JellyfinToolkit 的 docs/第三方工具集成.md。
+try:
+    _jt_out_enc = None if sys.stdout.isatty() else "utf-8"
+    sys.stdout.reconfigure(encoding=_jt_out_enc, errors="replace")
+    _jt_err_enc = None if sys.stderr.isatty() else "utf-8"
+    sys.stderr.reconfigure(encoding=_jt_err_enc, errors="replace")
+except Exception:
+    pass
+'''
+
+
+def find_infer_source(explicit: str = "") -> Optional[Path]:
+    """定位 ``infer.exe`` 同级 ``_internal/<包名>/infer.py``（补丁要改的就是它）。"""
+    exe = None
+    if explicit:
+        p = Path(str(explicit).strip().strip('"'))
+        exe = p if (p.is_file() and p.suffix.lower() == ".py") else \
+            _exe_in(p) or p if p.is_dir() else p if p.is_file() else None
+        if exe and Path(exe).suffix.lower() == ".py":
+            return Path(exe)
+    if not exe:
+        exe = find_infer_exe(explicit)
+    if not exe:
+        return None
+    for candidate in sorted((Path(exe).parent / "_internal").glob("*/infer.py")):
+        return candidate
+    return None
+
+
+def is_encoding_patched(source=None) -> bool:
+    """infer.py 是否已经打过编码补丁。找不到文件返回 ``False``。"""
+    src = Path(source) if source else find_infer_source("")
+    if not src or not Path(src).is_file():
+        return False
+    try:
+        return PATCH_MARKER in Path(src).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def patch_encoding(source=None, backup: bool = True) -> tuple:
+    """打补丁，返回 ``(是否改动, 说明, 目标文件)``。
+
+    可重复执行：已打过就跳过。原文件备份成 ``infer.py.orig``。
+    **第三方工具升级/重新解压后需要再打一次**。
+    """
+    src = Path(source) if source else find_infer_source("")
+    if not src or not Path(src).is_file():
+        return False, "没找到 infer.exe 对应的 infer.py（请先指定工具位置）", None
+    try:
+        text = src.read_text(encoding="utf-8")
+    except OSError as e:
+        return False, f"读取失败：{e}", src
+    if PATCH_MARKER in text:
+        return False, "已经打过补丁，无需重复", src
+
+    lines = text.split("\n")
+    idx = next((i for i, l in enumerate(lines) if l.startswith("from typing import")), None)
+    if idx is None:
+        idx = next((i for i, l in enumerate(lines)
+                    if l.startswith(("import ", "from "))), None)
+    if idx is None:
+        return False, "找不到插入位置（该版本的 infer.py 结构可能变了）", src
+
+    if backup:
+        bak = src.with_suffix(src.suffix + ".orig")
+        if not bak.exists():
+            import shutil as _shutil
+            _shutil.copy2(src, bak)
+
+    lines[idx + 1:idx + 1] = ["", _PATCH_BODY.format(marker=PATCH_MARKER).rstrip()]
+    src.write_text("\n".join(lines), encoding="utf-8")
+    return True, f"已插入补丁（第 {idx + 3} 行起），原文件备份为 {src.name}.orig", src
