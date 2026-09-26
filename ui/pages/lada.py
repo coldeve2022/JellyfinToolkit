@@ -15,9 +15,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGroupBox, QHBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QSpinBox,
     QVBoxLayout, QWidget,
 )
@@ -420,16 +420,28 @@ class LadaPage(QWidget):
                 self.log_panel.log_warning(f"路径已生效，但写入配置失败：{e}")
 
     def _autodetect(self) -> None:
-        found = lada_tool.find_lada_cli(self.input_tool.text().strip())
+        """三档查找 + 把过程写进日志（原实现只认固定目录名，实际找不到）。"""
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.log_panel.log_info("正在查找 lada-cli.exe（会扫一遍各盘的浅层目录，通常几秒）…")
+        QApplication.processEvents()
+        try:
+            info = lada_tool.search_lada_cli(self.input_tool.text().strip(),
+                                             log=self.log_panel.log)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        found = info.get("path")
         if not found:
-            self.log_panel.log_warning("自动检测没找到 lada-cli.exe。")
+            self.log_panel.log_warning(
+                f"没有找到 lada-cli.exe（扫过 {info.get('scanned', 0)} 个目录，"
+                f"用时 {info.get('elapsed', 0):.1f} 秒）。下面告诉你手动怎么指定。")
             self._show_hint()
             return
         self.input_tool.setText(str(found))
         self.tool_options = None
         self._save_tool_path()
         self._refresh_tool_status()
-        self.log_panel.log_success(f"已定位：{found}")
+        self.log_panel.log_success(f"已定位：{found}（{info.get('source', '')}）")
 
     def _probe(self) -> None:
         cli = lada_tool.find_lada_cli(self.input_tool.text().strip())

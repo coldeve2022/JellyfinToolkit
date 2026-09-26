@@ -253,6 +253,36 @@ def split_path_name(p: str) -> str:
     return str(p).replace(chr(92), "/").rstrip("/").rsplit("/", 1)[-1]
 
 
+#: 附属文件（预告片/主题视频/背景图等）的固定文件名（不含扩展名）。
+#: Jellyfin 生成这些文件用于界面展示，**不是正片** —— 不该参与分析、修复、
+#: 更不该给它生成字幕。
+AUXILIARY_STEMS = frozenset({
+    "trailer", "theme", "theme_video", "theme-video", "theme_videos",
+    "theme_video_1", "backdrop", "poster", "sample", "thumb", "fanart",
+    "behind the scenes", "deleted scenes", "interview", "featurette", "short",
+})
+
+#: 预告片/样片的两种写法：`xxx-trailer`、`xxx.sample`。
+#: ``[\s._\-]`` 是分隔符（下划线、点、连字符、空格都算）。
+#: 刻意**不做** ``trailer-xxx`` 的"前缀"判定 —— 那会把正片
+#: 《Trailer Park Boys》误判成预告片（实测踩过），而前缀写法本身很少见。
+_AUX_SUFFIX_RE = re.compile(r"(?:^|[\s._\-])(trailer|sample)s?$", re.I)
+
+#: ``theme_video`` 是最明确的附属标记：正常片名不会带下划线的这个词，
+#: 所以用"包含"判定；从而同时覆盖 ``theme_video.mp4`` 与
+#: ``ABC-001-theme_video.mp4`` 这两种 Jellyfin 命名。
+_AUX_THEME_VIDEO_RE = re.compile(r"theme[\s._\-]?video", re.I)
+
+#: 附属**目录**名（按完整路径段匹配）。
+#: 按段匹配而不是"路径里含这个字串"，是为了避免把正片名里的字串当成目录名。
+AUXILIARY_PATH_SEGMENTS = (
+    "/trailers/", "/trailer/", "/backdrops/", "/backdrop/", "/extras/",
+    "/featurettes/", "/shorts/", "/scenes/", "/interviews/",
+    "/behind the scenes/", "/deleted scenes/", "/theme videos/",
+    "/theme_videos/", "/theme-videos/", "/others/", "/specials/",
+)
+
+
 def is_junk_attachment_path(path: str, name: Optional[str] = None) -> bool:
     """判断一个路径是否为 Jellyfin 生成的附属文件（非正片）。
 
@@ -276,13 +306,17 @@ def is_junk_attachment_path(path: str, name: Optional[str] = None) -> bool:
     # 去掉扩展名，与 Jellyfin 附属命名（如 theme_video / theme / backdrop / fanart\d*）比对
     stem = re.sub(r"\.(mp4|mkv|avi|mov|wmv|flv|ts|rmvb|jpg|jpeg|png|webp|gif)$",
                   "", base, flags=re.I).strip().lower()
-    if stem in ("trailer", "theme", "theme_video", "theme_video_1", "backdrop", "poster"):
+    if stem in AUXILIARY_STEMS:
         return True
     if re.fullmatch(r"fanart\d*", stem):
         return True
-    # 路径含 Jellyfin 背景/辅助目录
-    pth = str(path).lower()
-    if "/backdrops" in pth or "\\backdrops" in pth or "\\backdrop" in pth or "/backdrop" in pth:
+    if _AUX_THEME_VIDEO_RE.search(stem):
+        return True
+    if _AUX_SUFFIX_RE.search(stem):
+        return True
+    # 路径里含 Jellyfin 的附属目录（trailers/backdrops/extras…）
+    pth = str(path).lower().replace(chr(92), "/")
+    if any(seg in pth for seg in AUXILIARY_PATH_SEGMENTS):
         return True
     return False
 

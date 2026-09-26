@@ -277,7 +277,7 @@ def main() -> int:
     print(f"    4. git tag -a v{new} -m \"v{new}\" && git push origin v{new}")
     print("    5. 等 Actions 变绿（它会自动构建 + 校验 + 生成 Release）")
     print()
-    print("  详见 docs/版本管理与发版流程.md")
+    print("  详见 docs/版本管理.md")
     return 0
 
 

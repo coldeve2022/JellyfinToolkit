@@ -147,15 +147,23 @@ def test_find_infer_exe_accepts_file_or_directory(tmp_path):
     exe2.write_bytes(b"")
     outer = tmp_path / "outer"
     outer.mkdir()
-    assert whisper_tool.find_infer_exe(str(outer)) is None
-    (outer / "lada-0.11").mkdir()
-    exe3 = outer / "lada-0.11" / "infer.exe"
+    (outer / "faster-whisper-v1").mkdir()
+    exe3 = outer / "faster-whisper-v1" / "infer.exe"
     exe3.write_bytes(b"")
     assert whisper_tool.find_infer_exe(str(outer)) == exe3
 
 
 def test_find_infer_exe_returns_none_not_raises(tmp_path, monkeypatch):
+    """全都不命中时必须返回 None（而不是抛异常）。
+
+    注意要**同时**把盘列表清空：现在的契约是"已知位置没命中就按名称搜盘"，
+    只清 candidate_dirs 仍会去搜真实硬盘（本机确实装着 infer.exe），
+    那样测试就跟机器状态绑定了。
+    """
+    from utils import tool_search
+
     monkeypatch.setattr(whisper_tool, "candidate_dirs", lambda *a, **k: [])
+    monkeypatch.setattr(tool_search, "drives", lambda: [])
     assert whisper_tool.find_infer_exe(str(tmp_path / "nope")) is None
     assert "未找到" in whisper_tool.describe_exe(None)
     assert "github.com" in whisper_tool.prerequisites_hint()

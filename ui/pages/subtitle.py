@@ -169,10 +169,16 @@ class SubtitlePage(QWidget):
         self._worker = FileScannerWorker(
             dirs, exts, min_bytes, checked_files=self._checked,
         )
+        self._worker.skipped.connect(self._on_skipped)
         self._worker.progress.connect(self._on_progress)
         self._worker.file_found.connect(self._on_file_found)
         self._worker.finished.connect(self._on_finished)
         self._worker.start()
+
+    def _on_skipped(self, count: int) -> None:
+        """预告片/主题视频本来就不需要字幕，跳过是正常的 —— 但要说明白。"""
+        self.log_panel.log_info(
+            f"已忽略 {count} 个预告片 / 主题视频（它们不需要字幕）")
 
     def _on_progress(self, filename: str, pct: int) -> None:
         self.status_label.setText(f"正在检查: {filename}")

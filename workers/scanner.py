@@ -5,6 +5,8 @@ from typing import List, Set, Optional
 
 from PySide6.QtCore import QThread, Signal
 
+from utils.library import is_junk_attachment_path
+
 
 class FileScannerWorker(QThread):
     """遍历目录，收集符合条件的文件路径。
@@ -14,6 +16,7 @@ class FileScannerWorker(QThread):
 
     progress = Signal(str, int)            # 当前文件名, 进度百分比
     file_found = Signal(str, str)          # 文件名, 绝对路径
+    skipped = Signal(int)                  # 跳过的附属文件数（预告片/主题视频等）
     finished = Signal(list, list)          # 找到的文件路径列表, 已检查路径列表
 
     def __init__(self, directories: List[str], extensions: Set[str],
@@ -27,6 +30,8 @@ class FileScannerWorker(QThread):
         self._checked: Set[str] = set(checked_files or [])
         self._paused = False
         self._stopped = False
+        #: 被跳过的附属文件数（预告片 / 主题视频），供界面如实汇报
+        self._skipped = 0
 
     @property
     def is_paused(self) -> bool:
@@ -76,6 +81,14 @@ class FileScannerWorker(QThread):
                 self.progress.emit(fp.name, int((i + 1) / total * 100))
                 continue
 
+            # 预告片 / 主题视频（trailers\、theme_video 等）是 Jellyfin 生成给界面用的，
+            # 不是正片 —— 给它们生成字幕既没意义又会把列表淹掉。
+            if is_junk_attachment_path(path_str):
+                self._skipped += 1
+                self._checked.add(path_str)
+                self.progress.emit(fp.name, int((i + 1) / total * 100))
+                continue
+
             try:
                 if self._min_size > 0 and fp.stat().st_size < self._min_size:
                     self._checked.add(path_str)
@@ -90,4 +103,6 @@ class FileScannerWorker(QThread):
             pct = int((i + 1) / total * 100)
             self.progress.emit(fp.name, pct)
 
+        if self._skipped:
+            self.skipped.emit(self._skipped)
         self.finished.emit(results, list(self._checked))

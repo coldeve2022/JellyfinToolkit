@@ -49,6 +49,11 @@ _SUB_FORMATS = ("srt", "vtt", "txt", "lrc")
 
 _ENV_KEYS = ("JELLYFIN_TOOLKIT_WHISPER_DIR", "WHISPER_TOOL_DIR")
 
+#: 目录名里出现这些词就认为"可能放着 infer.exe"。
+#: 实测用户的目录叫 ``faster_whisper_transwithai_windows_cu122-chickenrice``，
+#: 只认固定名字是找不到的。
+SEARCH_KEYWORDS = ("whisper", "transwithai", "trans_with_ai")
+
 #: 常见落点：让"把工具解压到某个盘"的用户不必手工填路径。
 #: 这里只列**相对名**，由候选目录逻辑去各盘根拼，避免出现具体盘符。
 _DROP_IN_NAMES = (
@@ -137,25 +142,41 @@ def _exe_in(directory: Path) -> Optional[Path]:
     return None
 
 
+def search_infer_exe(configured: str = "", extra_dirs: Optional[list] = None,
+                     time_budget: float = 12.0, log=None) -> dict:
+    """定位 ``infer.exe``，**连搜索过程一起返回**（界面要用它解释"搜了哪儿"）。
+
+    顺序：显式配置 → 已知常见位置（快） → 按名称关键词在盘上浅层搜索（慢但管用）。
+
+    最后一档是必需的：用户实际把它解压在
+    ``E://faster_whisper_transwithai_windows_cu122-chickenrice`` 这种带版本号与
+    平台后缀的目录里，只认固定目录名的话必然找不到，用户看到的就是
+    "点了自动检测只弹一个提示框"。
+    """
+    from utils import tool_search
+
+    if configured:
+        hit = tool_search.exe_in_dir(Path(configured.strip().strip('"')), (EXE_NAME,))
+        if hit:
+            return {"path": hit, "source": "设置里指定的位置", "scanned": 0,
+                    "elapsed": 0.0, "stopped_early": False}
+    for d in candidate_dirs("", extra=extra_dirs):
+        hit = tool_search.exe_in_dir(d, (EXE_NAME,))
+        if hit:
+            return {"path": hit, "source": f"已知常见位置：{d}", "scanned": 0,
+                    "elapsed": 0.0, "stopped_early": False}
+    return tool_search.find_executable(
+        (EXE_NAME,), SEARCH_KEYWORDS, extra_dirs=extra_dirs,
+        time_budget=time_budget, log=log)
+
+
 def find_infer_exe(configured: str = "", extra_dirs: Optional[list] = None) -> Optional[Path]:
     """定位 ``infer.exe``；找不到返回 ``None``（**不抛异常**）。
 
     ``configured`` 允许直接指向 exe 本身，也允许指向它所在的目录 ——
     用户在设置里两种填法都会出现，没必要让他们猜。
     """
-    if configured:
-        p = Path(configured.strip().strip('"'))
-        if p.is_file():
-            return p
-        hit = _exe_in(p)
-        if hit:
-            return hit
-    # 配置项没命中（或压根没配）才去猜常见位置
-    for d in candidate_dirs("", extra=extra_dirs):
-        hit = _exe_in(d)
-        if hit:
-            return hit
-    return None
+    return search_infer_exe(configured, extra_dirs)["path"]
 
 
 # ── 能力探测 ────────────────────────────────────────────────

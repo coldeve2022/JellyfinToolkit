@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from config import ToolkitConfig
 from ui.widgets import DragDropListWidget, InfoCard, LogPanel
 from utils import subtitle_clean, whisper_tool
+from utils.library import is_junk_attachment_path
 from workers.whisper_gen import WhisperGenWorker
 
 
@@ -48,15 +49,22 @@ class _MissingSubtitleScan(QThread):
             return
         self.log.emit(f"库里共 {len(items)} 个条目，正在检查字幕…")
         missing = []
+        aux = 0
         checker = getattr(self.cfg, "subtitle_extensions", None) or [".srt"]
         want = [str(f).lstrip(".") for f in self.formats]
         for it in items:
             if not it.path or not Path(it.path).is_file():
                 continue
+            # 预告片 / 主题视频不是正片，本来就不需要字幕 —— 直接不算进来
+            if is_junk_attachment_path(it.path):
+                aux += 1
+                continue
             found = subtitle_clean.find_subtitles(
                 it.path, want, self.cfg.whisper_output_dir or None)
             if not found:
                 missing.append(it.path)
+        if aux:
+            self.log.emit(f"已忽略 {aux} 个预告片 / 主题视频（它们不需要字幕）")
         self.log.emit(f"其中 {len(missing)} 个没有同名字幕文件"
                       f"（按扩展名 {'/'.join(want)} 判断；设置里的"
                       f"「字幕扩展名」共 {len(checker)} 项）")
@@ -227,6 +235,16 @@ class SubtitleGenPage(QWidget):
         self.list_files.files_dropped.connect(self._add_paths)
         lay.addWidget(self.list_files, 1)
 
+        row2 = QHBoxLayout()
+        self.chk_only_missing = QCheckBox("只加入缺字幕的（忽略已有字幕的视频）")
+        self.chk_only_missing.setChecked(True)
+        self.chk_only_missing.setToolTip(
+            "勾选时：添加目录/文件会跳过已经有同名字幕的，也会跳过预告片与主题视频。\n"
+            "想重新生成已有字幕（配合「覆盖已有字幕」）时，取消勾选。")
+        row2.addWidget(self.chk_only_missing)
+        row2.addStretch()
+        lay.addLayout(row2)
+
         self.lbl_count = QLabel("共 0 个文件")
         self.lbl_count.setProperty("cssClass", "subtitle")
         lay.addWidget(self.lbl_count)
@@ -293,16 +311,33 @@ class SubtitleGenPage(QWidget):
                 self.log_panel.log_warning(f"路径已生效，但写入配置失败：{e}")
 
     def _autodetect(self) -> None:
-        found = whisper_tool.find_infer_exe(self.input_tool.text().strip())
+        """按「设置指定 → 常见位置 → 按名称搜索」三档查找，并把过程写进日志。
+
+        原来只认几个固定目录名（lada、faster-whisper…），而真实目录往往带
+        版本号与平台后缀（``faster_whisper_transwithai_windows_cu122-chickenrice``），
+        于是必然找不到 —— 用户看到的就是"点了只弹一个窗口"。
+        """
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.log_panel.log_info("正在查找 infer.exe（会扫一遍各盘的浅层目录，通常几秒）…")
+        QApplication.processEvents()
+        try:
+            info = whisper_tool.search_infer_exe(self.input_tool.text().strip(),
+                                                 log=self.log_panel.log)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        found = info.get("path")
         if not found:
-            self.log_panel.log_warning("自动检测没找到 infer.exe。")
+            self.log_panel.log_warning(
+                f"没有找到 infer.exe（扫过 {info.get('scanned', 0)} 个目录，"
+                f"用时 {info.get('elapsed', 0):.1f} 秒）。下面告诉你手动怎么指定。")
             self._show_hint()
             return
         self.input_tool.setText(str(found))
         self.tool_options = None
         self._save_tool_path()
         self._refresh_tool_status()
-        self.log_panel.log_success(f"已定位：{found}")
+        self.log_panel.log_success(f"已定位：{found}（{info.get('source', '')}）")
 
     def _probe(self) -> None:
         exe = whisper_tool.find_infer_exe(self.input_tool.text().strip())
@@ -356,27 +391,59 @@ class SubtitleGenPage(QWidget):
         if path:
             self._add_paths([path])
 
-    def _add_paths(self, paths) -> None:
+    def _wanted_formats(self) -> list:
+        return [f.strip() for f in
+                (self.combo_formats.currentData() or "srt").split(",") if f.strip()]
+
+    def _add_paths(self, paths, quiet: bool = False) -> dict:
+        """把路径加进清单，返回 ``{"added","aux","has_sub"}`` 三个计数。
+
+        ``aux`` = 被忽略的预告片/主题视频；``has_sub`` = 因为已有字幕而没加入的
+        （仅当「只加入缺字幕的」勾选时才会发生）。两个数都汇报给用户，
+        否则"我明明加了一个目录，怎么少了几百个"会变成新的困惑。
+        """
         exts = {it.lower() for it in (self.cfg.video_extensions or [])}
         exts |= {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".wma"}
+        formats = self._wanted_formats() or ["srt"]
+        out_dir = self.cfg.whisper_output_dir or None
+        only_missing = bool(getattr(self, "chk_only_missing", None)
+                            and self.chk_only_missing.isChecked())
         existing = {self.list_files.item(i).text()
                     for i in range(self.list_files.count())}
-        added = 0
+        stats = {"added": 0, "aux": 0, "has_sub": 0}
+
+        def consider(f: Path) -> None:
+            s = str(f)
+            if s in existing:
+                return
+            if is_junk_attachment_path(s):
+                stats["aux"] += 1
+                return
+            if only_missing and subtitle_clean.find_subtitles(f, formats, out_dir):
+                stats["has_sub"] += 1
+                return
+            self.list_files.addItem(s)
+            existing.add(s)
+            stats["added"] += 1
+
         for raw in paths or []:
             p = Path(str(raw))
             if p.is_dir():
                 for f in sorted(p.rglob("*")):
-                    if f.is_file() and f.suffix.lower() in exts and str(f) not in existing:
-                        self.list_files.addItem(str(f))
-                        existing.add(str(f))
-                        added += 1
-            elif p.is_file() and str(p) not in existing:
-                self.list_files.addItem(str(p))
-                existing.add(str(p))
-                added += 1
-        if added:
-            self.log_panel.log_success(f"已添加 {added} 个文件")
+                    if f.is_file() and f.suffix.lower() in exts:
+                        consider(f)
+            elif p.is_file():
+                consider(p)
+
+        if not quiet:
+            parts = [f"已添加 {stats['added']} 个文件"]
+            if stats["aux"]:
+                parts.append(f"忽略 {stats['aux']} 个预告片/主题视频")
+            if stats["has_sub"]:
+                parts.append(f"跳过 {stats['has_sub']} 个已有字幕的")
+            self.log_panel.log_success("；".join(parts))
         self._update_count()
+        return stats
 
     def _remove_selected(self) -> None:
         for item in self.list_files.selectedItems():
@@ -404,10 +471,36 @@ class SubtitleGenPage(QWidget):
         self.scanner.start()
 
     def _on_scan_done(self, paths: list) -> None:
-        if not paths:
-            self.log_panel.log_warning("没有找到缺字幕的视频（或媒体库读取失败）。")
+        """把清单**梳理成「库里缺字幕的那些」**，而不是往清单上继续堆。
+
+        原来的实现是纯追加：用户先「添加目录」得到上万个文件，再点这个按钮，
+        日志说"添加了几个"、表格却看不出变化 —— 抱怨的正是这一点。
+        现在的语义是：**先移走清单里已有字幕的，再补上缺字幕但不在清单里的**。
+        """
+        formats = self._wanted_formats() or ["srt"]
+        out_dir = self.cfg.whisper_output_dir or None
+
+        removed = 0
+        for i in range(self.list_files.count() - 1, -1, -1):
+            item = self.list_files.item(i)
+            if item is None:
+                continue
+            if subtitle_clean.find_subtitles(item.text(), formats, out_dir):
+                self.list_files.takeItem(i)
+                removed += 1
+
+        stats = self._add_paths(paths, quiet=True) if paths else {
+            "added": 0, "aux": 0, "has_sub": 0}
+        total = self.list_files.count()
+        if not paths and not removed:
+            self.log_panel.log_warning("媒体库里没有缺字幕的视频（或媒体库读取失败）。")
             return
-        self._add_paths(paths)
+        parts = [f"清单已梳理：移除 {removed} 个已有字幕的",
+                 f"新增 {stats['added']} 个缺字幕的",
+                 f"当前共 {total} 个"]
+        if stats["aux"]:
+            parts.append(f"（另忽略 {stats['aux']} 个预告片/主题视频）")
+        self.log_panel.log_success("；".join(parts))
 
     # ── 运行 ──
     def _start(self) -> None:

@@ -46,6 +46,9 @@ OUTPUT_PATTERN = "{orig_file_name}.restored.mp4"
 
 _ENV_KEYS = ("JELLYFIN_TOOLKIT_LADA_DIR", "LADA_CLI", "LADA_HOME")
 
+#: 目录名含这些词就认为"可能放着 lada-cli.exe"（用户实际叫 lada-v0.11.0_windows_nvidia）
+SEARCH_KEYWORDS = ("lada",)
+
 #: 常见落点。只列**相对名**，由候选目录逻辑去各盘根拼，源码里不出现具体盘符。
 _DROP_IN_NAMES = (
     "lada",
@@ -124,23 +127,36 @@ def _cli_in(directory: Path) -> Optional[Path]:
     return None
 
 
+def search_lada_cli(configured: str = "", extra_dirs: Optional[list] = None,
+                    time_budget: float = 12.0, log=None) -> dict:
+    """定位 ``lada-cli.exe``，**连搜索过程一起返回**。
+
+    最后一档按名称关键词在盘上浅层搜索 —— 用户的目录叫
+    ``lada-v0.11.0_windows_nvidia``，只认固定名字同样找不到。
+    """
+    from utils import tool_search
+
+    if configured:
+        hit = tool_search.exe_in_dir(Path(configured.strip().strip('"')), (EXE_NAME,))
+        if hit:
+            return {"path": hit, "source": "设置里指定的位置", "scanned": 0,
+                    "elapsed": 0.0, "stopped_early": False}
+    for d in candidate_dirs("", extra=extra_dirs):
+        hit = tool_search.exe_in_dir(d, (EXE_NAME,))
+        if hit:
+            return {"path": hit, "source": f"已知常见位置：{d}", "scanned": 0,
+                    "elapsed": 0.0, "stopped_early": False}
+    return tool_search.find_executable(
+        (EXE_NAME,), SEARCH_KEYWORDS, extra_dirs=extra_dirs,
+        time_budget=time_budget, log=log)
+
+
 def find_lada_cli(configured: str = "", extra_dirs: Optional[list] = None) -> Optional[Path]:
     """定位 ``lada-cli.exe``；找不到返回 ``None``。
 
     接受三种填法：exe 本身、它所在目录、Lada 解压后的顶层目录。
     """
-    if configured:
-        p = Path(configured.strip().strip('"'))
-        if p.is_file():
-            return p
-        hit = _cli_in(p)
-        if hit:
-            return hit
-    for d in candidate_dirs("", extra=extra_dirs):
-        hit = _cli_in(d)
-        if hit:
-            return hit
-    return None
+    return search_lada_cli(configured, extra_dirs)["path"]
 
 
 # ── 能力探测 ────────────────────────────────────────────────

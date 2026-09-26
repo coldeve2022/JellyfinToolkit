@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jellyfin-toolkit"
-version = "3.8.1"
+version = "3.8.2"
 description = "Jellyfin / Emby 影视库管理工具箱 — 库概览 / 喜好画像 / 打标 / 去重 / 字幕 / 修复 / 分集合并"
 readme = "README.md"
 requires-python = ">=3.9"
