@@ -11,9 +11,11 @@
 2. **每个已发布的版本在归档目录里各占一个 `vX.Y.Z\\` 子目录，永不修改** ——
    里面有发行包、校验值、本版说明、版本信息，以及一个**解压好、双击就能跑**的 `运行\\`。
 
-归档目录**不在源码仓库里**（一个版本 50 MB，进去会把 git 撑爆），
-默认放在 `D:\\常用jellyfin整理小工具\\JellyfinToolkit-releases\\`，
-可以用参数或环境变量 ``JELLYFIN_TOOLKIT_ARCHIVE`` 覆盖。
+归档目录**不在源码仓库里**（一个版本 50 MB，进去会把 git 撑爆）。
+位置按这个顺序决定：`--archive` 参数 → 环境变量 ``JELLYFIN_TOOLKIT_ARCHIVE``
+→ 上次记住的位置（第一次用 ``--archive`` 传过之后就会记住）
+→ 兜底用 `~/JellyfinToolkit-releases`。
+**源码里刻意不写任何本机路径** —— 别人拿到也该能用。
 
 用法
 ----
@@ -40,12 +42,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-#: 归档根目录。改这里或设环境变量 JELLYFIN_TOOLKIT_ARCHIVE 都行。
-DEFAULT_ARCHIVE = Path(r"D:\常用jellyfin整理小工具\JellyfinToolkit-releases")
-
 REPO_URL = "https://github.com/coldeve2022/JellyfinToolkit"
 APP_ID = "JellyfinToolkit"
 INDEX_NAME = "INDEX.md"
+
+#: 归档根目录的默认值。
+#: **刻意不写任何本机路径** —— 源码里出现 `D:\某个人的文件夹` 会让别人拿到后用不了，
+#: 也会被仓库的"个人路径守卫"拦下（实测被拦过一次）。
+#: 想固定到某处，用 `--archive` 传一次即可，之后会被记住（见 archive_root）。
+DEFAULT_ARCHIVE = Path.home() / "JellyfinToolkit-releases"
+
+#: 记住"上次用的归档位置"，免得每次都敲 --archive
+ARCHIVE_POINTER = (Path(os.environ.get("LOCALAPPDATA") or Path.home())
+                   / APP_ID / "archive_root.txt")
 
 
 # ── 基础工具 ──────────────────────────────────────────────
@@ -70,11 +79,33 @@ def force_utf8_stdout() -> None:
             continue
 
 
+def _remember_root(path: Path) -> None:
+    """把归档位置记下来，下次不用再传 --archive。"""
+    try:
+        ARCHIVE_POINTER.parent.mkdir(parents=True, exist_ok=True)
+        ARCHIVE_POINTER.write_text(str(path), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def archive_root(explicit: str = "") -> Path:
-    """归档根目录：参数 → 环境变量 → 默认值。"""
-    for cand in (explicit, os.environ.get("JELLYFIN_TOOLKIT_ARCHIVE", ""), str(DEFAULT_ARCHIVE)):
+    """归档根目录：参数 → 环境变量 → **上次记住的位置** → 用户目录下的默认值。
+
+    优先级这样排是为了：显式指定永远最优先；日常用起来不必反复敲参数
+    （记住上次的选择）；最后才落到一个对任何机器都成立的默认值。
+    """
+    for cand in (explicit, os.environ.get("JELLYFIN_TOOLKIT_ARCHIVE", "")):
         if cand:
-            return Path(cand).expanduser()
+            p = Path(cand).expanduser()
+            _remember_root(p)
+            return p
+    try:
+        if ARCHIVE_POINTER.is_file():
+            saved = ARCHIVE_POINTER.read_text(encoding="utf-8").strip()
+            if saved:
+                return Path(saved)
+    except OSError:
+        pass
     return DEFAULT_ARCHIVE
 
 
