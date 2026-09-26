@@ -278,8 +278,13 @@ jellyfin-toolkit/
 
 ## 开发
 
-版本号规则与完整发版流程见 **[docs/版本管理与发版流程.md](docs/版本管理与发版流程.md)**；
-一条命令查当前状态：`python scripts/version_manage.py status`。
+版本号规则、目录规范与完整发版流程见 **[docs/版本管理.md](docs/版本管理.md)**；
+两条命令各管一件事：
+
+```bash
+python scripts/version_manage.py status   # 版本号一致性（version.py / pyproject / CHANGELOG）
+python scripts/release_flow.py status     # 已归档的发行包与旧版本查阅
+```
 
 ```bash
 pip install -r requirements-dev.txt
