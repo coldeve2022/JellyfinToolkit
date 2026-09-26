@@ -483,6 +483,15 @@ def _download_with_proxy(version: str, tmp: Path, proxy: str) -> bool:
                     if not chunk:
                         break
                     fh.write(chunk)
+        except urllib.error.HTTPError as e:
+            # 416 = 服务端给不了这个字节范围。本地已有文件时，几乎总是因为**它已经完整**
+            # （比如上一次跑到一半被中断、或者同一个版本归档了两遍）—— 视为成功。
+            # 注意 HTTPError 是 URLError 的子类，必须放在前面捕获。
+            if e.code == 416 and already:
+                print(f"  = {asset['name']} 已完整（{already / 1048576:.1f} MB），跳过")
+                continue
+            print(f"  ❌ 下载 {asset['name']} 失败：HTTP {e.code} {e.reason}")
+            return False
         except (urllib.error.URLError, OSError) as e:
             print(f"  ❌ 下载 {asset['name']} 失败：{e}")
             return False

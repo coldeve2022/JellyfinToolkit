@@ -178,3 +178,42 @@ def test_archive_from_github_fails_gracefully_with_bad_proxy(tmp_path):
                                  proxy="http://127.0.0.1:1")
     assert ok is False
     assert not list(tmp_path.glob("v3.8.1/*.zip")), "失败时不该留下半截产物"
+
+
+def test_download_treats_416_as_already_complete(tmp_path, monkeypatch):
+    """本地已有完整文件时服务端会回 416 —— 这不是失败，别把它当成下载错误。
+
+    实测踩过：同一个版本归档第二遍（或上次被中断后重跑）就会撞上 416，
+    当时被当成失败，还留下一个 49 MB 的 _download 残留目录。
+    """
+    import io
+    import json
+    import urllib.error
+    import urllib.request
+
+    mod = _load()
+    payload = json.dumps({"assets": [
+        {"name": "x-win64.zip", "url": "https://api.github.com/fake/1"},
+    ]}).encode()
+
+    class FakeResp(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeOpener:
+        def open(self, req, timeout=0):
+            url = getattr(req, "full_url", req)
+            if str(url).endswith("/releases/tags/v1.2.3"):
+                return FakeResp(payload)
+            raise urllib.error.HTTPError(str(url), 416, "Range Not Satisfiable", None, None)
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **k: FakeOpener())
+    monkeypatch.setattr(mod, "_gh_token", lambda: "")
+    (tmp_path / "x-win64.zip").write_bytes(b"already here")
+
+    assert mod._download_with_proxy("1.2.3", tmp_path, "http://127.0.0.1:1") is True
