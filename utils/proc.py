@@ -112,8 +112,15 @@ def run_streaming(cmd,
     env = dict(os.environ)
     if extra_env:
         env.update({k: str(v) for k, v in extra_env.items() if v is not None})
-    # 让被调用的程序也用 UTF-8 说话，否则中文日志在管道里会变成乱码
-    env.setdefault("PYTHONIOENCODING", "utf-8")
+    # 让被调用的程序也用 UTF-8 说话，否则中文日志在管道里会变成乱码。
+    #
+    # `utf-8:ignore`（带 errors 部分）是照着**用户原来那份可用脚本**取的：
+    # 它用 `PYTHONIOENCODING="utf-8:ignore"`，即使编码对不上也不会抛异常。
+    # 注意：对 PyInstaller 冻结的 exe（如 infer.exe）这两个变量可能**根本不被读取**
+    # —— 那种情况下靠的是控制台代码页（用户的脚本还配了 `chcp 65001` +
+    # `CREATE_NEW_CONSOLE`）。我们改用管道捕获日志，所以对这类工具另有
+    # `utils.whisper_tool.patch_encoding()` 兜底。
+    env.setdefault("PYTHONIOENCODING", "utf-8:ignore")
     env.setdefault("PYTHONUTF8", "1")
 
     flags = creation_flags(new_group=True, high_priority=high_priority)
