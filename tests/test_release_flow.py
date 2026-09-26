@@ -164,3 +164,17 @@ def test_index_on_empty_archive_is_safe(tmp_path):
     root = tmp_path / "empty"
     text = rf.rebuild_index(root).read_text(encoding="utf-8")
     assert "归档还是空的" in text
+
+def test_archive_from_github_fails_gracefully_with_bad_proxy(tmp_path):
+    """代理不可用时要返回 False 并说明，而不是抛异常把整个流程打断。
+
+    顺便固定"给 --proxy 就走自建下载路径"这个契约 —— 走这条路的原由是实测
+    ``gh release download`` 只有约 33 KB/s、而走本地代理 5.5 MB/s，
+    差两个数量级（而且 gh 不读 HTTPS_PROXY，没法用环境变量救它）。
+    """
+    mod = _load()
+    # 指向一个必然连不上的端口
+    ok = mod.archive_from_github("v3.8.1", tmp_path, extract=False,
+                                 proxy="http://127.0.0.1:1")
+    assert ok is False
+    assert not list(tmp_path.glob("v3.8.1/*.zip")), "失败时不该留下半截产物"

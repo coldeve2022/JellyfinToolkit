@@ -420,19 +420,106 @@ def rebuild_index(root: Path) -> Path:
 
 # ── 从线上拉回归档 ────────────────────────────────────────
 
-def archive_from_github(tag: str, root: Path, extract: bool = True) -> bool:
-    """把线上某个 Release 的附件下载到归档（用于补回早期版本）。"""
+def _gh_token() -> str:
+    """取 gh 已保存的 token（**不打印、不落盘**）。取不到返回空串。"""
+    try:
+        r = subprocess.run(["gh", "auth", "token"], capture_output=True,
+                           text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
+def _download_with_proxy(version: str, tmp: Path, proxy: str) -> bool:
+    """走代理下载 Release 附件。
+
+    **为什么需要这条路径**：``gh release download`` 在本机实测只有约 33 KB/s
+    （51 MB 要 20 分钟以上），而同一个文件走本地代理是 5.5 MB/s ——
+    差两个数量级。而且 ``gh`` 不读 ``HTTPS_PROXY``，没法用环境变量救它。
+
+    所以这里自己下载：走 ``api.github.com`` 的 asset 接口（不是
+    ``browser_download_url`` —— 那个在 ``github.com`` 上，某些网络下直连不通），
+    带 ``Accept: application/octet-stream`` 拿二进制，并支持断点续传。
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    repo = "coldeve2022/JellyfinToolkit"
+    token = _gh_token()
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "release_flow"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    url = f"https://api.github.com/repos/{repo}/releases/tags/v{version}"
+    try:
+        with opener.open(urllib.request.Request(url, headers=headers), timeout=60) as resp:
+            meta = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        print(f"  ❌ 读取 Release 信息失败：{e}")
+        return False
+
+    assets = [a for a in meta.get("assets", [])
+              if a.get("name", "").endswith((".zip", ".sha256"))]
+    if not any(a["name"].endswith(".zip") for a in assets):
+        print("  ❌ 该 Release 没有 zip 附件")
+        return False
+
+    for asset in assets:
+        target = tmp / asset["name"]
+        already = target.stat().st_size if target.exists() else 0
+        req_headers = dict(headers)
+        req_headers["Accept"] = "application/octet-stream"
+        if already:
+            req_headers["Range"] = f"bytes={already}-"
+        try:
+            req = urllib.request.Request(asset["url"], headers=req_headers)
+            with opener.open(req, timeout=120) as resp, open(
+                    target, "ab" if already and resp.status == 206 else "wb") as fh:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+        except (urllib.error.URLError, OSError) as e:
+            print(f"  ❌ 下载 {asset['name']} 失败：{e}")
+            return False
+        size_mb = target.stat().st_size / 1048576
+        print(f"  ↓ {asset['name']}（{size_mb:.1f} MB）")
+    return True
+
+
+def archive_from_github(tag: str, root: Path, extract: bool = True,
+                        proxy: str = "") -> bool:
+    """把线上某个 Release 的附件下载到归档（用于补回早期版本）。
+
+    ``proxy`` 留空时：若设了 ``HTTPS_PROXY`` / ``JELLYFIN_TOOLKIT_PROXY`` 就用它，
+    否则退回 ``gh release download``。本机实测前者快两个数量级，所以**推荐给**。
+    """
     version = tag.strip().lstrip("vV")
     dest = root / f"v{version}"
     tmp = dest / "_download"
     tmp.mkdir(parents=True, exist_ok=True)
-    cmd = ["gh", "release", "download", f"v{version}", "--repo",
-           "coldeve2022/JellyfinToolkit", "--dir", str(tmp), "--clobber",
-           "--pattern", "*.zip", "--pattern", "*.sha256"]
-    print(f"  下载 v{version} 的发行物…")
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    if r.returncode != 0:
-        print(f"  ❌ 下载失败：{(r.stderr or r.stdout or '').strip()[:200]}")
+
+    proxy = (proxy or os.environ.get("JELLYFIN_TOOLKIT_PROXY", "")
+             or os.environ.get("HTTPS_PROXY", "")).strip()
+    print(f"  下载 v{version} 的发行物"
+          + (f"（走代理 {proxy}）" if proxy else "（gh 直连，慢网络可能很慢）") + "…")
+
+    if proxy:
+        ok = _download_with_proxy(version, tmp, proxy)
+    else:
+        cmd = ["gh", "release", "download", f"v{version}", "--repo",
+               "coldeve2022/JellyfinToolkit", "--dir", str(tmp), "--clobber",
+               "--pattern", "*.zip", "--pattern", "*.sha256"]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        ok = r.returncode == 0
+        if not ok:
+            print(f"  ❌ 下载失败：{(r.stderr or r.stdout or '').strip()[:200]}")
+
+    if not ok:
         return False
     zips = list(tmp.glob("*.zip"))
     if not zips:
@@ -526,6 +613,9 @@ def main() -> int:
                    help="标记为「从未公开发布的内部快照」——不会出现在「最新」")
     p.add_argument("--note", default="", help="配合 --unpublished 的说明文字")
     p.add_argument("--commit", default="", help="该版本对应的提交号；导入历史版本时填")
+    p.add_argument("--proxy", default="",
+                   help="从线上拉取时使用的代理，如 http://127.0.0.1:7897；"
+                        "留空则读 HTTPS_PROXY / JELLYFIN_TOOLKIT_PROXY")
 
     args = ap.parse_args()
     root = archive_root(args.archive)
@@ -541,7 +631,7 @@ def main() -> int:
 
     if args.cmd == "archive":
         if args.from_github:
-            ok = archive_from_github(args.from_github, root, not args.no_extract)
+            ok = archive_from_github(args.from_github, root, not args.no_extract, proxy=args.proxy)
             if ok:
                 rebuild_index(root)
                 print("✅ 已归档并更新索引")
