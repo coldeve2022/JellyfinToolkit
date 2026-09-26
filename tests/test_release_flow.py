@@ -88,7 +88,7 @@ def test_archive_produces_expected_layout(tmp_path):
     # 解压出的可运行副本：exe 必须落在 运行\ 根下（真实可双击）
     meta = json.loads((dest / "版本信息.json").read_text(encoding="utf-8"))
     assert (dest / meta["exe_relative"]).is_file()
-    assert meta["exe_relative"] == r"运行\JellyfinToolkit.exe"
+    assert meta["exe_relative"] == str(Path("运行") / "JellyfinToolkit.exe")
 
     # 校验值必须与文件对得上
     assert rf.sha256_of(dest / zp.name) == meta["zip_sha256"]

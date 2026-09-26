@@ -4,8 +4,8 @@
 ------------
 用户把工具解压到哪儿是自由的，之前只按**固定的几个目录名**（``lada``、
 ``faster-whisper``…）去猜，实测必然落空：真实目录常带版本号和平台后缀，
-比如 ``E:\\faster_whisper_transwithai_windows_cu122-chickenrice``、
-``D:\\…\\lada-v0.11.0_windows_nvidia`` —— 一个都猜不中，于是"自动检测"
+比如 ``…/faster_whisper_transwithai_windows_cu122-chickenrice``、
+``…/lada-v0.11.0_windows_nvidia`` —— 一个都猜不中，于是"自动检测"
 只会弹一个"没找到"的提示框，用户看到的就是"点了没反应"。
 
 所以改成**按关键词在盘上的浅层目录里找**：
@@ -181,7 +181,7 @@ def find_executable(exe_names, keywords, *, configured: str = "",
                              elapsed=time.monotonic() - started)
                 return stats
 
-            # 4) 名字像"工具目录"的，再往里看一层（如 D:\tools\<某工具>\）
+            # 4) 名字像"工具目录"的（tools / 软件 / 工具…），再往里看一层
             if not _container_like(d1.name):
                 continue
             try:

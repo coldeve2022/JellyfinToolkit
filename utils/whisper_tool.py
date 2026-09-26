@@ -149,7 +149,7 @@ def search_infer_exe(configured: str = "", extra_dirs: Optional[list] = None,
     顺序：显式配置 → 已知常见位置（快） → 按名称关键词在盘上浅层搜索（慢但管用）。
 
     最后一档是必需的：用户实际把它解压在
-    ``E://faster_whisper_transwithai_windows_cu122-chickenrice`` 这种带版本号与
+    ``…\\faster_whisper_transwithai_windows_cu122-chickenrice`` 这种带版本号与
     平台后缀的目录里，只认固定目录名的话必然找不到，用户看到的就是
     "点了自动检测只弹一个提示框"。
     """

@@ -174,13 +174,19 @@ def detect_affinity(mode: str = "auto", custom: str = "") -> dict:
 _SPEC_RE = re.compile(r"^\s*(\d+)\s*(?:-\s*(\d+)\s*)?$")
 
 
-def parse_core_spec(spec: str) -> list:
+def parse_core_spec(spec: str, limit: Optional[int] = None) -> list:
     """解析 ``"0-7,12-15"`` / ``"0,2,4"`` / ``"0-3"`` 这类写法为线程号列表。
 
     非法输入返回空列表（调用方据此回退），解析时忽略超出范围与重复项。
+
+    ``limit`` 默认取**本机逻辑核数**：超出本机的号会被丢掉（绑一个不存在的核
+    没有意义）。之所以做成参数，是因为"结果依赖跑在哪台机器上"会让测试变得
+    不稳定 —— CI 只有 4 核，``"0,2,4"`` 里的 ``4`` 就会被裁掉。
+    需要确定性时显式传入。
     """
     out: list = []
-    limit = len(_all_logical_threads())
+    if limit is None:
+        limit = len(_all_logical_threads())
     for chunk in str(spec or "").replace("，", ",").split(","):
         if not chunk.strip():
             continue

@@ -47,7 +47,7 @@ APP_ID = "JellyfinToolkit"
 INDEX_NAME = "INDEX.md"
 
 #: 归档根目录的默认值。
-#: **刻意不写任何本机路径** —— 源码里出现 `D:\某个人的文件夹` 会让别人拿到后用不了，
+#: **刻意不写任何本机路径** —— 源码里写死某个人机器上的盘符会让别人拿到后用不了，
 #: 也会被仓库的"个人路径守卫"拦下（实测被拦过一次）。
 #: 想固定到某处，用 `--archive` 传一次即可，之后会被记住（见 archive_root）。
 DEFAULT_ARCHIVE = Path.home() / "JellyfinToolkit-releases"

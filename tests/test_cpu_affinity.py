@@ -71,6 +71,11 @@ def test_windows_api_detection_returns_none_when_unavailable(monkeypatch):
 
 # ── 核心写法解析 ────────────────────────────────────────────
 
+#: 解析测试统一用一个**固定**的核数上限。不固定的话结果会随跑测试的机器变化 ——
+#: CI 只有 4 核，``"0,2,4"`` 里的 4 会被裁掉，测试就会在不同机器上给出不同结论。
+_LIMIT = 64
+
+
 @pytest.mark.parametrize("spec,expect", [
     ("0-3", [0, 1, 2, 3]),
     ("0,2,4", [0, 2, 4]),
@@ -82,19 +87,21 @@ def test_windows_api_detection_returns_none_when_unavailable(monkeypatch):
     ("-1", []),
 ])
 def test_parse_core_spec(spec, expect):
-    assert ca.parse_core_spec(spec) == expect
+    assert ca.parse_core_spec(spec, limit=_LIMIT) == expect
 
 
-def test_parse_core_spec_clamps_to_cpu_count():
-    got = ca.parse_core_spec("0-99999")
-    assert got == list(range(len(ca._all_logical_threads())))
+def test_parse_core_spec_clamps_to_given_limit():
+    """超出上限的号会被丢掉（默认上限是**本机**逻辑核数）。"""
+    assert ca.parse_core_spec("0-99999", limit=4) == [0, 1, 2, 3]
+    # 不传 limit 时用本机核数：结果长度必须等于本机逻辑核数
+    assert len(ca.parse_core_spec("0-99999")) == len(ca._all_logical_threads())
 
 
 def test_format_roundtrips_and_compresses():
     assert ca.format_core_spec([0, 1, 2, 3, 8]) == "0-3,8"
     assert ca.format_core_spec([]) == ""
     cores = [0, 1, 2, 5]
-    assert ca.parse_core_spec(ca.format_core_spec(cores)) == cores
+    assert ca.parse_core_spec(ca.format_core_spec(cores), limit=_LIMIT) == cores
 
 
 # ── 显存阈值推算 ────────────────────────────────────────────
