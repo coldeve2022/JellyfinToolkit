@@ -8,6 +8,46 @@
 
 ---
 
+## [3.9.0] — 2026-10-05
+
+按《代码重复审计报告》治理前两项（A：附属文件判定、B：扩展名清单）。
+**不改功能，但会让"哪些文件该被排除"在全场一致** —— 这本来就该一致。
+
+### 改进
+
+- **附属文件（预告片/主题视频/采样/幕后…）判定统一为一份**。
+  以前有两套词表（`utils/library.py` 的精确匹配版、`utils/merge.py` 的分词匹配版），
+  **结论不一致** —— 同一个文件在文件合并里算附属、在字幕页里算正片，
+  这正是你之前在字幕页看到 `theme`/`trailer` 被收进来的原因。
+
+  现在只保留 `utils/library.is_junk_attachment_path` 一处，
+  `merge.is_auxiliary_media` 改为委托。合并规则按**误伤成本分档**：
+
+  1. 高置信词（theme/trailer/teaser/preview/sample/预告片/花絮…）→ 认**末尾词**
+     （`ABC-001-trailer`、`[预告片]`）；
+  2. 歧义词（deleted/making/credits/short…）→ 只在**整个文件名正好是它**时才算；
+  3. 固定短语（behind the scenes / making of）与**目录名**（trailers/、extras/、
+     trickplay/…）—— 目录按**路径段精确比对**。
+
+  > 刻意**不做**"文件名里任意位置出现就算"的分词匹配：那会把正片
+  > 《Trailer Park Boys》《The Theme of Love》《Making Love》误判成附属。
+  > 这三条都是实测踩到的，不是理论推演。
+
+- **扩展名清单统一到 `utils/media_types.py`**。
+  以前有 5 处各自定义（配置、`merge.py`、`merge_archive.py`、`library.py`、
+  以及一份已无人引用的死代码）。后果是：在设置里加了 `.webm`，
+  只有走配置的那一半功能跟着变，另一半仍旧不认。
+  现在默认清单只有一份，判定函数**优先接受调用方传入的配置**。
+
+- 顺带删除死代码（v3.8.4 后无人引用的音频扩展名清单）。
+
+### 测试
+
+- 新增 `tests/test_architecture.py`：用源码扫描钉住"同一件事只允许一处实现"，
+  防止再造一份（这类问题从不让功能测试变红，只会让同一个 bug 被报第二次）。
+- 附属判定补充"正片不得误判"的用例（Trailer Park Boys / The Theme of Love /
+  Making Love）与真实库路径的用例。
+
 ## [3.8.5] — 2026-10-05
 
 ### 修复

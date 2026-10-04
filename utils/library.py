@@ -253,28 +253,54 @@ def split_path_name(p: str) -> str:
     return str(p).replace(chr(92), "/").rstrip("/").rsplit("/", 1)[-1]
 
 
-#: 附属文件（预告片/主题视频/背景图等）的固定文件名（不含扩展名）。
-#: Jellyfin 生成这些文件用于界面展示，**不是正片** —— 不该参与分析、修复、
-#: 更不该给它生成字幕。
-AUXILIARY_STEMS = frozenset({
-    "trailer", "theme", "theme_video", "theme-video", "theme_videos",
-    "theme_video_1", "backdrop", "poster", "sample", "thumb", "fanart",
-    "behind the scenes", "deleted scenes", "interview", "featurette", "short",
+# ── 附属文件判定：**全仓库唯一一份规则** ────────────────────────
+#
+# 合并前有两套：`utils/library.py` 的精确匹配版 与 `utils/merge.py` 的分词匹配版，
+# 词表不同 → **同一个文件在不同页面结论不同**（用户因此连着踩了两次：
+# 字幕页把 theme/trailer 收进来、而另一页不会）。现在合并成一份。
+#
+# 规则按**误伤成本分档**，不是简单取并集：
+#   1) 高置信词 → 分词匹配（`ABC-001-trailer` / `[预告片]` 这类都算）；
+#   2) 歧义词（deleted / making / credits / short…）→ 只在**整个文件名正好是它**
+#      时才算，避免把正片《Making Love》误判成花絮（本库是成人内容，这类标题真实存在）；
+#   3) 固定短语与**路径段**（路径段按目录名精确比对，避免 `My Trailers Collection`
+#      这种目录被当成 `trailers/`）。
+
+#: 高置信词：作为文件名里的一个词出现，基本必然是附属物
+AUX_TOKENS = frozenset({
+    "theme", "trailer", "teaser", "preview", "sample", "backdrop", "poster",
+    "fanart", "extrafanart", "extrathumbs", "thumb", "thumbnail",
+    "screenshot", "clearlogo", "clearart", "landscape", "banner", "logo",
+    "trickplay", "bloopers", "featurette", "interview",
+    # 中文
+    "预告", "预告片", "主题曲", "片头", "片尾", "幕后", "花絮", "采访", "特典",
 })
 
-#: 预告片/样片的两种写法：`xxx-trailer`、`xxx.sample`。
-#: ``[\s._\-]`` 是分隔符（下划线、点、连字符、空格都算）。
-#: 刻意**不做** ``trailer-xxx`` 的"前缀"判定 —— 那会把正片
-#: 《Trailer Park Boys》误判成预告片（实测踩过），而前缀写法本身很少见。
-_AUX_SUFFIX_RE = re.compile(r"(?:^|[\s._\-])(trailer|sample)s?$", re.I)
+#: 歧义词：只在整个文件名正好等于它时才算附属
+AUX_AMBIGUOUS_STEMS = frozenset({
+    "trailer", "theme", "theme_video", "theme-video", "theme_videos",
+    "theme_video_1", "backdrop", "poster", "sample", "thumb", "short",
+    "deleted", "making", "credits", "behind the scenes", "deleted scenes",
+    "interview", "featurette",
+})
 
-#: ``theme_video`` 是最明确的附属标记：正常片名不会带下划线的这个词，
-#: 所以用"包含"判定；从而同时覆盖 ``theme_video.mp4`` 与
-#: ``ABC-001-theme_video.mp4`` 这两种 Jellyfin 命名。
-_AUX_THEME_VIDEO_RE = re.compile(r"theme[\s._\-]?video", re.I)
+#: 固定短语（文件名里"包含"即算，含连字符/下划线变体）
+AUX_PHRASES = (
+    "behind the scenes", "behind-the-scenes", "behind_the_scenes",
+    "making of", "making-of", "making_of",
+    "deleted scene", "deleted-scene", "deleted_scene",
+)
 
-#: 附属**目录**名（按完整路径段匹配）。
-#: 按段匹配而不是"路径里含这个字串"，是为了避免把正片名里的字串当成目录名。
+#: 附属**目录名**：按路径中的目录名**精确**比对（比"路径里含这个字串"严格）
+AUX_DIR_NAMES = frozenset({
+    "trailers", "trailer", "extras", "extra", "trickplay", ".trickplay",
+    "backdrops", "backdrop", "extrafanart", "extrathumbs", "featurettes",
+    "shorts", "scenes", "interviews", "behind the scenes", "deleted scenes",
+    "theme videos", "theme_videos", "theme-videos", "others", "specials",
+    "samples",
+})
+
+#: 兼容旧名（历史调用方引用的是这个）
 AUXILIARY_PATH_SEGMENTS = (
     "/trailers/", "/trailer/", "/backdrops/", "/backdrop/", "/extras/",
     "/featurettes/", "/shorts/", "/scenes/", "/interviews/",
@@ -282,14 +308,36 @@ AUXILIARY_PATH_SEGMENTS = (
     "/theme_videos/", "/theme-videos/", "/others/", "/specials/",
 )
 
+#: 预告片/样片的后缀写法：`xxx-trailer`、`xxx.sample`。
+#: 刻意**不做** `trailer-xxx` 的"前缀"判定 —— 那会把正片
+#: 《Trailer Park Boys》误判成预告片（实测踩过），而前缀写法本身很少见。
+_AUX_SUFFIX_RE = re.compile(r"(?:^|[\s._\-])(trailer|sample)s?$", re.I)
+
+#: `theme_video` 是最明确的附属标记，用"包含"判定，
+#: 从而同时覆盖 `theme_video.mp4` 与 `ABC-001-theme_video.mp4` 两种命名。
+_AUX_THEME_VIDEO_RE = re.compile(r"theme[\s._\-]?video", re.I)
+
+#: 分词用的分隔符（保留给需要按词处理的场景）
+_TOKEN_SPLIT_RE = re.compile(r"[\s._\-+()\[\]【】]+")
+
+#: 高置信词出现在**末尾**才算附属。
+#:
+#: 这里刻意**不做**"文件名里任意位置出现就算"的分词匹配 ——
+#: 那会把正片《Trailer Park Boys》《The Theme of Love》误判成附属
+#: （本库是成人内容，这类标题真实存在，实测就是这么踩到的）。
+#: 只认末尾，既能命中 `ABC-001-trailer` / `[预告片]`，又不会误伤正片标题。
+_AUX_SUFFIX_WORDS = re.compile(
+    r"(?:^|[\s._\-+()\[\]【】])("
+    + "|".join(sorted(AUX_TOKENS, key=len, reverse=True))
+    + r")\d*$", re.I)
+
 
 def is_junk_attachment_path(path: str, name: Optional[str] = None) -> bool:
-    """判断一个路径是否为 Jellyfin 生成的附属文件（非正片）。
+    """判断一个路径是否为 Jellyfin/下载器生成的附属文件（**不是正片**）。
 
-    与 scoring.is_junk_item 的判定保持一致，但仅基于"文件名/路径"、
-    不需要 Item 对象——供只有文件路径的场景复用（如视频修复转码页）：
-    theme / theme_video / backdrop / fanart / trailer 等是 Jellyfin 为生成
-    缩略图或预告片而生成的，跟视频本体无关，不应作为"正片"参与分析与修复。
+    这是**唯一的实现**：`utils.merge.is_auxiliary_media` 已改为调用本函数。
+    判定只依赖"文件名/路径"，不需要 Item 对象，供所有只有路径的场景复用
+    （视频修复转码页、字幕生成、字幕缺失检测、文件合并…）。
 
     Args:
         path: 文件完整路径（或目录路径）
@@ -303,20 +351,35 @@ def is_junk_attachment_path(path: str, name: Optional[str] = None) -> bool:
     base = name or split_path_name(str(path))
     if not base:
         return False
-    # 去掉扩展名，与 Jellyfin 附属命名（如 theme_video / theme / backdrop / fanart\d*）比对
-    stem = re.sub(r"\.(mp4|mkv|avi|mov|wmv|flv|ts|rmvb|jpg|jpeg|png|webp|gif)$",
+    # 去掉扩展名再比对（Jellyfin 的附属命名可能是 xxx.theme_video.mp4）
+    stem = re.sub(r"\.(mp4|mkv|avi|mov|wmv|flv|ts|rmvb|webm|mpg|mpeg|"
+                  r"jpg|jpeg|png|webp|gif)$",
                   "", base, flags=re.I).strip().lower()
-    if stem in AUXILIARY_STEMS:
+    if not stem:
+        return False
+
+    # 1) 整个文件名正好是附属名（含 fanart / fanart1 这类）
+    if stem in AUX_AMBIGUOUS_STEMS or re.fullmatch(r"fanart\d*", stem):
         return True
-    if re.fullmatch(r"fanart\d*", stem):
-        return True
+    # 2) 明确的 theme_video 标记
     if _AUX_THEME_VIDEO_RE.search(stem):
         return True
+    # 3) 后缀写法：xxx-trailer / xxx.sample
     if _AUX_SUFFIX_RE.search(stem):
         return True
-    # 路径里含 Jellyfin 的附属目录（trailers/backdrops/extras…）
+    # 4) 固定短语
+    if any(ph in stem for ph in AUX_PHRASES):
+        return True
+    # 5) 高置信词出现在**末尾**（`xxx-trailer` / `[预告片]` 这类）
+    if _AUX_SUFFIX_WORDS.search(stem):
+        return True
+
+    # 6) 看路径：目录名精确命中，或旧版的路径段命中
     pth = str(path).lower().replace(chr(92), "/")
     if any(seg in pth for seg in AUXILIARY_PATH_SEGMENTS):
+        return True
+    parts = {seg.strip() for seg in pth.split("/") if seg.strip()}
+    if parts & AUX_DIR_NAMES:
         return True
     return False
 

@@ -20,30 +20,21 @@ from utils.library import extract_number
 from utils.nfo import read_text_any_encoding
 from utils.nfo_source import read_nfo_title
 
-VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv",
-                    ".ts", ".rmvb", ".webm", ".mpg")
+# 视频扩展名的**唯一事实来源**是 utils.media_types（兜底默认值），
+# 用户配置 `video_extensions` 优先。这里只保留名字做兼容。
+from utils.media_types import (  # noqa: E402
+    DEFAULT_VIDEO_EXTENSIONS as VIDEO_EXTENSIONS, split_path_name,
+)
 
 # mp4 容器可无损容纳的编解码器（其余回退 mkv/原容器）
 MP4_COMPAT_VIDEO = {"h264", "hevc", "h265", "mpeg4", ""}
 MP4_COMPAT_AUDIO = {"aac", "mp3", "ac3", "eac3", "alac", "opus", ""}
 
-# Jellyfin/下载器自动生成的附属视频（主题曲/预告/采样/幕后等），不参与分集合并
-AUXILIARY_WORDS = {
-    "theme", "trailer", "teaser", "preview", "sample", "backdrop",
-    "poster", "logo", "banner", "thumb", "thumbnail", "screenshot",
-    "clearlogo", "clearart", "landscape", "fanart", "extrafanart",
-    "extrathumbs", "interview", "featurette", "bloopers", "credits",
-    "deleted", "making",
-    "预告", "预告片", "主题曲", "片头", "片尾", "幕后", "花絮", "采访", "特典",
-}
-AUXILIARY_MULTIWORD = (
-    "behind the scenes", "behind-the-scenes", "making of", "making-of",
-    "deleted scene", "deleted-scene",
-)
-AUXILIARY_PATH_KEYWORDS = (
-    "trailers", "extras", "trickplay", ".trickplay", "backdrops",
-    "extrafanart", "extrathumbs", "behind the scenes", "behind-the-scenes",
-)
+# 附属文件（预告片/主题视频/采样/幕后等）的判定**只在一处实现**：
+#   utils.library.is_junk_attachment_path
+# 这里曾经自己维护过一套词表（AUXILIARY_WORDS / MULTIWORD / PATH_KEYWORDS），
+# 与 library 那套**结论不一致** → 同一个文件在不同页面被判成不同结果，
+# 用户因此连着踩了两次。已合并到 library，下面只做委托，不再各存一份。
 
 # ── 数据模型 ──
 
@@ -889,18 +880,15 @@ def _plan_stats(plans: list, unrecognized: list) -> dict:
 
 
 def is_auxiliary_media(path: str) -> bool:
-    """判断是否为 Jellyfin/下载器生成的附属视频（theme/trailer/sample 等）。"""
-    sp = str(path)
-    stem_low = os.path.splitext(os.path.basename(sp))[0].lower()
-    tokens = set(_split_tokens(stem_low))
-    if tokens & AUXILIARY_WORDS:
-        return True
-    if any(ph in stem_low for ph in AUXILIARY_MULTIWORD):
-        return True
-    plow = sp.lower()
-    if any(k in plow for k in AUXILIARY_PATH_KEYWORDS):
-        return True
-    return False
+    """判断是否为 Jellyfin/下载器生成的附属视频（theme/trailer/sample 等）。
+
+    **委托给 `utils.library.is_junk_attachment_path`** —— 那是唯一实现。
+    以前这里另有一套词表，与另一处结论不一致（同一个文件在合并里算附属、
+    在字幕页算正片），是重复造轮子的典型后果。
+    """
+    from utils.library import is_junk_attachment_path
+
+    return is_junk_attachment_path(path, split_path_name(str(path)))
 
 
 def scan_files(root_paths, extensions=VIDEO_EXTENSIONS,

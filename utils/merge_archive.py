@@ -30,12 +30,13 @@ def journal_file() -> Path:
     return DATA_DIR / "merge_archive_journal.json"
 
 
-# 与视频同名、需要跟着视频一起备份的附加文件
-SIDECAR_EXTENSIONS = {
-    ".nfo", ".srt", ".ass", ".ssa", ".sub", ".vtt",
-    ".jpg", ".jpeg", ".png", ".webp",
-}
-SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
+# 与视频同名、需要跟着视频一起备份的附加文件。
+# 扩展名的**唯一来源**是 utils.media_types —— 这里只做导入，
+# 不再自己写一份（以前这里另有一份，和 merge.py 的清单不一致）。
+from utils.media_types import (  # noqa: E402
+    DEFAULT_SIDECAR_EXTENSIONS as SIDECAR_EXTENSIONS,
+    DEFAULT_SUBTITLE_EXTENSIONS as SUBTITLE_EXTENSIONS,
+)
 
 
 def _now() -> str:
