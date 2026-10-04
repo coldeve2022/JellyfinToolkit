@@ -362,3 +362,58 @@ def test_find_subtitles_looks_in_subs_dir_and_output_dir(tmp_path):
     assert names == ["V.chs.srt"]                     # Subs/ 里那个
     names2 = [p.name for p in find_subtitles(video, ["srt"], str(out))]
     assert names2 == ["V.chs.srt", "V.zh.srt"]        # 两处都算，且去重、有序
+
+
+# ── 7. 所有"判断有没有字幕"的入口都必须走同一处实现 ────────────
+#
+# 这一节是**回归守则**：同一个窄判断在仓库里被重复实现过三次
+# （字幕缺失检测页 / 自动化管线 / 当初的 find_subtitles），
+# 结果"带语言标记的字幕被误报成缺失"这个问题被修了三次。
+
+def test_subtitle_page_uses_find_subtitles(qapp, tmp_path):
+    """**用户报的问题**：字幕缺失检测页把有 ``.chs.srt`` 的视频也标成缺字幕。"""
+    from ui.pages.subtitle import SubtitlePage
+
+    with_sub = tmp_path / "A.mp4"
+    with_sub.write_bytes(b"x")
+    (tmp_path / "A.chs.srt").write_text("1\n", encoding="utf-8")
+
+    without = tmp_path / "B.mp4"
+    without.write_bytes(b"x")
+
+    page = SubtitlePage(_cfg())
+    # 这页有断点续传：构造时会从状态文件里把上次的目录与"缺失"结果读回来。
+    # 全量跑时前面的用例可能已经写过状态 → 先清干净再断言，避免测试互相干扰。
+    page._clear_all()
+    page._on_file_found(with_sub.name, str(with_sub))
+    page._on_file_found(without.name, str(without))
+
+    listed = [page.result_list.item(i).text() for i in range(page.result_list.count())]
+    assert listed == [without.name], listed
+
+
+def test_subtitle_page_skipped_handler_does_not_crash(qapp):
+    """预告片被忽略时不能让扫描崩掉。
+
+    这页**没有** log_panel（那是「批量生成字幕」页的控件），
+    v3.8.3 曾在这里误用 log_panel → 一碰到预告片就 AttributeError。
+    """
+    from ui.pages.subtitle import SubtitlePage
+
+    page = SubtitlePage(_cfg())
+    page._on_skipped(7)          # 不该抛异常
+    assert "7" in page.status_label.text()
+
+
+def test_orchestrator_find_missing_uses_find_subtitles(tmp_path):
+    """自动化管线里那份实现也要认语言标记（不要再各写一份）。"""
+    from automation.orchestrator import find_missing_subtitles
+
+    video = tmp_path / "V.mp4"
+    video.write_bytes(b"x")
+    (tmp_path / "V.zh-CN.srt").write_text("1\n", encoding="utf-8")
+
+    assert find_missing_subtitles([str(video)], [".srt"]) == []
+    other = tmp_path / "W.mp4"
+    other.write_bytes(b"x")
+    assert find_missing_subtitles([str(other)], [".srt"]) == [str(other)]

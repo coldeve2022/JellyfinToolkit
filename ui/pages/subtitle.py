@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 
 from config import ToolkitConfig
 from ui.widgets import DragDropListWidget, InfoCard
+from utils import subtitle_clean
 from workers.scanner import FileScannerWorker
 
 
@@ -22,6 +23,7 @@ class SubtitlePage(QWidget):
         self.cfg = cfg
         self._directories: set[str] = set()
         self._checked: set[str] = set()   # 已检查路径（断点续传）
+        self._aux_skipped = 0             # 本次扫描被忽略的预告片/主题视频数
         self._worker: FileScannerWorker | None = None
         self.setAcceptDrops(True)
         self._setup_ui()
@@ -176,20 +178,31 @@ class SubtitlePage(QWidget):
         self._worker.start()
 
     def _on_skipped(self, count: int) -> None:
-        """预告片/主题视频本来就不需要字幕，跳过是正常的 —— 但要说明白。"""
-        self.log_panel.log_info(
-            f"已忽略 {count} 个预告片 / 主题视频（它们不需要字幕）")
+        """预告片/主题视频本来就不需要字幕，跳过是正常的 —— 但要说明白。
+
+        注意：**本页没有 `log_panel`**（那是「批量生成字幕」页的控件），
+        这里只能用 `status_label`。曾经误用 log_panel 导致扫描一碰到预告片就抛
+        AttributeError。
+        """
+        self._aux_skipped = count
+        self.status_label.setText(f"已忽略 {count} 个预告片 / 主题视频（无需字幕）")
 
     def _on_progress(self, filename: str, pct: int) -> None:
         self.status_label.setText(f"正在检查: {filename}")
         self.progress.setValue(pct)
 
     def _on_file_found(self, filename: str, filepath: str) -> None:
-        """找到视频后，检查是否存在同名字幕。"""
-        base = os.path.splitext(filepath)[0]
-        for sub_ext in self.cfg.subtitle_extensions:
-            if os.path.exists(base + sub_ext):
-                return  # 有字幕，跳过
+        """找到视频后，检查是否已有字幕。
+
+        **统一走 `subtitle_clean.find_subtitles`**，不要在这里自己拼
+        ``base + ext`` —— 那样只认 ``xxx.srt``，会把带语言标记的
+        ``xxx.chs.srt`` 判成"没有字幕"（整库视频被误报，用户实际撞到过）。
+        语言标记的写法太多，这个问题在仓库里被重复犯过三次，所以只留一处实现。
+        """
+        formats = [str(e).lstrip(".") for e in (self.cfg.subtitle_extensions or [".srt"])]
+        if subtitle_clean.find_subtitles(
+                filepath, formats, self.cfg.whisper_output_dir or None):
+            return  # 有字幕，跳过
         self.result_list.add_item(filename, filepath)
 
     def _on_finished(self, _files: list, checked: list) -> None:

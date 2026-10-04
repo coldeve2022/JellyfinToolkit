@@ -79,14 +79,20 @@ def score_items(items: list, log: Callable[[str], None]) -> dict:
     return {"results": results, "counts": counts, "labels": labels}
 
 
-def find_missing_subtitles(paths: list[str], subtitle_extensions) -> list[str]:
-    """找出没有同名字幕的视频路径。"""
-    missing: list[str] = []
-    for path in paths:
-        base = os.path.splitext(path)[0]
-        if not any(os.path.exists(base + ext) for ext in subtitle_extensions):
-            missing.append(path)
-    return missing
+def find_missing_subtitles(paths: list[str], subtitle_extensions,
+                           output_dir: str = "") -> list[str]:
+    """找出还没有字幕的视频路径。
+
+    **统一走 `subtitle_clean.find_subtitles`**（唯一实现）——
+    这里以前自己拼 ``base + ext``，只认 ``xxx.srt``，于是带语言标记的
+    ``xxx.chs.srt`` 会被误报成"缺字幕"。同一个坑在仓库里出现过三次
+    （检测页、本函数、以及当初的 find_subtitles），所以不再各写一份。
+    """
+    from utils import subtitle_clean
+
+    formats = [str(e).lstrip(".") for e in (subtitle_extensions or [".srt"])]
+    return [p for p in paths
+            if not subtitle_clean.find_subtitles(p, formats, output_dir or None)]
 
 
 def fix_nfo_directory(directory: str, log: Callable[[str], None] = print,
