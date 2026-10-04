@@ -298,3 +298,67 @@ def test_patch_encoding_handles_unexpected_structure(tmp_path):
     changed, note, _ = whisper_tool.patch_encoding(str(src))
     assert changed is False
     assert src.read_text(encoding="utf-8") == "print('no imports here')\n"
+
+
+# ── 6. 字幕检测：语言标记不能枚举 ─────────────────────────────
+
+@pytest.mark.parametrize("sub_name", [
+    "V.srt",              # 同名
+    "V.chs.srt",          # 用户实际撞到的：中文简体的常见写法
+    "V.cht.srt",
+    "V.zh.srt",           # 原来只认这一种
+    "V.zh-CN.srt",        # Jellyfin 的 ISO 写法
+    "V.zh-Hans.srt",
+    "V.chi.srt",
+    "V.zho.srt",
+    "V.eng.srt",
+    "V.forced.srt",
+    "V.default.srt",
+])
+def test_find_subtitles_accepts_language_tags(tmp_path, sub_name):
+    """**用户报的问题**：明明有字幕却被判成"没有字幕"。
+
+    根因：原实现只硬编码了 ``<名>.srt`` 和 ``<名>.zh.srt`` 两种写法，
+    而实际文件是 ``FC2-3127334-C.chs.srt`` → 不匹配 → 整个文件夹的视频
+    全被标成"缺字幕"。语言标记写法太多，**只能按"前缀 + 扩展名"匹配，不能枚举**。
+    """
+    from utils.subtitle_clean import find_subtitles
+
+    video = tmp_path / "V.mp4"
+    video.write_bytes(b"x")
+    sub = tmp_path / sub_name
+    sub.write_text("1\n", encoding="utf-8")
+
+    got = find_subtitles(video, ["srt"])
+    assert [x.name for x in got] == [sub_name]
+
+
+def test_find_subtitles_ignores_unrelated_and_other_formats(tmp_path):
+    from utils.subtitle_clean import find_subtitles
+
+    video = tmp_path / "V.mp4"
+    video.write_bytes(b"x")
+    (tmp_path / "V.chs.lrc").write_text("x", encoding="utf-8")      # 不是字幕格式
+    (tmp_path / "other.chs.srt").write_text("x", encoding="utf-8")  # 不是这个视频的
+    (tmp_path / "VFoo.chs.srt").write_text("x", encoding="utf-8")   # 前缀像但不是
+
+    assert find_subtitles(video, ["srt"]) == []
+
+
+def test_find_subtitles_looks_in_subs_dir_and_output_dir(tmp_path):
+    """Jellyfin 允许字幕放在 ``Subs/``；生成工具的输出目录也要算"有字幕"。"""
+    from utils.subtitle_clean import find_subtitles
+
+    video = tmp_path / "V.mp4"
+    video.write_bytes(b"x")
+    (tmp_path / "Subs").mkdir()
+    (tmp_path / "Subs" / "V.chs.srt").write_text("x", encoding="utf-8")
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "V.zh.srt").write_text("x", encoding="utf-8")
+
+    names = [p.name for p in find_subtitles(video, ["srt"])]
+    assert names == ["V.chs.srt"]                     # Subs/ 里那个
+    names2 = [p.name for p in find_subtitles(video, ["srt"], str(out))]
+    assert names2 == ["V.chs.srt", "V.zh.srt"]        # 两处都算，且去重、有序

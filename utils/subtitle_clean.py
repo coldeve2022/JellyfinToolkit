@@ -402,17 +402,58 @@ def clean_file(path,
 
 
 def find_subtitles(video_path, formats=("srt",), output_dir: Optional[str] = None) -> list:
-    """找某个视频对应的字幕文件（用于判断"这条到底生成了没有"）。
+    """找某个视频对应的字幕文件（用于判断"这条到底有没有/生成了没有"）。
 
-    默认在视频同目录找；给了 ``output_dir`` 就去那里找（与生成工具的输出目录一致）。
+    匹配**两种命名**，与 :func:`utils.merge_archive.iter_sidecars` 保持同一套规则：
+
+    - 同名：``video.srt``
+    - 带语言/来源标记：``video.chs.srt`` / ``video.zh-CN.srt`` / ``video.chi.ass`` /
+      ``video.forced.srt``
+
+    这里曾经**只硬编码了 ``zh``**（`video.zh.srt`），于是 ``FC2-3127334-C.chs.srt``
+    这类"明明有字幕"的会被判成没有 —— 用户实测撞到过：整个文件夹的视频全被
+    标成"缺字幕"。语言标记的写法太多（chs/cht/chi/zho/sc/tc/zh-Hans/eng/jpn…），
+    **不能枚举，只能按"前缀 + 扩展名"匹配**。
+
+    Args:
+        video_path: 视频路径
+        formats: 关心的字幕扩展名（不含点）
+        output_dir: 生成工具的输出目录；给了就**同时**在它和视频同目录里找
+            （两处都算"有字幕"，否则会出现"本地明明有 sidecar 却报缺失"）
+
+    Returns:
+        找到的字幕文件 ``Path`` 列表（去重、按名称排序）
     """
     video = Path(str(video_path))
     stem = video.stem
-    folder = Path(str(output_dir)) if output_dir else video.parent
-    out = []
-    for fmt in formats:
-        for candidate in (folder / f"{stem}.{fmt}",
-                          folder / f"{stem}.zh.{fmt}"):
-            if candidate.is_file():
-                out.append(candidate)
-    return out
+    want = {str(f).strip().lstrip(".").lower() for f in formats if str(f).strip()}
+    if not want:
+        return []
+
+    folders = [video.parent]
+    # Jellyfin 也允许把字幕放在 Subs/ 子目录里
+    folders += [video.parent / "Subs", video.parent / "subs"]
+    if output_dir:
+        folders.insert(0, Path(str(output_dir)))
+
+    out, seen = [], set()
+    for folder in folders:
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            continue    # 目录不存在/无权限：跳过，不中断
+        for f in entries:
+            if not f.is_file():
+                continue
+            if f.suffix.lower().lstrip(".") not in want:
+                continue
+            name = f.stem
+            # 同名，或 `<视频名>.<任意语言/来源标记>` —— 后者是关键，
+            # 别在这里枚举语言代码
+            if name != stem and not name.startswith(stem + "."):
+                continue
+            key = str(f).lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(f)
+    return sorted(out, key=lambda p: p.name)
