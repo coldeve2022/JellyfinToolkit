@@ -78,8 +78,6 @@ def test_auxiliary_rules_are_defined_once():
     合并完成后这条会从 xfail 变成硬断言。
     """
     hits = _scan(r"^AUXILIARY_(WORDS|MULTIWORD|PATH_KEYWORDS|STEMS|PATH_SEGMENTS)\b")
-    modules = {h.split(":")[0].split("\\")[0].split("/")[0] + "/" +
-               h.split(":")[0].split("\\")[-1].split("/")[-1] for h in hits}
     files = sorted({h.split(":")[0] for h in hits})
     if len(files) > 1:
         pytest.xfail(f"已知待治理：附属判定词表分散在 {files}（见审计报告）")
