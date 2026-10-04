@@ -45,7 +45,10 @@ MODEL_CHOICES = ("", "base", "small", "medium", "large-v2", "large-v3")
 #: 上游把模型放在与 exe 同级的 models/ 目录下；留空表示沿用引擎自带默认。
 DEFAULT_MODEL_SUBDIR = "models"
 
-_AUDIO_EXTS = ("mp3", "wav", "flac", "m4a", "aac", "ogg", "wma")
+# 注意：这里**不再**维护一份音频扩展名清单。
+# 本功能只处理视频，"哪些是视频"以配置 `video_extensions` 为唯一事实来源
+# （见 `default_audio_suffixes`）。曾经在这里各存一份音频清单，结果用户库里的
+# .wav 被当成"需要字幕的视频" —— 删掉，避免有人再拿它做判断。
 _SUB_FORMATS = ("srt", "vtt", "txt", "lrc")
 
 _ENV_KEYS = ("JELLYFIN_TOOLKIT_WHISPER_DIR", "WHISPER_TOOL_DIR")
