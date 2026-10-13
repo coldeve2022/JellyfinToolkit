@@ -30,10 +30,20 @@ from pathlib import Path
 from typing import Optional
 
 __all__ = [
-    "SUPPORTED_FORMATS", "DEFAULT_MAX_DURATION", "DEFAULT_SIMILARITY",
-    "norm_text", "split_sentences", "collapse_text", "clean_blocks",
-    "parse_srt", "render_srt", "parse_vtt", "render_vtt",
-    "clean_lrc_text", "clean_plain_text", "clean_subtitle_text",
+    "SUPPORTED_FORMATS",
+    "DEFAULT_MAX_DURATION",
+    "DEFAULT_SIMILARITY",
+    "norm_text",
+    "split_sentences",
+    "collapse_text",
+    "clean_blocks",
+    "parse_srt",
+    "render_srt",
+    "parse_vtt",
+    "render_vtt",
+    "clean_lrc_text",
+    "clean_plain_text",
+    "clean_subtitle_text",
     "clean_file",
 ]
 
@@ -45,12 +55,12 @@ DEFAULT_MAX_DURATION = 20.0
 #: 相邻两条字幕文本的相似度阈值（0~1），超过视为重复。
 DEFAULT_SIMILARITY = 0.88
 
-_TIME_RE = re.compile(
-    r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)")
+_TIME_RE = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)")
 _LRC_RE = re.compile(r"\[(\d+):(\d+)(?:[.:](\d+))?\](.*)")
 
 
 # ── 基础工具 ────────────────────────────────────────────────
+
 
 def norm_text(text: str) -> str:
     """归一化用于「是否算重复」的比较：去掉所有非单词字符并转小写。
@@ -86,6 +96,7 @@ def _seconds_to_vtt_ts(seconds: float) -> str:
 
 # ── 文本压缩 ────────────────────────────────────────────────
 
+
 def collapse_repeated_units(text: str) -> str:
     """压掉同一个「小片段」连续重复 3 次以上的情况（不区分语言）。"""
     if not text or len(text) < 6:
@@ -110,7 +121,7 @@ def collapse_repeated_phrases(text: str) -> str:
             changed = False
             n = len(out)
             for length in range(1, min(8, n // 2) + 1):
-                if out[-2 * length:-length] == out[-length:]:
+                if out[-2 * length : -length] == out[-length:]:
                     del out[-length:]
                     changed = True
                     break
@@ -138,6 +149,7 @@ def collapse_text(text: str) -> str:
 
 # ── 块级清理 ────────────────────────────────────────────────
 
+
 def _chunk_text_block(block: dict, max_duration: float) -> list:
     """把一条过长且无法按句切分的字幕按字数均分到多个时间片。"""
     text = block["text"].strip()
@@ -148,7 +160,7 @@ def _chunk_text_block(block: dict, max_duration: float) -> list:
     start = block["start"]
     pos = 0
     while pos < len(text):
-        piece = text[pos:pos + chunk_size].strip()
+        piece = text[pos : pos + chunk_size].strip()
         if not piece:
             break
         weight = len(piece) / max(len(text), 1)
@@ -202,10 +214,12 @@ def split_long_block(block: dict, max_duration: float = DEFAULT_MAX_DURATION) ->
     return result
 
 
-def clean_blocks(blocks: list,
-                 max_duration: float = DEFAULT_MAX_DURATION,
-                 similarity: float = DEFAULT_SIMILARITY,
-                 recent_window: int = 8) -> list:
+def clean_blocks(
+    blocks: list,
+    max_duration: float = DEFAULT_MAX_DURATION,
+    similarity: float = DEFAULT_SIMILARITY,
+    recent_window: int = 8,
+) -> list:
     """清理字幕块序列：先去重，再把过长的切开。
 
     ``recent_window`` 只回看最近 N 条 —— 一部片子前后出现同样的台词是正常的，
@@ -226,8 +240,7 @@ def clean_blocks(blocks: list,
             if key == prev_key:
                 duplicate = True
                 break
-            if key and prev_key and \
-                    SequenceMatcher(None, prev_key, key).ratio() >= similarity:
+            if key and prev_key and SequenceMatcher(None, prev_key, key).ratio() >= similarity:
                 duplicate = True
                 break
         if duplicate:
@@ -245,12 +258,13 @@ def clean_blocks(blocks: list,
 
 # ── 各格式的解析 / 渲染 ─────────────────────────────────────
 
+
 def parse_srt(text: str) -> list:
     """解析 SRT。容忍序号缺失、``.`` 与 ``,`` 两种毫秒分隔符。"""
     blocks = []
     for raw in re.split(r"\n\s*\n", (text or "").strip()):
         lines = raw.strip().splitlines()
-        if len(lines) < 3:
+        if len(lines) < 2:
             continue
         time_line = next((ln for ln in lines if "-->" in ln), None)
         if time_line is None:
@@ -259,13 +273,15 @@ def parse_srt(text: str) -> list:
         if not m:
             continue
         index = lines.index(time_line)
-        content = "\n".join(lines[index + 1:]).strip()
+        content = "\n".join(lines[index + 1 :]).strip()
         if content:
-            blocks.append({
-                "start": _timestamp_to_seconds(m.group(1), m.group(2), m.group(3), m.group(4)),
-                "end": _timestamp_to_seconds(m.group(5), m.group(6), m.group(7), m.group(8)),
-                "text": content,
-            })
+            blocks.append(
+                {
+                    "start": _timestamp_to_seconds(m.group(1), m.group(2), m.group(3), m.group(4)),
+                    "end": _timestamp_to_seconds(m.group(5), m.group(6), m.group(7), m.group(8)),
+                    "text": content,
+                }
+            )
     return blocks
 
 
@@ -280,36 +296,57 @@ def render_srt(blocks: list) -> str:
 
 
 def parse_vtt(text: str) -> tuple:
-    """解析 WebVTT，返回 ``(blocks, header)``（header 原样保留）。"""
-    lines = (text or "").strip().splitlines()
-    header = "WEBVTT"
+    """Read hh:mm:ss.mmm and mm:ss.mmm; preserve cue IDs/settings and metadata."""
+    chunks = re.split(r"\n\s*\n", (text or "").strip())
+    header = chunks[0] if chunks and chunks[0].startswith("WEBVTT") else "WEBVTT"
     blocks = []
-    current = None
-    started = False
-    for line in lines:
-        if not started:
-            if line.strip():
-                header = line.strip()
-                started = True
+    metadata = []
+    time_pattern = re.compile(
+        r"((?:\d+:)?\d{2}:\d{2}\.\d{3})\s*-->\s*((?:\d+:)?\d{2}:\d{2}\.\d{3})(.*)$"
+    )
+
+    def seconds(value):
+        pieces = value.split(":")
+        return (
+            float(pieces[-1])
+            + int(pieces[-2]) * 60
+            + (int(pieces[-3]) * 3600 if len(pieces) == 3 else 0)
+        )
+
+    for chunk in chunks[1:]:
+        lines = chunk.splitlines()
+        if not lines:
             continue
-        if "-->" in line:
-            m = _TIME_RE.match(line.strip())
-            if m:
-                current = {
-                    "start": _timestamp_to_seconds(m.group(1), m.group(2), m.group(3), m.group(4)),
-                    "end": _timestamp_to_seconds(m.group(5), m.group(6), m.group(7), m.group(8)),
-                    "text": "",
-                }
-                blocks.append(current)
-        elif current is not None and line.strip():
-            current["text"] = (current["text"] + "\n" + line.strip()).strip()
+        index = next((i for i, line in enumerate(lines) if "-->" in line), None)
+        if index is None:
+            metadata.append(chunk)
+            continue
+        match = time_pattern.fullmatch(lines[index].strip())
+        if not match:
+            continue
+        blocks.append(
+            dict(
+                start=seconds(match[1]),
+                end=seconds(match[2]),
+                text="\n".join(lines[index + 1 :]),
+                identifier="\n".join(lines[:index]),
+                settings=match[3].strip(),
+            )
+        )
+    if metadata:
+        header += "\n\n" + "\n\n".join(metadata)
     return blocks, header
 
 
 def render_vtt(blocks: list, header: str = "WEBVTT") -> str:
     out = [header, ""]
     for block in blocks:
-        out.append(f"{_seconds_to_vtt_ts(block['start'])} --> {_seconds_to_vtt_ts(block['end'])}")
+        if block.get("identifier"):
+            out.append(block["identifier"])
+        settings = (" " + block["settings"]) if block.get("settings") else ""
+        out.append(
+            f"{_seconds_to_vtt_ts(block['start'])} --> {_seconds_to_vtt_ts(block['end'])}{settings}"
+        )
         out.append(block["text"])
         out.append("")
     return "\n".join(out).rstrip() + "\n"
@@ -343,9 +380,12 @@ def clean_plain_text(text: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def clean_subtitle_text(text: str, fmt: str,
-                        max_duration: float = DEFAULT_MAX_DURATION,
-                        similarity: float = DEFAULT_SIMILARITY) -> str:
+def clean_subtitle_text(
+    text: str,
+    fmt: str,
+    max_duration: float = DEFAULT_MAX_DURATION,
+    similarity: float = DEFAULT_SIMILARITY,
+) -> str:
     """按格式清理一段字幕文本，返回清理后的文本（不需要写文件时用它）。"""
     fmt = (fmt or "").lower().lstrip(".")
     if fmt == "srt":
@@ -360,9 +400,9 @@ def clean_subtitle_text(text: str, fmt: str,
     return text
 
 
-def clean_file(path,
-               max_duration: float = DEFAULT_MAX_DURATION,
-               similarity: float = DEFAULT_SIMILARITY) -> tuple:
+def clean_file(
+    path, max_duration: float = DEFAULT_MAX_DURATION, similarity: float = DEFAULT_SIMILARITY
+) -> tuple:
     """就地清理一个字幕文件，返回 ``(去掉的条数, 是否发生了变化)``。
 
     只处理 :data:`SUPPORTED_FORMATS` 里的扩展名；其它扩展名原样返回
@@ -374,18 +414,29 @@ def clean_file(path,
     if fmt not in SUPPORTED_FORMATS or not p.is_file():
         return 0, False
     try:
-        original = p.read_text(encoding="utf-8-sig", errors="ignore")
-    except OSError:
+        try:
+            original = p.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            original = p.read_text(
+                encoding="utf-16"
+                if p.read_bytes().startswith((b"\xff\xfe", b"\xfe\xff"))
+                else "gb18030"
+            )
+    except (OSError, UnicodeDecodeError):
         return 0, False
 
     removed = 0
     if fmt == "srt":
         blocks = parse_srt(original)
+        if not blocks or len(blocks) != original.count("-->"):
+            return 0, False
         cleaned = clean_blocks(blocks, max_duration, similarity)
         new_text = render_srt(cleaned)
         removed = max(0, len(blocks) - len(cleaned))
     elif fmt == "vtt":
         blocks, header = parse_vtt(original)
+        if not blocks or len(blocks) != original.count("-->"):
+            return 0, False
         cleaned = clean_blocks(blocks, max_duration, similarity)
         new_text = render_vtt(cleaned, header)
         removed = max(0, len(blocks) - len(cleaned))
@@ -395,7 +446,11 @@ def clean_file(path,
     if new_text.strip() == original.strip():
         return 0, False
     try:
-        p.write_text(new_text, encoding="utf-8")
+        from utils.file_ops import safe_write_text
+
+        result = safe_write_text(p, new_text)
+        if not result["ok"]:
+            return 0, False
     except OSError:
         return 0, False
     return removed, True
@@ -435,13 +490,16 @@ def find_subtitles(video_path, formats=("srt",), output_dir: Optional[str] = Non
     folders += [video.parent / "Subs", video.parent / "subs"]
     if output_dir:
         folders.insert(0, Path(str(output_dir)))
+        from utils.file_ops import source_output_key
+
+        folders.insert(0, Path(str(output_dir)) / source_output_key(video_path))
 
     out, seen = [], set()
     for folder in folders:
         try:
             entries = list(folder.iterdir())
         except OSError:
-            continue    # 目录不存在/无权限：跳过，不中断
+            continue  # 目录不存在/无权限：跳过，不中断
         for f in entries:
             if not f.is_file():
                 continue

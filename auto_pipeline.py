@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import ToolkitConfig
 from automation.pipeline import resolve_tools, run_pipeline
+from automation.plans import write_json_atomic
 
 
 def main() -> int:
@@ -60,10 +61,9 @@ def main() -> int:
 
     if args.report:
         out = Path(args.report)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"报告已写入: {out}")
-    return 0
+        write_json_atomic(out, report)
+        print(f"报告已写入: {out}", file=sys.stderr)
+    return 130 if report.get('status') == 'cancelled' else 1 if report.get('status') == 'failed' else 0
 
 
 if __name__ == "__main__":

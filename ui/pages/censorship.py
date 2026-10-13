@@ -1,14 +1,20 @@
 """视频有码检测页面 — 拖入文件/文件夹，自动分类有码/无码视频。"""
+
 from __future__ import annotations
+
+from ui.services import busy, start_task, stop_page
 
 import datetime
 import os
-from pathlib import Path
 from typing import List, Set
 
 from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
     QSplitter,
 )
 
@@ -21,15 +27,22 @@ class CensorshipScanWorker(QThread):
     """后台扫描线程 — 递归收集视频文件并按文件名分类，避免大目录拖拽卡死 UI。"""
 
     file_classified = Signal(str, bool)  # 文件路径, 是否无码
-    progress = Signal(int, int)          # 已分类数, 总数
-    finished = Signal(int, int)          # 无码数量, 有码数量
+    progress = Signal(int, int)  # 已分类数, 总数
+    finished = Signal(int, int)  # 无码数量, 有码数量
 
-    def __init__(self, paths: List[str], extensions: Set[str],
-                 keywords: List[str], parent=None):
+    def __init__(
+        self,
+        paths: List[str],
+        extensions: Set[str],
+        keywords: List[str],
+        parent=None,
+        exclude_keywords=None,
+    ):
         super().__init__(parent)
         self._paths = paths
         self._exts = {e.lower() for e in extensions}
         self._keywords = keywords
+        self._exclude_keywords = list(exclude_keywords or [])
         self._total = 0
         self._done = 0
         self._stopped = False
@@ -37,50 +50,27 @@ class CensorshipScanWorker(QThread):
     def stop(self) -> None:
         self._stopped = True
 
-    def _count_videos(self) -> int:
-        """预统计视频文件总数（用于进度）。"""
-        total = 0
-        for p in self._paths:
-            pp = Path(p)
-            if pp.is_file() and pp.suffix.lower() in self._exts:
-                total += 1
-            elif pp.is_dir():
-                try:
-                    total += sum(1 for f in pp.rglob("*")
-                                 if f.is_file() and f.suffix.lower() in self._exts)
-                except OSError:
-                    continue
-        return total
-
     def run(self) -> None:
-        self._total = self._count_videos()
-        uncensored = 0
-        censored = 0
-        for p in self._paths:
+        from utils.file_scan import iter_media_files
+
+        paths = list(
+            iter_media_files(
+                self._paths,
+                video_exts=self._exts,
+                exclude_keywords=self._exclude_keywords,
+                should_stop=lambda: self._stopped,
+            )
+        )
+        self._total = len(paths)
+        uncensored = censored = 0
+        for path in paths:
             if self._stopped:
                 return
-            pp = Path(p)
-            if pp.is_file():
-                ok = self._classify(str(pp))
-                if ok:
-                    uncensored += 1
-                else:
-                    censored += 1
-                self._tick()
-            elif pp.is_dir():
-                try:
-                    for f in pp.rglob("*"):
-                        if self._stopped:
-                            return
-                        if f.is_file() and f.suffix.lower() in self._exts:
-                            ok = self._classify(str(f))
-                            if ok:
-                                uncensored += 1
-                            else:
-                                censored += 1
-                            self._tick()
-                except OSError:
-                    continue
+            if self._classify(path):
+                uncensored += 1
+            else:
+                censored += 1
+            self._tick()
         self.finished.emit(uncensored, censored)
 
     def _tick(self) -> None:
@@ -112,7 +102,7 @@ class CensorshipPage(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        title = QLabel("视频有码检测")
+        title = QLabel("文件名分类：推测有码 / 无码")
         title.setProperty("cssClass", "page-title")
         layout.addWidget(title)
 
@@ -128,7 +118,7 @@ class CensorshipPage(QWidget):
         left_w = QWidget()
         left_lay = QVBoxLayout(left_w)
         left_lay.setContentsMargins(0, 0, 6, 0)
-        left_lay.addWidget(QLabel("✅ 天生无码 / 破解版（无需修复）"))
+        left_lay.addWidget(QLabel("文件名推测无码 / 已修复（请核对）"))
         self.table_uncensored = DragDropTableWidget(["文件名", "修改日期"])
         left_lay.addWidget(self.table_uncensored)
         splitter.addWidget(left_w)
@@ -136,7 +126,7 @@ class CensorshipPage(QWidget):
         right_w = QWidget()
         right_lay = QVBoxLayout(right_w)
         right_lay.setContentsMargins(6, 0, 0, 0)
-        right_lay.addWidget(QLabel("🛠️ 常规有码（拖入 Lada 等工具修复）"))
+        right_lay.addWidget(QLabel("文件名未命中无码规则（不代表画面检测结果）"))
         self.table_censored = DragDropTableWidget(["文件名", "修改日期"])
         right_lay.addWidget(self.table_censored)
         splitter.addWidget(right_w)
@@ -155,6 +145,14 @@ class CensorshipPage(QWidget):
         clear_btn.clicked.connect(self._clear_all)
         btn_row.addWidget(clear_btn)
         layout.addLayout(btn_row)
+        for table in (self.table_censored, self.table_uncensored):
+            table.model().rowsRemoved.connect(self._sync_known)
+
+    def _sync_known(self, *args):
+        self._known = (
+            self.table_censored.gather_all_paths() | self.table_uncensored.gather_all_paths()
+        )
+        self._update_stats()
 
     # ── 拖拽事件 ──
     def dragEnterEvent(self, event):
@@ -176,21 +174,26 @@ class CensorshipPage(QWidget):
             event.acceptProposedAction()
             # 延迟到拖拽结束后启动扫描，避免在 drop 回调内创建/启动线程触发 Qt 崩溃
             from PySide6.QtCore import QTimer
+
             QTimer.singleShot(0, self, lambda: self._start_scan_worker(paths))
         except Exception:
             event.ignore()
 
     def _start_scan_worker(self, paths: list[str]) -> None:
+        if self._worker and self._worker.isRunning():
+            self._stats_label.setText("扫描进行中，请等待完成后再添加")
+            return
         self._stats_label.setText("正在扫描...")
         self._worker = CensorshipScanWorker(
             paths,
             set(self.cfg.video_extensions),
             list(self.cfg.uncensored_keywords),
+            exclude_keywords=self.cfg.exclude_path_keywords,
         )
         self._worker.file_classified.connect(self._add_file)
         self._worker.progress.connect(self._on_scan_progress)
         self._worker.finished.connect(self._scan_done)
-        self._worker.start()
+        start_task(self, self._worker)
 
     def _on_scan_progress(self, done: int, total: int) -> None:
         if total > 0:
@@ -218,12 +221,11 @@ class CensorshipPage(QWidget):
         self._update_stats()
 
     def shutdown(self) -> None:
-        """应用退出时调用：停止后台扫描线程。"""
-        if self._worker and self._worker.isRunning():
-            self._worker.stop()
-            self._worker.wait(3000)
+        stop_page(self)
 
     def _clear_all(self) -> None:
+        if busy(self):
+            return
         self.table_uncensored.clear_all()
         self.table_censored.clear_all()
         self._known.clear()

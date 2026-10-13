@@ -1,13 +1,30 @@
 """主窗口 — 侧边栏导航 + 堆叠页面路由 + 主题管理。"""
+
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QScrollArea,
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QStackedWidget, QPushButton, QLabel, QFrame,
-    QMessageBox, QSizePolicy,
+    QMainWindow,
+    QWidget,
+    QHBoxLayout,
+    QVBoxLayout,
+    QStackedWidget,
+    QPushButton,
+    QLabel,
+    QFrame,
+    QMessageBox,
+    QSizePolicy,
 )
-from PySide6.QtCore import Qt, QFileInfo
+from PySide6.QtCore import Qt, QFileInfo, QTimer
+from ui.services import (
+    events,
+    TaskManager,
+    page_workers,
+    stop_page,
+    refresh_configuration,
+    state_context,
+)
+from ui.layout import compact_forms, dock_actions, collapse_advanced
 
 from config import ToolkitConfig
 from ui import theme
@@ -46,12 +63,12 @@ class SidebarButton(QPushButton):
                 text-align: left;
                 color: {color};
                 font-size: 13px;
-                font-weight: {'bold' if active else 'normal'};
+                font-weight: {"bold" if active else "normal"};
                 margin: 2px 10px;
             }}
             QPushButton:hover {{
                 background-color: {accent if active else hover};
-                color: {t['selection_text'] if active else t['text_primary']};
+                color: {t["selection_text"] if active else t["text_primary"]};
             }}
         """)
 
@@ -81,6 +98,7 @@ class MainWindow(QMainWindow):
         ("🧩", "分集合并"),
         ("🤖", "自动化工作台"),
         ("⚙️", "设置"),
+        ("📌", "任务中心"),
     ]
 
     def __init__(self, cfg: ToolkitConfig | None = None):
@@ -96,6 +114,7 @@ class MainWindow(QMainWindow):
 
         # ffmpeg 路径每次启动时按「用户配置 > 程序目录 > PATH > 常见位置」解析
         from utils.tools import resolve_tool
+
         self.ffmpeg_path = resolve_tool("ffmpeg")
 
         self._setup_ui()
@@ -103,21 +122,26 @@ class MainWindow(QMainWindow):
 
         self._nav_buttons[0].set_active(True)
         self.stack.setCurrentIndex(0)
+        events.config_changed.connect(self._config_changed)
+        TaskManager.instance().changed.connect(self._task_summary)
 
         if not self.ffmpeg_path:
             QMessageBox.warning(
-                self, "未找到 FFmpeg",
+                self,
+                "未找到 FFmpeg",
                 "未检测到 ffmpeg，视频修复 / 转码 / 分集合并扫描将不可用。\n\n"
                 "解决方式（任选其一）：\n"
                 "1. 打开「设置 → FFmpeg 转码设置」，点「浏览」指定 ffmpeg 可执行文件；\n"
                 "2. 把 ffmpeg/ffprobe 放进程序目录下的 bin\\ 子目录；\n"
-                "3. 安装 FFmpeg 并确保它在系统 PATH 中。"
+                "3. 安装 FFmpeg 并确保它在系统 PATH 中。",
             )
         elif not QFileInfo(self.ffmpeg_path).isExecutable():
             QMessageBox.warning(
-                self, "FFmpeg 不可用",
+                self,
+                "FFmpeg 不可用",
                 f"解析到的 ffmpeg 路径不可执行：\n{self.ffmpeg_path}\n"
-                "请在「设置 → FFmpeg 转码设置」里重新指定。")
+                "请在「设置 → FFmpeg 转码设置」里重新指定。",
+            )
 
     # ── 主题管理 ──
     def apply_theme(self, theme_name: str | None = None) -> None:
@@ -128,7 +152,6 @@ class MainWindow(QMainWindow):
         """
         if theme_name:
             theme.set_current(theme_name)
-            self.cfg.theme = theme_name
         self.apply_stylesheet()
         # 通知各页面刷新自绘/内联样式的动态色（无此方法的页面自动跳过）
         for page in self._pages:
@@ -157,7 +180,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.setContentsMargins(0, 16, 0, 16)
         sidebar_layout.setSpacing(4)
 
-        logo = QLabel(f"🎬 {APP_NAME_CN}\n  Toolkit")
+        logo = QLabel(f"🎬 {APP_NAME_CN}")
         logo.setObjectName("logo")
         logo_font = ui_font(16, bold=True)
         if logo_font is not None:
@@ -171,12 +194,39 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(sep)
         sidebar_layout.addSpacing(12)
 
-        self._nav_buttons: list[SidebarButton] = []
-        for icon, label in self.NAV_ITEMS:
-            btn = SidebarButton(icon, label)
-            btn.clicked.connect(lambda checked, idx=len(self._nav_buttons): self._navigate(idx))
-            self._nav_buttons.append(btn)
-            sidebar_layout.addWidget(btn)
+        self._nav_buttons: list[SidebarButton] = [None] * len(self.NAV_ITEMS)
+        groups = [
+            ("首页与连接", (0, 16)),
+            ("内容审核", (1, 2, 3, 4)),
+            ("版本与分集", (5, 14)),
+            ("字幕管理", (7, 8)),
+            ("媒体处理", (6, 10, 9, 11)),
+            ("工作流与任务", (15, 17)),
+            ("高级维护", (12, 13)),
+        ]
+        nav_content = QWidget()
+        nav_layout = QVBoxLayout(nav_content)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(2)
+        for name, indices in groups:
+            heading = QLabel(name)
+            heading.setProperty("cssClass", "nav-group")
+            nav_layout.addWidget(heading)
+            for index in indices:
+                icon, label = self.NAV_ITEMS[index]
+                btn = SidebarButton(icon, label)
+                btn.clicked.connect(lambda checked, idx=index: self._navigate(idx))
+                self._nav_buttons[index] = btn
+                nav_layout.addWidget(btn)
+
+        nav_layout.addStretch()
+        navigation = QScrollArea()
+        navigation.setObjectName("navigation-scroll")
+        navigation.setWidgetResizable(True)
+        navigation.setFrameShape(QFrame.NoFrame)
+        navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        navigation.setWidget(nav_content)
+        sidebar_layout.addWidget(navigation, 1)
 
         sidebar_layout.addStretch()
 
@@ -199,6 +249,31 @@ class MainWindow(QMainWindow):
             btn.set_active(i == idx)
         self.stack.setCurrentIndex(idx)
 
+    def _config_changed(self):
+        for page in self._pages:
+            changed = getattr(page, "on_config_changed", None)
+            if callable(changed):
+                changed()
+            elif hasattr(page, "cfg"):
+                refresh_configuration(page)
+
+    def _task_summary(self):
+        manager = TaskManager.instance()
+        active = [entry["record"] for entry in manager._active.values()]
+        if active:
+            self.statusBar().showMessage(
+                f"{len(active)} 个任务进行中 · {active[-1]['title']} · {active[-1]['progress']}% · 在任务中心查看/停止"
+            )
+        elif manager.records:
+            last = manager.records[-1]
+            self.statusBar().showMessage(
+                last["title"]
+                + " · "
+                + {"succeeded": "完成", "failed": "失败", "cancelled": "已取消"}.get(
+                    last["status"], last["status"]
+                )
+            )
+
     def register_page(self, page: QWidget) -> None:
         """向堆叠组件注册功能页面（自动套一层滚动区）。
 
@@ -217,20 +292,47 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(page)
         self._pages.append(page)
-        self.stack.addWidget(scroll)
+        if hasattr(page, "cfg"):
+            page._state_context = state_context(page.cfg)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(scroll, 1)
+        compact_forms(page)
+        collapse_advanced(page)
+        dock_actions(page, layout)
+        self.stack.addWidget(container)
 
     def closeEvent(self, event):
         """保存配置并停止所有后台线程，避免 "QThread destroyed while running" 崩溃。"""
-        # 通知各页面优雅停止后台线程
+        self._closing = True
+        TaskManager.instance().stop_all()
         for page in self._pages:
+            stop_page(page)
             shutdown = getattr(page, "shutdown", None)
             if callable(shutdown):
                 shutdown()
+        if TaskManager.instance().running() or any(
+            w.isRunning() for page in self._pages for w in page_workers(page)
+        ):
+            event.ignore()
+            self.statusBar().showMessage(
+                "正在停止任务。后台线程结束后窗口才会关闭，可在任务中心查看。"
+            )
+            if not getattr(self, "_close_pending", False):
+                self._close_pending = True
+                QTimer.singleShot(100, self, self._retry_close)
+            return
         # 短暂泵事件循环，让停止信号送达
         from PySide6.QtCore import QCoreApplication
+
         QCoreApplication.processEvents()
         self.cfg.save()
         super().closeEvent(event)
+
+    def _retry_close(self):
+        self._close_pending = False
+        self.close()
 
 
 NAV_LABELS = [label for _icon, label in MainWindow.NAV_ITEMS]

@@ -5,10 +5,10 @@
 - 没有任何状态标签时，直接补一个「无码破解」；
 - 去重，避免出现“无码”和“无码破解”并存。
 """
+
 from __future__ import annotations
 
 import sqlite3
-import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -17,8 +17,17 @@ TARGET_TAG = "无码破解"
 
 # 统一成 TARGET_TAG 的状态标签
 CENSOR_STATE_TAGS = {
-    "有码", "有碼", "有码破解", "无码", "無碼", "無修正",
-    "薄码", "薄碼", "薄马赛克", "有马", "有馬",
+    "有码",
+    "有碼",
+    "有码破解",
+    "无码",
+    "無碼",
+    "無修正",
+    "薄码",
+    "薄碼",
+    "薄马赛克",
+    "有马",
+    "有馬",
 }
 
 
@@ -73,6 +82,7 @@ def update_jellyfin_db_tags(
 
     返回 (是否成功, 说明)。
     """
+
     def _log(msg: str) -> None:
         if log:
             log(msg)
@@ -84,10 +94,12 @@ def update_jellyfin_db_tags(
     backup_path: Optional[Path] = None
     if backup:
         backup_path = db.with_name(
-            f"{db.stem}.replace_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}{db.suffix}"
+            f"{db.stem}.replace_backup_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}{db.suffix}"
         )
         try:
-            shutil.copy2(str(db), str(backup_path))
+            from utils.file_ops import snapshot_sqlite
+
+            snapshot_sqlite(db, backup_path)
             _log(f"📦 已备份 Jellyfin 数据库: {backup_path.name}")
         except OSError as e:
             return False, f"数据库备份失败: {e}"
@@ -97,9 +109,21 @@ def update_jellyfin_db_tags(
         conn.execute("PRAGMA busy_timeout=15000")
         cur = conn.cursor()
         try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(BaseItems)")}
+            tables = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if not {"Id", "Path", "Genres", "Tags"} <= cols:
+                return False, "本地数据库结构不支持安全标签写入，请通过服务器 API 更新"
+            if any(
+                "genre" in table.lower() or "tag" in table.lower()
+                for table in tables
+                if table != "BaseItems"
+            ):
+                return False, "数据库含独立标签关联表，请通过服务器 API 更新以保证索引一致"
+            conn.execute("BEGIN IMMEDIATE")
             cur.execute(
-                "SELECT Id, Genres, Tags FROM BaseItems "
-                "WHERE Path = ? COLLATE NOCASE LIMIT 1",
+                "SELECT Id, Genres, Tags FROM BaseItems WHERE Path = ? COLLATE NOCASE LIMIT 1",
                 (str(video_path),),
             )
             row = cur.fetchone()

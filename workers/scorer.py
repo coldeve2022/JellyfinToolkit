@@ -1,134 +1,80 @@
-"""评分+重排后台线程 - 包装 ingest 与 scoring。
-
-v2 说明：默认使用升级版评分引擎 scoring_v2（分桶画像 + 置信度加权 + 邻域传播），
-统计指标更准；可用 config.engine 切回 v1（默认 "v2"）。
-"""
+"""Library analysis and reranking consume the same pure scoring snapshot as automation."""
 from __future__ import annotations
-
+from copy import deepcopy
 from PySide6.QtCore import QThread, Signal
-
-from config import DATA_DIR
-from utils.ai_profile import AIProfileStore
 from utils import library_source
-from utils.library import Item
+from utils.scoring_service import score_snapshot
+from config import ToolkitConfig
 
 
-def _scoring_engine():
-    """按配置选择评分引擎（v2 默认；v1 保留用于对比）。
-
-    Returns:
-        (rank_items 函数, decision_counts 函数, 是否支持 ai_scores 参数)
-    """
-    try:
-        from config import ToolkitConfig
-        eng = ToolkitConfig.load().engine
-        if eng == "v1":
-            from utils.scoring import rank_items as rk, decision_counts as dc
-            return rk, dc, False
-    except Exception:  # noqa: BLE001
-        pass
-    from utils.scoring_v2 import rank_items as rk, decision_counts as dc
-    return rk, dc, True
-
-
-def _ai_extra():
-    """读取 AI 参与分类提炼的标签画像；无则返回空。"""
-    ai = AIProfileStore(DATA_DIR / "smart.db").load()
-    if not ai:
-        return (), ()
-    return ai["liked_keys"], ai["disliked_keys"]
-
-
-def _ai_scores(item_ids):
-    """读取本地 LLM 语义打分缓存 {item_id: 0..1}；无则返回空 dict。"""
-    try:
-        from utils.ai_scoring import AIScoreStore
-        return AIScoreStore(DATA_DIR / "smart.db").get_many(item_ids)
-    except Exception:  # noqa: BLE001
-        return {}
-
-
-def _cfg_enhance() -> bool:
-    """增强匹配总开关（设置页可关，便于对比优化前后）。"""
-    try:
-        from config import ToolkitConfig
-        return bool(ToolkitConfig.load().enhance_match)
-    except Exception:  # noqa: BLE001
-        return True
+def __getattr__(name):
+    if name == "DATA_DIR":
+        import config
+        return config.DATA_DIR
+    raise AttributeError(name)
 
 
 class AnalyzeWorker(QThread):
-    """采集 + 全库评分，一次性产出排序结果与分层计数。
-
-    ``source`` 传配置对象（``ToolkitConfig``）即可——由 ``utils.library_source``
-    决定读本地数据库还是走服务器 API（Jellyfin / Emby 通用）。
-    也接受数据库路径字符串，以兼容旧调用。
-    """
-
     log = Signal(str)
     progress = Signal(int)
-    finished = Signal(dict)  # {"items":[...], "results":[...], "counts":{...}} 或 {"error":str}
+    finished = Signal(dict)
 
-    def __init__(self, source, labels: dict, exclude_keywords: list | None = None,
-                 th_keep: float | None = None, th_delete: float | None = None,
-                 parent=None):
+    def __init__(self, source, labels=None, exclude_keywords=None, th_keep=None, th_delete=None, parent=None):
         super().__init__(parent)
-        self.source = source
-        self.labels = labels
-        self.exclude_keywords = exclude_keywords or []
-        self.th_keep = th_keep
-        self.th_delete = th_delete
+        self.source = deepcopy(source)
+        self.labels = None if labels is None else dict(labels)
+        self.exclude_keywords = list(exclude_keywords or [])
+        self.th_keep, self.th_delete = th_keep, th_delete
         self._stopped = False
 
-    def stop(self) -> None:
+    def stop(self):
         self._stopped = True
+        self.requestInterruption()
 
-    def run(self) -> None:
+    def run(self):
         try:
-            items = library_source.collect(
-                self.source, log=self.log.emit,
-                progress=self.progress.emit,
-                should_stop=lambda: self._stopped,
-                exclude_keywords=self.exclude_keywords,
-            )
-            enhance = _cfg_enhance()
-            el, ed = _ai_extra() if enhance else ((), ())
-            ascores = _ai_scores([it.id for it in items]) if enhance else {}
-            rk, dc, supports_ai = _scoring_engine()
-            kwargs = dict(th_keep=self.th_keep, th_delete=self.th_delete,
-                          enhance=enhance, extra_liked=el, extra_disliked=ed)
-            if supports_ai:
-                kwargs["ai_scores"] = ascores
-            results = rk(items, self.labels, **kwargs)
-            counts = dc(results)
-            self.finished.emit({"items": items, "results": results, "counts": counts})
-        except Exception as e:  # noqa: BLE001
-            self.finished.emit({"error": str(e)})
+            items = library_source.collect(self.source, log=self.log.emit, progress=self.progress.emit,
+                                           should_stop=lambda: self._stopped,
+                                           exclude_keywords=self.exclude_keywords)
+            if self._stopped:
+                raise library_source.CollectionCancelled("分析已取消；部分结果不参与分类")
+            cfg = self.source if not isinstance(self.source, str) else ToolkitConfig.load()
+            result = score_snapshot(items, cfg, self.labels, th_keep=self.th_keep, th_delete=self.th_delete)
+            if self._stopped:
+                raise library_source.CollectionCancelled("分析已取消；部分结果不参与分类")
+            for warning in result["warnings"]:
+                self.log.emit(warning)
+            self.finished.emit(result)
+        except library_source.CollectionCancelled as exc:
+            self.finished.emit({"error": str(exc), "cancelled": True, "status": "cancelled"})
+        except Exception as exc:
+            self.finished.emit({"error": str(exc), "status": "failed"})
 
 
 class RerankWorker(QThread):
-    """只重排（不重新采集 DB），用于打标后增量更新。"""
+    finished = Signal(dict)
 
-    finished = Signal(dict)  # {"results":[...], "counts":{...}}
-
-    def __init__(self, items: list[Item], labels: dict,
-                 th_keep: float | None = None, th_delete: float | None = None,
-                 parent=None):
+    def __init__(self, items, labels, th_keep=None, th_delete=None, parent=None, source=None):
         super().__init__(parent)
-        self.items = items
-        self.labels = labels
-        self.th_keep = th_keep
-        self.th_delete = th_delete
+        self.items, self.labels = deepcopy(items), dict(labels)
+        self.source = deepcopy(source) if source is not None else None
+        self.th_keep, self.th_delete = th_keep, th_delete
+        self._stopped = False
 
-    def run(self) -> None:
-        enhance = _cfg_enhance()
-        el, ed = _ai_extra() if enhance else ((), ())
-        ascores = _ai_scores([it.id for it in self.items]) if enhance else {}
-        rk, dc, supports_ai = _scoring_engine()
-        kwargs = dict(th_keep=self.th_keep, th_delete=self.th_delete,
-                      enhance=enhance, extra_liked=el, extra_disliked=ed)
-        if supports_ai:
-            kwargs["ai_scores"] = ascores
-        results = rk(self.items, self.labels, **kwargs)
-        counts = dc(results)
-        self.finished.emit({"results": results, "counts": counts})
+    def stop(self):
+        self._stopped = True
+        self.requestInterruption()
+
+    def run(self):
+        try:
+            if self._stopped:
+                raise library_source.CollectionCancelled("重排已取消")
+            cfg = self.source if self.source is not None else ToolkitConfig.load()
+            result = score_snapshot(self.items, cfg, self.labels, th_keep=self.th_keep, th_delete=self.th_delete)
+            if self._stopped:
+                raise library_source.CollectionCancelled("重排已取消")
+            self.finished.emit(result)
+        except library_source.CollectionCancelled as exc:
+            self.finished.emit({"error": str(exc), "cancelled": True, "status": "cancelled"})
+        except Exception as exc:
+            self.finished.emit({"error": str(exc), "status": "failed"})

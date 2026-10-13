@@ -1,13 +1,27 @@
 """视频修复转码页面 — 合并了坏帧修复 + Jellyfin 兼容性转码两个功能。"""
+
 from __future__ import annotations
+
+from ui.services import busy, start_task, stop_page, import_media, after_stopped
 
 import os
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QCheckBox, QMessageBox, QComboBox, QSpinBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QProgressBar,
+    QCheckBox,
+    QMessageBox,
+    QComboBox,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QAbstractItemView,
 )
 from PySide6.QtGui import QColor, QBrush
 
@@ -34,8 +48,8 @@ class RepairPage(QWidget):
         self._worker: FFmpegRepairWorker | None = None
         self._analyzer: FFprobeAnalyzer | None = None
         self._scanning = False
-        self._scan_files_list: list[str] = []   # 当前扫描批次的文件（已过滤附属）
-        self._scan_results: dict[str, dict] = {}   # 扫描结果 {path: analyze_video 结果}
+        self._scan_files_list: list[str] = []  # 当前扫描批次的文件（已过滤附属）
+        self._scan_results: dict[str, dict] = {}  # 扫描结果 {path: analyze_video 结果}
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -84,8 +98,16 @@ class RepairPage(QWidget):
         self.combo_codec = QComboBox()
         # data 为 "" = 自动；执行时按本机**实测**结果挑选（不看编译期列表）
         self.combo_codec.addItem("自动（推荐）", "")
-        for name in ("h264_nvenc", "hevc_nvenc", "h264_qsv", "hevc_qsv",
-                     "h264_amf", "hevc_amf", "libx264", "libx265"):
+        for name in (
+            "h264_nvenc",
+            "hevc_nvenc",
+            "h264_qsv",
+            "hevc_qsv",
+            "h264_amf",
+            "hevc_amf",
+            "libx264",
+            "libx265",
+        ):
             self.combo_codec.addItem(name, name)
         idx = self.combo_codec.findData(self.cfg.ffmpeg_gpu_codec or "")
         self.combo_codec.setCurrentIndex(idx if idx >= 0 else 0)
@@ -184,11 +206,16 @@ class RepairPage(QWidget):
                 return
             event.acceptProposedAction()
             from PySide6.QtCore import QTimer
+
             QTimer.singleShot(0, self, lambda: self._on_files_dropped(paths))
         except Exception:
             event.ignore()
 
     def _on_files_dropped(self, paths: list[str]) -> None:
+        if busy(self):
+            return
+        if import_media(self, paths, self._on_files_dropped):
+            return
         exts = {e.lower() for e in self.cfg.video_extensions}
         skipped_junk = 0
         for p in paths:
@@ -216,7 +243,8 @@ class RepairPage(QWidget):
                     continue
         if skipped_junk:
             self.log_panel.log_info(
-                f"已自动排除 {skipped_junk} 个 Jellyfin 附属文件(theme/backdrop/fanart/trailer，非正片)。")
+                f"已自动排除 {skipped_junk} 个 Jellyfin 附属文件(theme/backdrop/fanart/trailer，非正片)。"
+            )
         # 拖入文件即可直接修复，无需先扫描
         self.btn_start.setEnabled(True)
 
@@ -231,7 +259,9 @@ class RepairPage(QWidget):
         keep = [f for f in files if not is_junk_attachment_path(f)]
         skipped = len(files) - len(keep)
         if skipped:
-            self.log_panel.log_info(f"已排除 {skipped} 个 Jellyfin 附属文件(theme/backdrop/fanart/trailer，非正片)。")
+            self.log_panel.log_info(
+                f"已排除 {skipped} 个 Jellyfin 附属文件(theme/backdrop/fanart/trailer，非正片)。"
+            )
         return keep
 
     def _select_repair_queue(self, mode: str) -> list[str]:
@@ -249,9 +279,13 @@ class RepairPage(QWidget):
             无扫描结果时返回空列表，由调用方回退到全量修复。
         """
         if not self._scan_results:
-            return []
+            return []  # legacy facade: caller falls back to current full queue
         queue = []
-        for path, info in self._scan_results.items():
+        for path in self._filtered_files():
+            info = self._scan_results.get(path)
+            if info is None:
+                queue.append(path)  # new inputs are analyzed by the worker
+                continue
             if mode == "transcode":
                 # 只转码"不兼容"的
                 if not info.get("is_corrupted") and not info.get("is_compatible"):
@@ -267,6 +301,8 @@ class RepairPage(QWidget):
         return queue
 
     def _scan_files(self) -> None:
+        if busy(self):
+            return
         files = self._filtered_files()
         if not files:
             QMessageBox.warning(self, "提示", "请先添加视频文件！")
@@ -275,13 +311,14 @@ class RepairPage(QWidget):
             return
 
         self._scanning = True
-        self._scan_files_list = files   # 记住本批要扫描的文件（已过滤附属）
-        self._scan_results = {}         # 清空旧扫描结果
+        self._scan_files_list = files  # 记住本批要扫描的文件（已过滤附属）
+        self._scan_results = {}  # 清空旧扫描结果
         self.result_table.setRowCount(0)
         self.summary_label.setText("扫描中…")
         self.btn_scan.setEnabled(False)
         self.btn_start.setEnabled(False)
         self.log_panel.clear()
+        self.btn_stop.setEnabled(True)
         self.log_panel.log_info(f"开始分析 {len(files)} 个文件...")
         self._analyze_next(0)
 
@@ -291,7 +328,7 @@ class RepairPage(QWidget):
             return
         files = getattr(self, "_scan_files_list", None) or self.file_list.get_all_paths()
         if idx >= len(files):
-            self._on_scan_done()   # 汇总 + 更新 UI
+            self._on_scan_done()  # 汇总 + 更新 UI
             return
 
         fp = files[idx]
@@ -300,14 +337,14 @@ class RepairPage(QWidget):
         self._analyzer = FFprobeAnalyzer(fp)
         self._analyzer.result.connect(self._on_analyzed)
         self._analyzer.finished.connect(lambda: self._analyze_next(idx + 1))
-        self._analyzer.start()
+        start_task(self, self._analyzer)
 
     def _on_analyzed(self, filepath: str, info: dict) -> None:
-        self._scan_results[filepath] = info   # 保存扫描结果供修复复用（不重复分析）
+        self._scan_results[filepath] = info  # 保存扫描结果供修复复用（不重复分析）
         name = os.path.basename(filepath)
         if info["is_corrupted"]:
             status = "❌ 损坏"
-            reason = info.get('error') or '结构异常'
+            reason = info.get("error") or "结构异常"
             self.log_panel.log_error(f"❌ 损坏: {name} — {reason}")
         elif not info["is_compatible"]:
             codec = info.get("video_codec") or "未知"
@@ -333,6 +370,7 @@ class RepairPage(QWidget):
         # 状态着色（随主题）
         try:
             from ui import theme
+
             if status.startswith("❌"):
                 color = theme.color("danger")
             elif status.startswith("⚠"):
@@ -351,10 +389,15 @@ class RepairPage(QWidget):
         """取主题色 hex 值，供汇总卡片 HTML 使用；失败时返回主题无关的兜底色。"""
         try:
             from ui import theme
+
             return theme.color(role)
         except Exception:  # noqa: BLE001
-            fallback = {"danger": "#e06c75", "warning": "#e5c07b",
-                        "success": "#98c379", "primary": "#61afef"}.get(role)
+            fallback = {
+                "danger": "#e06c75",
+                "warning": "#e5c07b",
+                "success": "#98c379",
+                "primary": "#61afef",
+            }.get(role)
             return fallback or "#9aa0a6"
 
     def _on_scan_done(self) -> None:
@@ -371,11 +414,13 @@ class RepairPage(QWidget):
 
         total = len(self._scan_files_list)
         results = self._scan_results
-        n_ok = sum(1 for k, v in results.items() if not v.get("is_corrupted")
-                   and v.get("is_compatible"))
+        n_ok = sum(
+            1 for k, v in results.items() if not v.get("is_corrupted") and v.get("is_compatible")
+        )
         n_bad = sum(1 for v in results.values() if v.get("is_corrupted"))
-        n_comp = sum(1 for v in results.values()
-                     if not v.get("is_corrupted") and not v.get("is_compatible"))
+        n_comp = sum(
+            1 for v in results.values() if not v.get("is_corrupted") and not v.get("is_compatible")
+        )
 
         if not results:
             self.summary_label.setText("未扫描到任何有效文件。")
@@ -396,29 +441,32 @@ class RepairPage(QWidget):
         )
         self.summary_label.setText(summary_html)
         self.status_label.setText(
-            f"扫描完成: 共 {total} 个 | 损坏 {n_bad} | 不兼容 {n_comp} | 正常 {n_ok}")
+            f"扫描完成: 共 {total} 个 | 损坏 {n_bad} | 不兼容 {n_comp} | 正常 {n_ok}"
+        )
 
-        self.log_panel.log_info(
-            "─" * 50)
+        self.log_panel.log_info("─" * 50)
         self.log_panel.log_info(
             f"📋 扫描汇总: 共 {total} 个文件 → "
-            f"❌ 损坏 {n_bad} 个 | ⚠️ 不兼容 {n_comp} 个 | ✅ 正常 {n_ok} 个")
+            f"❌ 损坏 {n_bad} 个 | ⚠️ 不兼容 {n_comp} 个 | ✅ 正常 {n_ok} 个"
+        )
         # 具体问题文件列表（便于排查）
         for name, v in results.items():
             if v.get("is_corrupted"):
                 self.log_panel.log_error(
-                    f"  · {os.path.basename(name)} — {v.get('error') or '结构异常'}")
+                    f"  · {os.path.basename(name)} — {v.get('error') or '结构异常'}"
+                )
             elif not v.get("is_compatible"):
                 self.log_panel.log_warning(
                     f"  · {os.path.basename(name)} — 编码 "
-                    f"{v.get('video_codec') or '未知'}，将自动转码")
-        self.log_panel.log_info(
-            "─" * 50)
-        self.log_panel.log_info(
-            "✅ 扫描结果已保存，点「开始修复」将直接复用，不再重复分析。")
+                    f"{v.get('video_codec') or '未知'}，将自动转码"
+                )
+        self.log_panel.log_info("─" * 50)
+        self.log_panel.log_info("✅ 扫描结果已保存，点「开始修复」将直接复用，不再重复分析。")
 
     # ── 修复/转码 ──
     def _start_repair(self) -> None:
+        if busy(self, mutating=True):
+            return
         files = self._filtered_files()
         if not files:
             QMessageBox.warning(self, "提示", "请先添加视频文件！")
@@ -459,28 +507,30 @@ class RepairPage(QWidget):
                 files = queue
                 self.log_panel.log_info(
                     f"🎯 已从扫描结果中筛出 {len(queue)} 个待处理文件 "
-                    f"(损坏/不兼容)，其余正常文件不再遍历。")
+                    f"(损坏/不兼容)，其余正常文件不再遍历。"
+                )
             else:
                 QMessageBox.information(
-                    self, "无需处理",
-                    "扫描结果显示所有文件均兼容且正常，没有需要修复/转码的。")
+                    self, "无需处理", "扫描结果显示所有文件均兼容且正常，没有需要修复/转码的。"
+                )
                 self._on_finished()
                 return
 
         self._worker = FFmpegRepairWorker(
-            files, mode,
+            files,
+            mode,
             self.cfg.ffmpeg_gpu_codec,
             self.cfg.ffmpeg_hardware_accel,
             self.cfg.transcode_crf,
             min_size_bytes=min_bytes,
-            precomputed=self._scan_results,   # 复用扫描结果，不重复 ffprobe 分析
+            precomputed=self._scan_results,  # 复用扫描结果，不重复 ffprobe 分析
             timeout=self.cfg.ffmpeg_timeout,  # 单文件处理超时，防损坏文件无限挂起
-            log_skips=False,                  # 只处理问题文件，无需再刷"跳过"日志
+            log_skips=False,  # 只处理问题文件，无需再刷"跳过"日志
         )
         self._worker.log.connect(self.log_panel.log)
         self._worker.progress.connect(self.progress.setValue)
         self._worker.finished.connect(self._on_finished)
-        self._worker.start()
+        start_task(self, self._worker)
 
     def _toggle_pause(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -499,7 +549,11 @@ class RepairPage(QWidget):
             self._analyzer.stop()
             self._scanning = False
             self.log_panel.log_warning("扫描已停止")
-        self._on_finished()
+        self.btn_start.setEnabled(False)
+        self.btn_scan.setEnabled(False)
+        self.btn_stop.setEnabled(False)
+        stop_page(self)
+        after_stopped(self, self._on_finished)
 
     def _on_finished(self) -> None:
         self._scanning = False
@@ -512,6 +566,8 @@ class RepairPage(QWidget):
             self.status_label.setText("就绪")
 
     def _clear(self) -> None:
+        if busy(self):
+            return
         self.file_list.clear()
         self.log_panel.clear()
         self.progress.setValue(0)
@@ -523,5 +579,4 @@ class RepairPage(QWidget):
         self.summary_label.setText("尚未扫描")
 
     def shutdown(self) -> None:
-        """应用退出时调用：停止所有后台线程。"""
-        self._stop()
+        stop_page(self)

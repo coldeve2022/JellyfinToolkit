@@ -47,21 +47,22 @@ def _mk(**kw):
 
 def test_summarize_counters():
     items = [
-        _mk(id="1", num="A-1", bucket=BUCKET_JAV, is_favorite=True, is_played=True,
+        _mk(id="1", path="Z:/A-1.mp4", num="A-1", bucket=BUCKET_JAV, is_favorite=True, is_played=True,
             year=2022, actors=["甲"], play_count=3),
-        _mk(id="2", num="A-1", bucket=BUCKET_JAV, is_favorite=False, is_cd=True,
+        _mk(id="2", path="Z:/A-1-cd1.mp4", num="A-1", bucket=BUCKET_JAV, is_favorite=False, is_cd=True,
             year=2022, actors=["乙"], play_count=0),
-        _mk(id="3", num="B-2", bucket=BUCKET_UNC, is_favorite=False,
+        _mk(id="3", path="Z:/B-2.mp4", num="B-2", bucket=BUCKET_UNC, is_favorite=False,
             year=2019, actors=["甲"], play_count=0),
     ]
     s = summarize(items)
     assert s["total"] == 3
     assert s["favorite"] == 1
     assert s["played"] == 1
-    # 同番号 A-1 出现两次且含 CD → 记为 CD 组
+    # Two physical paths with a full version and a CD are a mixed group;
+    # only a group consisting entirely of CDs is classified as CD-protected.
     assert s["dup_groups"] == 1
-    assert s["dup_cd_groups"] == 1
-    assert s["dup_true"] == 0
+    assert s["dup_cd_groups"] == 0
+    assert s["dup_true"] == 1
     # 未看（待预测池，≠删除）：id2 与 id3 从未播放
     assert s["unwatched"] == 2
     # 未看且老：id3(2019) 命中；id2(2022) 也命中(≤2022)

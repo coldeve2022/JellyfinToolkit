@@ -1,10 +1,16 @@
 """新手引导页 - 6 步向导，每步可跳转功能页；点「开始使用」保存标记并进入库概览。"""
+
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QStackedWidget, QFrame,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QStackedWidget,
+    QFrame,
 )
 
 from config import ToolkitConfig
@@ -13,7 +19,7 @@ from config import ToolkitConfig
 class OnboardingPage(QWidget):
     """新手引导。"""
 
-    navigate_requested = Signal(str)   # 要跳转的功能页标题（与 MainWindow.NAV_ITEMS 对应）
+    navigate_requested = Signal(str)  # 要跳转的功能页标题（与 MainWindow.NAV_ITEMS 对应）
 
     def __init__(self, cfg: ToolkitConfig, parent=None):
         super().__init__(parent)
@@ -32,7 +38,7 @@ class OnboardingPage(QWidget):
                     "• 已保留（看过/收藏）= 真值，不动\n"
                     "• 可能喜欢 / 建议删除 = 系统自动判断\n"
                     "• 待复核 = 才需要你快速打标\n\n"
-                    "全程只读媒体库，删除只进回收站（可恢复），绝不物理删。"
+                    "分析只读媒体库；修改功能先审阅具体计划。删除文件进入可恢复隔离区。"
                 ),
                 "goto": None,
             },
@@ -61,7 +67,7 @@ class OnboardingPage(QWidget):
                 "title": "③ 快速打标（核心闭环）",
                 "body": (
                     "点「快速打标」→「开始分析」，只处理待复核卡片：\n"
-                    "→ 右箭头 = 喜欢/保留　← 左箭头 = 不喜欢\n"
+                    "→ 右箭头 = 喜欢；「仅保留」独立保护　← 左箭头 = 不喜欢\n"
                     "↓ 下箭头 = 跳过　空格 = 打开文件位置　Ctrl+Z = 撤销\n\n"
                     "每判一条全库自动重排——你标「不喜欢」的同类会沉到建议删除。"
                 ),
@@ -70,12 +76,12 @@ class OnboardingPage(QWidget):
             {
                 "title": "④ 安全删除 + 重复处理",
                 "body": (
-                    "建议删除清单分三类：垃圾/附属文件、零命中、重复差版本。\n"
+                    "建议删除清单只包含正片；附属/临时文件自动排除。\n"
                     "建议顺序：\n"
-                    "1) 先只勾「垃圾/附属」移入回收站，验证可还原\n"
-                    "2) 再清「零命中」作品\n"
+                    "1) 核对低分未看作品的实际路径\n"
+                    "2) 审阅人工反馈与AI建议，确认后归档\n"
                     "3) 最后在「重复处理」删差版本\n\n"
-                    "⚠️ 首次务必先删 1 个测试文件，确认回收站能还原再批量。"
+                    "归档后可在「任务中心 → 文件备份」恢复，文件冲突会拒绝覆盖。"
                 ),
                 "goto": "删除暂存",
             },
@@ -95,6 +101,19 @@ class OnboardingPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 36, 40, 32)
         root.setSpacing(18)
+
+        self.connection = QLabel()
+        self.connection.setWordWrap(True)
+        self.connection.setProperty("cssClass", "info-card")
+        root.addWidget(self.connection)
+        connect_btn = QPushButton("连接媒体库 / 选择观看用户 →")
+        connect_btn.setProperty("cssClass", "accent")
+        connect_btn.clicked.connect(lambda: self.navigate_requested.emit("设置"))
+        root.addWidget(connect_btn)
+        from ui.services import events
+
+        events.config_changed.connect(self.on_config_changed)
+        self.on_config_changed()
 
         self.stack = QStackedWidget()
         for s in self._steps:
@@ -180,3 +199,17 @@ class OnboardingPage(QWidget):
 
     def apply_theme(self) -> None:
         return  # 样式全部走 cssClass，随主窗口 QSS 自动切换
+
+    def on_config_changed(self):
+        from utils.library_source import describe
+        from utils.tools import resolve_tool
+
+        self.connection.setText(
+            "媒体库："
+            + describe(self.cfg)
+            + "\n观看用户："
+            + (self.cfg.jellyfin_user_id or "未选择；多用户库必须选择自己的账号")
+            + "\n本地处理："
+            + ("FFmpeg已就绪" if resolve_tool("ffmpeg") else "未找到FFmpeg，配置后可执行媒体处理")
+            + "\n下一步：连接验证 → 扫描库 → 审核计划 → 小批执行 → 到任务中心查看结果/恢复。"
+        )

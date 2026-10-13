@@ -1,12 +1,22 @@
 """字幕缺失检测页面 — 扫描视频目录，找出没有字幕文件的视频。"""
+
 from __future__ import annotations
+
+from ui.services import busy, start_task, stop_page, events, after_stopped
 
 import json
 import os
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSpinBox, QProgressBar, QMessageBox, QAbstractItemView,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSpinBox,
+    QProgressBar,
+    QMessageBox,
+    QAbstractItemView,
 )
 
 from config import ToolkitConfig
@@ -22,12 +32,13 @@ class SubtitlePage(QWidget):
         super().__init__(parent)
         self.cfg = cfg
         self._directories: set[str] = set()
-        self._checked: set[str] = set()   # 已检查路径（断点续传）
-        self._aux_skipped = 0             # 本次扫描被忽略的预告片/主题视频数
+        self._checked: set[str] = set()  # 已检查路径（断点续传）
+        self._aux_skipped = 0  # 本次扫描被忽略的预告片/主题视频数
         self._worker: FileScannerWorker | None = None
         self.setAcceptDrops(True)
         self._setup_ui()
         self._load_state()
+        events.media_changed.connect(lambda _: self._refresh_missing())
 
     @staticmethod
     def _state_file() -> str:
@@ -37,6 +48,7 @@ class SubtitlePage(QWidget):
         运行时重定向数据目录后（测试/便携模式）类常量会指向旧路径。
         """
         from config import DATA_DIR
+
         return str(DATA_DIR / "subtitle_state.json")
 
     def _setup_ui(self) -> None:
@@ -67,6 +79,7 @@ class SubtitlePage(QWidget):
         layout.addLayout(set_row)
 
         self.dir_list = DragDropListWidget()
+        self.dir_list.paths_changed.connect(self._sync_directories)
         self.dir_list.setMaximumHeight(120)
         self.dir_list.files_dropped.connect(self._on_dirs_dropped)
         layout.addWidget(self.dir_list)
@@ -89,6 +102,9 @@ class SubtitlePage(QWidget):
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_pause)
         btn_row.addWidget(self.btn_stop)
+        self.btn_generate = QPushButton("把缺字幕清单发送到生成 →")
+        self.btn_generate.clicked.connect(self._send_to_generator)
+        btn_row.addWidget(self.btn_generate)
         btn_row.addStretch()
         btn_row.addWidget(self.btn_clear)
         layout.addLayout(btn_row)
@@ -107,6 +123,26 @@ class SubtitlePage(QWidget):
         layout.addWidget(self.result_list)
 
     # ── 拖拽支持（页面级 + 列表级） ──
+    def _sync_directories(self, paths: list) -> None:
+        self._directories = set(paths)
+
+    def _refresh_missing(self):
+        formats = [str(e).lstrip(".") for e in self.cfg.subtitle_extensions]
+        for idx in range(self.result_list.count() - 1, -1, -1):
+            path = self.result_list.item(idx).data(256)
+            if not os.path.exists(path) or subtitle_clean.find_subtitles(
+                path, formats, self.cfg.whisper_output_dir or None
+            ):
+                self.result_list.takeItem(idx)
+
+    def _send_to_generator(self):
+        if busy(self):
+            return
+        self._refresh_missing()
+        paths = self.result_list.get_all_paths()
+        if paths:
+            events.subtitle_ready.emit(paths)
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.accept()
@@ -122,11 +158,14 @@ class SubtitlePage(QWidget):
             event.acceptProposedAction()
             # 延迟到拖拽结束后再处理，避免在 drop 回调内操作 view 触发 Qt 崩溃
             from PySide6.QtCore import QTimer
+
             QTimer.singleShot(0, self, lambda: self._on_dirs_dropped(paths))
         except Exception:
             event.ignore()
 
     def _on_dirs_dropped(self, paths: list[str]) -> None:
+        if busy(self):
+            return
         for raw in paths:
             p = os.path.normpath(raw)  # 统一路径形式，保证 set/去重一致
             if len(p) > 240:
@@ -140,13 +179,18 @@ class SubtitlePage(QWidget):
                 self.dir_list.add_item(os.path.basename(d) or d, d)
 
     def _add_folder(self) -> None:
+        if busy(self):
+            return
         from PySide6.QtWidgets import QFileDialog
+
         d = QFileDialog.getExistingDirectory(self, "选择视频文件夹")
         if d:
             self._directories.add(d)
             self.dir_list.add_item(os.path.basename(d) or d, d)
 
     def _clear_all(self) -> None:
+        if busy(self):
+            return
         self._directories.clear()
         self.dir_list.clear()
         self.result_list.clear()
@@ -156,7 +200,11 @@ class SubtitlePage(QWidget):
 
     # ── 扫描逻辑 ──
     def _start_scan(self) -> None:
-        dirs = list(self._directories)
+        if busy(self):
+            return
+        dirs = self.dir_list.get_all_paths()
+        self._refresh_missing()
+        self._checked.clear()  # recheck mutable file/config facts; duplicate results remain deduplicated
         if not dirs:
             QMessageBox.warning(self, "提示", "请先添加或拖入视频文件夹！")
             return
@@ -169,13 +217,16 @@ class SubtitlePage(QWidget):
         min_bytes = self.spin_size.value() * 1024 * 1024
 
         self._worker = FileScannerWorker(
-            dirs, exts, min_bytes, checked_files=self._checked,
+            dirs,
+            exts,
+            min_bytes,
+            checked_files=self._checked,
         )
         self._worker.skipped.connect(self._on_skipped)
         self._worker.progress.connect(self._on_progress)
         self._worker.file_found.connect(self._on_file_found)
         self._worker.finished.connect(self._on_finished)
-        self._worker.start()
+        start_task(self, self._worker)
 
     def _on_skipped(self, count: int) -> None:
         """预告片/主题视频本来就不需要字幕，跳过是正常的 —— 但要说明白。
@@ -200,15 +251,18 @@ class SubtitlePage(QWidget):
         语言标记的写法太多，这个问题在仓库里被重复犯过三次，所以只留一处实现。
         """
         formats = [str(e).lstrip(".") for e in (self.cfg.subtitle_extensions or [".srt"])]
-        if subtitle_clean.find_subtitles(
-                filepath, formats, self.cfg.whisper_output_dir or None):
+        if subtitle_clean.find_subtitles(filepath, formats, self.cfg.whisper_output_dir or None):
             return  # 有字幕，跳过
         self.result_list.add_item(filename, filepath)
 
     def _on_finished(self, _files: list, checked: list) -> None:
         self._checked.update(checked)
         self.status_label.setText(f"扫描完成！共发现 {self.result_list.count()} 个缺失字幕的视频")
-        self.progress.setValue(100)
+        stopped = self._worker and getattr(self._worker, "_stopped", False)
+        if stopped:
+            self.status_label.setText("扫描已取消；已发现的结果仍保留。")
+        else:
+            self.progress.setValue(100)
         self.btn_start.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self._save_state()
@@ -225,11 +279,11 @@ class SubtitlePage(QWidget):
     def _stop_scan(self) -> None:
         if self._worker and self._worker.isRunning():
             self._worker.stop()
-            self._worker.wait(3000)
-        self.btn_start.setEnabled(True)
+        self.btn_start.setEnabled(False)
         self.btn_pause.setEnabled(False)
         self.status_label.setText("扫描已停止")
         self._save_state()
+        after_stopped(self, lambda: self.btn_start.setEnabled(True))
 
     # ── 状态持久化（断点续传） ──
     def _save_state(self) -> None:
@@ -240,6 +294,7 @@ class SubtitlePage(QWidget):
         }
         try:
             from config import DATA_DIR
+
             path = self._state_file()
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
@@ -263,10 +318,8 @@ class SubtitlePage(QWidget):
                     self.result_list.add_item(os.path.basename(fp), fp)
             if self._directories:
                 self.status_label.setText("已恢复上次扫描状态")
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError):
             pass
 
     def shutdown(self) -> None:
-        """应用退出时调用：停止后台扫描线程并保存状态。"""
-        self._stop_scan()
-        self._save_state()
+        stop_page(self)

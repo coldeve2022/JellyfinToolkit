@@ -8,6 +8,10 @@
   "_comment_db_path": "留空 = 自动检测本机常见安装位置（Jellyfin 与 Emby 都会扫）。Windows 默认 C:/ProgramData/Jellyfin/Server/data/jellyfin.db。",
   "jellyfin_db_path": "",
   "jellyfin_data_dir": "",
+  "_comment_watching_user": "明确选择用于观看状态和喜好画像的用户。多个账号时不猜管理员。",
+  "jellyfin_user_id": "",
+  "_comment_path_mappings": "远程路径不可访问时，在设置页添加remote/local目录映射；留空不自动推测本地路径。",
+  "library_path_mappings": [],
   "uncensored_keywords": [
     "fc2",
     "1pondo",
@@ -43,7 +47,11 @@
     ".flv",
     ".wmv",
     ".ts",
-    ".rmvb"
+    ".rmvb",
+    ".webm",
+    ".mpg",
+    ".mpeg",
+    ".m2ts"
   ],
   "min_video_size_mb": 10,
   "theme": "dark",

@@ -1,94 +1,77 @@
-"""Jellyfin 同步后台线程 - 清洗脏前缀标签（带备份/回滚）+ 全库刷新。"""
+"""Reviewable server tag plans delegate to the same pure transaction as CLI/automation."""
 from __future__ import annotations
-
+from copy import deepcopy
 from datetime import datetime
-
 from PySide6.QtCore import QThread, Signal
-
 from config import DATA_DIR
 from utils import jellyfin_api
 
 
-def latest_backup_path() -> str | None:
-    """返回最新一份清洗备份的路径（data/jellyfin_clean_backup_*.json），无则 None。"""
-    files = sorted((DATA_DIR).glob("jellyfin_clean_backup_*.json"))
-    return str(files[-1]) if files else None
-
-
-class JellyfinCleanWorker(QThread):
-    """扫描→备份→清洗→刷新。清洗前必先落盘原始 Tags/Genres 到 data/。"""
-
-    log = Signal(str)
-    finished = Signal(dict)   # {"scanned":n, "cleaned":n, "backup":path, "error":str|None}
-
-    def __init__(self, server: str, api_key: str, refresh: bool = True,
-                 parent=None):
-        super().__init__(parent)
-        self.server = server
-        self.api_key = api_key
-        self.refresh = refresh
-
-    def run(self) -> None:
+def latest_backup_path(server: str = ""):
+    for path in reversed(sorted(DATA_DIR.glob("jellyfin_clean_backup_*.json"))):
         try:
-            self.log.emit("第 1 步：扫描全库脏前缀标签（只读，不改数据）…")
-            dirty = jellyfin_api.scan_dirty(self.server, self.api_key, log=self.log.emit)
-            self.log.emit(f"发现 {len(dirty)} 条含脏前缀标签。")
-            if not dirty:
-                self.finished.emit({"scanned": 0, "cleaned": 0, "backup": None,
-                                    "error": None, "empty": True})
-                return
-
-            # 第 2 步：备份（清洗前必做）
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup = str(DATA_DIR / f"jellyfin_clean_backup_{ts}.json")
-            jellyfin_api.save_dirty_backup(dirty, backup)
-            self.log.emit(f"✅ 已备份 {len(dirty)} 条原始标签 → {backup}")
-
-            # 第 3 步：应用清洗
-            cleaned = jellyfin_api.apply_clean(self.server, self.api_key, dirty,
-                                               log=self.log.emit)
-            self.log.emit(f"已清洗 {cleaned}/{len(dirty)} 条。")
-
-            # 第 4 步（可选）：全库刷新
-            if self.refresh:
-                ok, msg = jellyfin_api.refresh_library(self.server, self.api_key)
-                self.log.emit(("✅ " if ok else "⚠️ ") + msg)
-
-            self.finished.emit({"scanned": len(dirty), "cleaned": cleaned,
-                                "backup": backup, "error": None})
-        except Exception as e:  # noqa: BLE001
-            self.log.emit(f"❌ Jellyfin 同步失败: {e}")
-            self.finished.emit({"scanned": 0, "cleaned": 0, "backup": None,
-                                "error": str(e)})
+            jellyfin_api.load_dirty_backup(str(path), server=server)
+            return str(path)
+        except Exception:
+            continue
+    return None
 
 
-class JellyfinRestoreWorker(QThread):
-    """从最新备份把 Tags/Genres 恢复回 Jellyfin（回滚清洗）。"""
-
+class _SyncWorker(QThread):
     log = Signal(str)
-    finished = Signal(dict)   # {"restored":n, "backup":path, "error":str|None}
+    finished = Signal(dict)
 
-    def __init__(self, server: str, api_key: str, backup_path: str,
-                 refresh: bool = True, parent=None):
+    def __init__(self, server, api_key, parent=None):
         super().__init__(parent)
-        self.server = server
-        self.api_key = api_key
-        self.backup_path = backup_path
-        self.refresh = refresh
+        self.server, self.api_key = server, api_key
+        self._stopped = False
 
-    def run(self) -> None:
+    def stop(self):
+        self._stopped = True
+        self.requestInterruption()
+
+
+class JellyfinScanWorker(_SyncWorker):
+    def run(self):
         try:
-            dirty = jellyfin_api.load_dirty_backup(self.backup_path)
-            self.log.emit(f"读取备份 {len(dirty)} 条 ← {self.backup_path}")
-            restored = jellyfin_api.restore_backup(
-                self.server, self.api_key, dirty, log=self.log.emit)
-            self.log.emit(f"已恢复 {restored}/{len(dirty)} 条。")
-            if self.refresh:
-                ok, msg = jellyfin_api.refresh_library(self.server, self.api_key)
-                self.log.emit(("✅ " if ok else "⚠️ ") + msg)
-            self.finished.emit({"restored": restored, "backup": self.backup_path,
-                                "error": None})
-        except Exception as e:  # noqa: BLE001
-            self.log.emit(f"❌ 恢复失败: {e}")
-            self.finished.emit({"restored": 0, "backup": self.backup_path,
-                                "error": str(e)})
+            plan = jellyfin_api.scan_dirty(self.server, self.api_key, log=self.log.emit,
+                                          should_stop=lambda: self._stopped)
+            if self._stopped:
+                self.finished.emit({"cancelled": True, "status": "cancelled", "error": "扫描已取消"})
+            else:
+                self.finished.emit({"plan": plan, "server": jellyfin_api._base(self.server),
+                                    "scanned": len(plan), "error": None, "status": "succeeded"})
+        except Exception as exc:
+            self.finished.emit({"error": str(exc), "status": "failed"})
+
+
+class JellyfinCleanWorker(_SyncWorker):
+    def __init__(self, server, api_key, refresh=True, parent=None, dirty_plan=None):
+        super().__init__(server, api_key, parent)
+        self.refresh = refresh
+        self.dirty_plan = deepcopy(dirty_plan)
+
+    def run(self):
+        try:
+            dirty = self.dirty_plan if self.dirty_plan is not None else jellyfin_api.scan_dirty(
+                self.server, self.api_key, log=self.log.emit, should_stop=lambda: self._stopped)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            backup = str(DATA_DIR / f"jellyfin_clean_backup_{timestamp}.json")
+            result = jellyfin_api.execute_clean_plan(self.server, self.api_key, dirty, backup,
+                refresh=self.refresh, should_stop=lambda: self._stopped, log=self.log.emit)
+            self.finished.emit(result)
+        except Exception as exc:
+            self.finished.emit({"scanned": 0, "cleaned": 0, "backup": None, "error": str(exc),
+                                "cancelled": self._stopped,
+                                "status": "cancelled" if self._stopped else "failed"})
+
+
+class JellyfinRestoreWorker(_SyncWorker):
+    def __init__(self, server, api_key, backup_path, refresh=True, parent=None):
+        super().__init__(server, api_key, parent)
+        self.backup_path, self.refresh = backup_path, refresh
+
+    def run(self):
+        result = jellyfin_api.execute_restore_plan(self.server, self.api_key, self.backup_path,
+            refresh=self.refresh, should_stop=lambda: self._stopped, log=self.log.emit)
+        self.finished.emit(result)

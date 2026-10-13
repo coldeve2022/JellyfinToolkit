@@ -1,4 +1,5 @@
 """已损坏旧合并的批量扫描与修复后台线程。"""
+
 from __future__ import annotations
 
 import shutil
@@ -8,14 +9,9 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from utils.merge_archive import (
-    add_journal_entries,
-    archive_group_for_merge,
     iter_sidecars,
-    mark_entry_rolled_back,
     resolve_backup_root,
-    restore_entry,
 )
-from utils.merge import display_number_for_group
 from utils.merge_repair import (
     archived_merge_items,
     build_parts_from_paths,
@@ -57,7 +53,9 @@ class RepairScanWorker(QThread):
             self.log.emit(f"校验 {item.get('number')}: {path}")
             try:
                 ok, detail = validate_merged_video_quick(
-                    self._ffmpeg, self._ffprobe, path,
+                    self._ffmpeg,
+                    self._ffprobe,
+                    path,
                     item.get("media_entries") or [],
                 )
             except Exception as e:  # noqa: BLE001
@@ -121,90 +119,91 @@ class RepairMergeWorker(QThread):
         self.finished.emit({"ok": ok, "fail": fail, "fails": fails})
 
     def _repair_one(self, item: dict) -> tuple:
+        from utils.file_ops import OperationJournal, safe_replace, file_hash, path_key
+
         number = item.get("number", "")
         final_path = item.get("final_path") or ""
-        media_entries = item.get("media_entries") or []
-        if len(media_entries) < 2:
-            return False, "原分集记录不足 2 个"
-
-        # 1) 恢复原始分集。原文件已存在则直接使用，不覆盖。
-        original_paths = []
-        for e in media_entries:
-            original = e.get("original_path") or ""
-            backup = e.get("backup_path") or ""
-            if not original:
-                continue
-            if Path(original).exists():
-                original_paths.append(original)
-                continue
-            if backup and Path(backup).exists():
-                ok, detail = restore_entry(e)
-                if not ok:
-                    return False, f"恢复原分集失败 {Path(original).name}: {detail}"
-                original_paths.append(original)
-                mark_entry_rolled_back(e.get("id", ""))
+        entries = item.get("media_entries") or []
+        if len(entries) < 2:
+            return False, "原分集不足两个"
+        if self._stopped:
+            return False, "已停止"
+        if (
+            item.get("output_hash")
+            and Path(final_path).exists()
+            and file_hash(final_path) != item["output_hash"]
+        ):
+            return False, "最终文件已改变，请重新审阅"
+        sources = []
+        for entry in entries:
+            backup = entry.get("backup_path") or ""
+            original = entry.get("original_path") or ""
+            if backup and Path(backup).is_file():
+                candidate = backup
+            elif (
+                original and path_key(original) != path_key(final_path) and Path(original).is_file()
+            ):
+                candidate = original
             else:
-                return False, f"缺少原分集和备份: {Path(original).name}"
-
-        if len(original_paths) < 2:
-            return False, "恢复后的原分集不足 2 个"
-
-        # 1.5) 恢复同名 NFO/图片/字幕 sidecar，让重新替换时能再次生成 NFO。
-        for e in item.get("sidecar_entries", []):
-            original = e.get("original_path") or ""
-            backup = e.get("backup_path") or ""
-            if not original or Path(original).exists():
-                continue
-            if backup and Path(backup).exists():
-                ok, detail = restore_entry(e)
-                if not ok:
-                    return False, f"恢复 sidecar 失败 {Path(original).name}: {detail}"
-                mark_entry_rolled_back(e.get("id", ""))
-
-        # 2) 按原始顺序构建分集，重新走新的两阶段合并链路。
+                return False, "缺少有效原分集备份（最终合并不能作为输入）"
+            if entry.get("expected_hash") and file_hash(candidate) != entry["expected_hash"]:
+                return False, "原分集备份身份不符，请人工审阅"
+            sources.append(candidate)
+        parts = build_parts_from_paths(sources, number, self._ffprobe)
+        group = make_group_from_parts(number, parts)
+        worker = MergeWorker([group], self._ffmpeg, self._options, self._ffprobe)
+        worker.log.connect(self.log.emit)
+        self._merge_worker = worker
         try:
-            parts = build_parts_from_paths(original_paths, number, self._ffprobe)
-            group = make_group_from_parts(number, parts)
-        except Exception as e:  # noqa: BLE001
-            return False, f"构建分集失败: {e}"
-        label = display_number_for_group(group) or number
-
-        merge_worker = MergeWorker([group], self._ffmpeg, self._options, self._ffprobe)
-        merge_worker.log.connect(lambda msg: self.log.emit(msg))
-        self._merge_worker = merge_worker
-        try:
-            ok, merged_output = merge_worker._merge_group(group)
+            ok, output = worker._merge_group(group)
         finally:
             self._merge_worker = None
         if not ok:
-            return False, f"重新合并失败: {merged_output}"
-
-        # 3) 删除坏文件及它的同名 sidecar（优先回收站，失败则移入隔离目录）。
-        cleanup_errors = []
-        if final_path and Path(final_path).exists() and Path(final_path) != Path(merged_output):
-            ok, err = self._remove_damaged(final_path)
-            if not ok:
-                cleanup_errors.append(f"坏文件 {Path(final_path).name}: {err}")
-        for side in iter_sidecars(final_path):
-            if Path(side).exists():
-                ok, err = self._remove_damaged(side)
-                if not ok:
-                    cleanup_errors.append(f"{Path(side).name}: {err}")
-        if cleanup_errors:
-            self.log.emit("⚠️ 部分旧文件清理失败：" + "；".join(cleanup_errors))
-        if final_path and Path(final_path).exists() and Path(final_path) != Path(merged_output):
-            return False, f"旧合并文件未成功移除，已保留新合并文件，请手动处理：{final_path}"
-
-        # 4) 用新合并结果替换已恢复的原分集（会再次备份到备份根目录并生成/更新 NFO）。
-        ok, entries, errors, final_output = archive_group_for_merge(
-            self._cfg, label, original_paths, merged_output
-        )
-        if not ok:
-            return False, "；".join(errors) or "替换原文件失败"
-        add_journal_entries(entries)
-        for err in errors:
-            self.log.emit(f"⚠️ {number} 非致命问题: {err}")
-        return True, final_output or merged_output
+            return False, "重新合并失败：" + output
+        if self._stopped:
+            return False, "已停止，新产物已保留可审阅"
+        journal = OperationJournal()
+        operations = []
+        try:
+            result = safe_replace(
+                output,
+                final_path,
+                journal=journal,
+                move_source=True,
+                should_stop=lambda: self._stopped,
+                kind="merge_repair",
+                expected_target_hash=item.get("output_hash"),
+            )
+            if not result["ok"]:
+                raise RuntimeError(result["error"])
+            operations.append(result["operation_id"])
+            # Preserve old final sidecars and roll back the entire reviewed bundle on failure.
+            for side in iter_sidecars(output):
+                sp = Path(side)
+                target = Path(final_path).with_name(
+                    Path(final_path).stem + sp.name[len(Path(output).stem) :]
+                )
+                installed = safe_replace(
+                    sp,
+                    target,
+                    journal=journal,
+                    move_source=True,
+                    should_stop=lambda: self._stopped,
+                    kind="merge_repair_sidecar",
+                )
+                if not installed["ok"]:
+                    raise RuntimeError(installed["error"])
+                operations.append(installed["operation_id"])
+            if self._stopped:
+                raise RuntimeError("已停止")
+        except Exception as exc:
+            errors = []
+            for operation in reversed(operations):
+                restored = journal.restore(operation)
+                if not restored["ok"]:
+                    errors.append(restored["error"])
+            return False, str(exc) + ("；回滚需人工处理：" + "；".join(errors) if errors else "")
+        return True, final_path
 
     def _remove_damaged(self, path: str) -> tuple:
         p = Path(path)

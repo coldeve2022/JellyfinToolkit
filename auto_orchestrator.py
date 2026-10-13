@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import ToolkitConfig
 from automation.orchestrator import run_orchestrator
+from automation.plans import write_json_atomic
 
 
 def main() -> int:
@@ -48,6 +49,7 @@ def main() -> int:
 
     parser.add_argument("--report", default="", help="报告输出 JSON 路径")
     parser.add_argument("--pretty", action="store_true", help="多行打印报告")
+    parser.add_argument("--plan-id", default="", help="执行已审核且输入未变化的预览计划")
     args = parser.parse_args()
 
     cfg = ToolkitConfig.load()
@@ -57,6 +59,7 @@ def main() -> int:
 
     options = {
         "roots": args.roots,
+        "approved_plan_id": args.plan_id,
         "ffmpeg": args.ffmpeg,
         "ffprobe": args.ffprobe,
         "scan_video": args.scan_video,
@@ -73,7 +76,10 @@ def main() -> int:
         "refresh_library": not args.no_refresh,
     }
 
+    initial_user = cfg.jellyfin_user_id
     report = run_orchestrator(cfg, options, log=_log)
+    if cfg.jellyfin_user_id and cfg.jellyfin_user_id != initial_user:
+        cfg.save()
 
     if args.pretty:
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -82,10 +88,9 @@ def main() -> int:
 
     if args.report:
         out = Path(args.report)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"报告已写入: {out}")
-    return 0
+        write_json_atomic(out, report)
+        print(f"报告已写入: {out}", file=sys.stderr)
+    return 130 if report.get('status') == 'cancelled' else 1 if report.get('status') == 'failed' else 0
 
 
 if __name__ == "__main__":

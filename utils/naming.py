@@ -4,7 +4,7 @@ import re
 from typing import Iterable, Optional
 
 
-def is_uncensored_filename(filename: str, keywords: Iterable[str]) -> bool:
+def is_uncensored_filename(filename: str, keywords: Iterable[str] = ()) -> bool:
     """根据文件名判断是否为无码/破解版视频。
 
     判断规则（任一命中即为无码）：
@@ -22,7 +22,7 @@ def is_uncensored_filename(filename: str, keywords: Iterable[str]) -> bool:
     lower = filename.lower()
     name_no_ext = re.sub(r"\.[^.]+$", "", filename).lower()
 
-    for kw in keywords:
+    for kw in tuple(keywords) + ("无码", "流出", "破解", "uncensored", "hack", "decensored"):
         if kw.lower() in lower:
             return True
 

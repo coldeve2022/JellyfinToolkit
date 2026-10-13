@@ -129,7 +129,7 @@ def test_find_executable_skips_system_dirs(tmp_path, monkeypatch):
 
 # ── 3. "清单梳理"语义 ───────────────────────────────────────
 
-def test_scan_filters_out_items_that_already_have_subtitles(qapp, tmp_path):
+def test_scan_filters_out_items_that_already_have_subtitles(qapp, qtbot, tmp_path):
     """**用户报的核心问题**：点「挑出库里缺字幕的视频」后，表格里应该只剩缺字幕的。
 
     按用户的实际操作顺序还原：
@@ -147,6 +147,7 @@ def test_scan_filters_out_items_that_already_have_subtitles(qapp, tmp_path):
 
     page = SubtitleGenPage(_cfg())
     page._add_paths([tmp_path], quiet=True)
+    qtbot.waitUntil(lambda: page.list_files.count() == 3, timeout=3000)
     assert page.list_files.count() == 3, "此时都还没字幕，应全部加入"
 
     # 其中两个后来有了字幕
@@ -170,13 +171,15 @@ def test_add_paths_skips_auxiliary_videos(qapp, tmp_path):
     (tmp_path / "trailers" / "A-001-trailer.mp4").write_bytes(b"x")
 
     page = SubtitleGenPage(_cfg())
-    stats = page._add_paths([tmp_path], quiet=True)
+    # Explicit file import returns immediate exact skipped counts. Directory
+    # discovery uses the shared async scanner, which prunes auxiliary folders.
+    stats = page._add_paths([tmp_path / 'A-001.mp4', tmp_path / 'theme.mp4', tmp_path / 'trailers' / 'A-001-trailer.mp4'], quiet=True)
     assert stats["added"] == 1
     assert stats["aux"] == 2
     assert page.list_files.count() == 1
 
 
-def test_add_paths_skips_videos_that_already_have_subtitles(qapp, tmp_path):
+def test_add_paths_skips_videos_that_already_have_subtitles(qapp, qtbot, tmp_path):
     """「只加入缺字幕的」勾选时（默认），已有字幕的不进清单。"""
     from ui.pages.subtitle_gen import SubtitleGenPage
 
@@ -186,14 +189,18 @@ def test_add_paths_skips_videos_that_already_have_subtitles(qapp, tmp_path):
 
     page = SubtitleGenPage(_cfg())
     assert page.chk_only_missing.isChecked(), "默认应勾选"
-    stats = page._add_paths([tmp_path], quiet=True)
+    page._add_paths([tmp_path], quiet=True)
+    qtbot.waitUntil(lambda: hasattr(page, '_last_import_stats'), timeout=3000)
+    stats = page._last_import_stats
     assert stats["added"] == 1 and stats["has_sub"] == 1
 
     # 取消勾选后应全部加入（用户想重做已有字幕时）
     page.chk_only_missing.setChecked(False)
     page2 = SubtitleGenPage(_cfg())
     page2.chk_only_missing.setChecked(False)
-    stats2 = page2._add_paths([tmp_path], quiet=True)
+    page2._add_paths([tmp_path], quiet=True)
+    qtbot.waitUntil(lambda: hasattr(page2, '_last_import_stats'), timeout=3000)
+    stats2 = page2._last_import_stats
     assert stats2["added"] == 2
 
 
@@ -222,7 +229,7 @@ def _cfg():
 
 # ── 4. 只对视频生成字幕（音频不该混进来）────────────────────
 
-def test_add_paths_rejects_audio_files(qapp, tmp_path):
+def test_add_paths_rejects_audio_files(qapp, qtbot, tmp_path):
     """**用户报的问题**：为什么 .wav 这种音频也被当成"需要字幕"？
 
     本功能是给**视频**生成字幕，音频文件混进清单只会让人困惑。
@@ -235,7 +242,9 @@ def test_add_paths_rejects_audio_files(qapp, tmp_path):
     (tmp_path / "track.flac").write_bytes(b"x")
 
     page = SubtitleGenPage(_cfg())
-    stats = page._add_paths([tmp_path], quiet=True)
+    page._add_paths([tmp_path], quiet=True)
+    qtbot.waitUntil(lambda: hasattr(page, '_last_import_stats'), timeout=3000)
+    stats = page._last_import_stats
     assert stats["added"] == 1, "只应加入那个 mp4"
     names = [page.list_files.item(i).text() for i in range(page.list_files.count())]
     assert names == [str(tmp_path / "A-001.mp4")], names

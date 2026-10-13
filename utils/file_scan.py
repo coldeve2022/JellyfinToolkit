@@ -1,4 +1,5 @@
 """One cancellable discovery contract for local media operations."""
+
 from __future__ import annotations
 
 import os
@@ -10,8 +11,7 @@ from utils.media_types import is_video
 _WORK_PRODUCT = re.compile(r"(?:\.partial|\.inter|\.norm\d*|\.concat)(?:\.|$)", re.I)
 
 
-def iter_media_files(paths, video_exts=None, exclude_keywords=None,
-                     should_stop=None, log=None):
+def iter_media_files(paths, video_exts=None, exclude_keywords=None, should_stop=None, log=None):
     """Yield unique existing main media files; directory failures are reported.
 
     Exclusions apply to both root inputs and discovered files. A cancellation is
@@ -29,8 +29,12 @@ def iter_media_files(paths, video_exts=None, exclude_keywords=None,
         if any(k in text.lower() for k in exclude):
             return False
         name = Path(text).name
-        if (_WORK_PRODUCT.search(name) or name.startswith(("temp_repair_", "temp_transcode_"))
-                or is_junk_attachment_path(text) or not is_video(text, video_exts)):
+        if (
+            _WORK_PRODUCT.search(name)
+            or name.startswith(("temp_repair_", "temp_transcode_"))
+            or is_junk_attachment_path(text)
+            or not is_video(text, video_exts)
+        ):
             return False
         key = os.path.normcase(os.path.realpath(text))
         if key in seen:
@@ -52,14 +56,28 @@ def iter_media_files(paths, video_exts=None, exclude_keywords=None,
                 continue
             if any(k in str(root).lower() for k in exclude):
                 continue
+
             def on_error(error):
                 note(f"扫描目录失败：{getattr(error, 'filename', root)}：{error}")
+
             for directory, subdirs, names in os.walk(root, onerror=on_error):
                 if stopped():
                     return
-                subdirs[:] = sorted(d for d in subdirs if not any(
-                    k in str(Path(directory) / d).lower() for k in exclude)
-                    and d.lower() not in {"_tmp", "trickplay", "trailers", "extras"})
+                subdirs[:] = sorted(
+                    d
+                    for d in subdirs
+                    if not any(k in str(Path(directory) / d).lower() for k in exclude)
+                    and d.lower()
+                    not in {
+                        "_tmp",
+                        "trickplay",
+                        "trailers",
+                        "extras",
+                        "quarantine",
+                        "media-backups",
+                    }
+                    and not d.lower().startswith((".toolkit-merge-", ".toolkit-stage-"))
+                )
                 for name in sorted(names):
                     if stopped():
                         return

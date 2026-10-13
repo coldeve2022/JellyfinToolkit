@@ -12,7 +12,7 @@
 
 用法：
     python scripts/build_release.py                  # 完整构建
-    python scripts/build_release.py --skip-tests     # 跳过测试
+    python scripts/build_release.py --skip-tests --verification build/verification.json
     python scripts/build_release.py --no-zip         # 只打包目录
 """
 
@@ -77,16 +77,29 @@ def _read_exe_version(exe: Path) -> dict[str, str]:
     def _query(key: str) -> str:
         ptr = ctypes.c_void_p()
         length = wintypes.UINT()
-        if not version.VerQueryValueW(buf, f"\\StringFileInfo\\040904B0\\{key}",
-                                      ctypes.byref(ptr), ctypes.byref(length)):
+        if not version.VerQueryValueW(
+            buf, f"\\StringFileInfo\\040904B0\\{key}", ctypes.byref(ptr), ctypes.byref(length)
+        ):
             return ""
         if not ptr.value:
             return ""
         return ctypes.wstring_at(ptr.value, length.value).rstrip("\x00")
 
-    for key in ("ProductName", "FileVersion", "ProductVersion", "CompanyName",
-                "LegalCopyright"):
+    for key in ("ProductName", "FileVersion", "ProductVersion", "CompanyName", "LegalCopyright"):
         out[key] = _query(key)
+    pointer = ctypes.c_void_p()
+    length = wintypes.UINT()
+    if (
+        version.VerQueryValueW(buf, "\\", ctypes.byref(pointer), ctypes.byref(length))
+        and length.value >= 52
+    ):
+        fixed = ctypes.cast(pointer, ctypes.POINTER(wintypes.DWORD * 13)).contents
+
+        def format_fixed(ms, ls):
+            return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}.{ls & 0xFFFF}"
+
+        out["FixedFileVersion"] = format_fixed(fixed[2], fixed[3])
+        out["FixedProductVersion"] = format_fixed(fixed[4], fixed[5])
     return out
 
 
@@ -101,33 +114,69 @@ def _sha256(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="构建发布包")
     parser.add_argument("--skip-tests", action="store_true")
+    parser.add_argument("--verification", default="", help="已通过且匹配当前源码的完整验证记录")
     parser.add_argument("--no-zip", action="store_true")
-    parser.add_argument("--keep-build", action="store_true",
-                        help="保留 build/ 中间产物（默认保留，便于排查）")
+    parser.add_argument(
+        "--keep-build", action="store_true", help="保留 build/ 中间产物（默认保留，便于排查）"
+    )
     parser.add_argument("--name", default=f"{APP_NAME}-v{__version__}-win64")
     args = parser.parse_args()
+    if (
+        Path(args.name).name != args.name
+        or any(ch in args.name for ch in ("/", "\\", ":"))
+        or args.name in (".", "..")
+        or not args.name.strip()
+    ):
+        print("[失败] --name 必须是单个产物文件名，不能包含路径")
+        return 1
+
+    from scripts.verify_release import validate_receipt
+
+    receipt = Path(args.verification) if args.verification else ROOT / "build" / "verification.json"
+    if args.skip_tests:
+        if not args.verification:
+            print("[失败] 跳过重复测试必须提供 --verification 完整验证记录")
+            return 1
+        try:
+            verification = validate_receipt(ROOT, receipt)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"[失败] 发布验证无效：{exc}")
+            return 1
+    else:
+        if _run([sys.executable, "scripts/verify_release.py", "--receipt", str(receipt)]) != 0:
+            return 1
+        verification = validate_receipt(ROOT, receipt)
 
     # 1) 生成图标与版本资源
-    if _run([sys.executable, "tools/make_icon.py"]) != 0:
+    if (
+        _run([sys.executable, "tools/make_icon.py", "--out-dir", str(ROOT / "build" / "icons")])
+        != 0
+    ):
         return 1
     if _run([sys.executable, "tools/make_version_info.py"]) != 0:
         return 1
-
-    # 2) 测试
-    if not args.skip_tests:
-        if _run([sys.executable, "-m", "pytest", "tests", "-q"],
-                extra_env={"QT_QPA_PLATFORM": "offscreen"}) != 0:
-            print("\n[中止] 测试未通过，不打包。")
-            return 1
 
     # 3) 打包
     dist = ROOT / "dist"
     build = ROOT / "build" / "pyinstaller"
     for target in (dist / APP_NAME, build):
         shutil.rmtree(target, ignore_errors=True)
-    if _run([sys.executable, "-m", "PyInstaller", "--noconfirm",
-             "--distpath", str(dist), "--workpath", str(build),
-             "JellyfinToolkit.spec"]) != 0:
+    if (
+        _run(
+            [
+                sys.executable,
+                "-m",
+                "PyInstaller",
+                "--noconfirm",
+                "--distpath",
+                str(dist),
+                "--workpath",
+                str(build),
+                "JellyfinToolkit.spec",
+            ]
+        )
+        != 0
+    ):
         return 1
 
     exe = dist / APP_NAME / f"{APP_NAME}.exe"
@@ -138,11 +187,52 @@ def main() -> int:
     # 4) 校验版本资源
     info = _read_exe_version(exe)
     print("\n产物版本资源:")
-    for key in ("ProductName", "FileVersion", "ProductVersion", "LegalCopyright"):
+    for key in (
+        "ProductName",
+        "FileVersion",
+        "ProductVersion",
+        "FixedFileVersion",
+        "FixedProductVersion",
+        "LegalCopyright",
+    ):
         print(f"  {key:<15}= {info.get(key) or '(空)'}")
     if info.get("FileVersion") != __version__:
-        print(f"\n[警告] exe 版本资源 ({info.get('FileVersion')!r}) "
-              f"与 version.py ({__version__}) 不一致，请检查 spec 的 version= 参数。")
+        print(
+            f"\n[警告] exe 版本资源 ({info.get('FileVersion')!r}) "
+            f"与 version.py ({__version__}) 不一致，请检查 spec 的 version= 参数。"
+        )
+        return 1
+    if info.get("ProductVersion") != __version__:
+        print("[失败] 产品版本资源不一致")
+        return 1
+    if any(
+        info.get(key) != __version__ + ".0" for key in ("FixedFileVersion", "FixedProductVersion")
+    ):
+        print("[失败] exe 固定版本元组与声明版本不一致")
+        return 1
+    if _run([sys.executable, "tools/dev/smoke_exe.py", "--exe", str(exe)]) != 0:
+        return 1
+    try:
+        validate_receipt(ROOT, receipt)
+    except (OSError, ValueError) as exc:
+        print(f"[失败] 构建期间源码发生变化，拒绝封包：{exc}")
+        return 1
+    import json
+
+    (dist / APP_NAME / "build-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": __version__,
+                "git_commit": verification["commit"],
+                "source_digest": verification["source_digest"],
+                "verification": verification,
+                "exe_sha256": _sha256(exe),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     # 5) 打 zip + SHA256
     size_mb = sum(f.stat().st_size for f in (dist / APP_NAME).rglob("*") if f.is_file())
@@ -159,12 +249,14 @@ def main() -> int:
         print(f"SHA256 : {_sha256(zip_path)}")
         # 同时写一份校验文件，Release 页让用户核对
         (zip_path.with_suffix(".zip.sha256")).write_text(
-            f"{_sha256(zip_path)}  {zip_path.name}\n", encoding="utf-8")
+            f"{_sha256(zip_path)}  {zip_path.name}\n", encoding="utf-8"
+        )
 
     exe_sha = _sha256(exe)
     print(f"\nSHA256 (exe): {exe_sha}")
     (ROOT / "dist" / f"{APP_NAME}.exe.sha256").write_text(
-        f"{exe_sha}  {exe.name}\n", encoding="utf-8")
+        f"{exe_sha}  {exe.name}\n", encoding="utf-8"
+    )
 
     print(f"\n完成: {exe}")
     print("提示：发布前请跑一次  python tools/dev/smoke_exe.py  验证打包产物能正常启动。")

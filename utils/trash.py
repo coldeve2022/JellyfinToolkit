@@ -1,64 +1,54 @@
-"""安全删除 - 移入回收站(可恢复)，绝不物理删除；删除日志留痕。
+"""安全隔离：应用数据目录保存文件与恢复日志，失败保留原件。"""
 
-Windows 使用 SHFileOperationW(FO_DELETE | FOF_ALLOWUNDO) 实现回收站删除，
-无第三方依赖；失败时返回错误信息，由上层决定保留原文件。
-"""
 from __future__ import annotations
 
-import ctypes
-import os
 import sqlite3
-from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
-# ── 回收站删除 ─────────────────────────────
-_FO_DELETE = 3
-_FOF_ALLOWUNDO = 0x40
-_FOF_NOCONFIRMATION = 0x10
-_FOF_SILENT = 0x4
-_FOF_NOERRORUI = 0x400
+
+def trash_file(path: str, *, should_stop=None) -> tuple[bool, str]:
+    """Move a reviewed file to durable app quarantine; never invoke shell delete."""
+    import uuid
+    import config
+    from utils.file_ops import OperationJournal, safe_replace
+
+    p = Path(path)
+    if not p.is_file() or p.is_symlink():
+        return False, f"只支持逐个审核的普通文件，已保留：{path}"
+    journal = OperationJournal()
+    destination = Path(config.DATA_DIR) / "quarantine" / uuid.uuid4().hex / p.name
+    result = safe_replace(
+        p,
+        destination,
+        journal=journal,
+        should_stop=should_stop,
+        move_source=True,
+        allow_overwrite=False,
+        kind="quarantine",
+    )
+    return result["ok"], (
+        f"已隔离，可在恢复记录中找回：{result['operation_id']}" if result["ok"] else result["error"]
+    )
 
 
-class _SHFILEOPSTRUCTW(ctypes.Structure):
-    _fields_ = [
-        ("hwnd", wintypes.HWND),
-        ("wFunc", wintypes.UINT),
-        ("pFrom", wintypes.LPCWSTR),
-        ("pTo", wintypes.LPCWSTR),
-        ("fFlags", ctypes.c_ushort),
-        ("fAnyOperationsAborted", wintypes.BOOL),
-        ("hNameMappings", wintypes.LPVOID),
-        ("lpszProgressTitle", wintypes.LPCWSTR),
+def list_quarantine():
+    from utils.file_ops import OperationJournal
+
+    return [
+        entry
+        for entry in OperationJournal().all()
+        if entry["kind"] == "quarantine"
+        and entry["state"] != "rolled_back"
+        and Path(entry.get("target") or "").is_file()
     ]
 
 
-def trash_file(path: str) -> tuple[bool, str]:
-    """将单个文件/文件夹移入回收站。
+def restore_quarantined(operation_id, *, should_stop=None):
+    from utils.file_ops import OperationJournal
 
-    Returns:
-        (True, "") 成功； (False, 错误信息) 失败（文件保留，不物理删除）
-    """
-    p = Path(path)
-    if not p.exists():
-        return False, f"路径不存在: {path}"
-    if os.name != "nt":
-        return False, "非 Windows 平台暂不支持回收站删除"
-
-    abs_path = os.path.abspath(str(p))
-    buf = ctypes.create_unicode_buffer(abs_path + "\x00", len(abs_path) + 2)  # 双空结尾
-    op = _SHFILEOPSTRUCTW()
-    op.wFunc = _FO_DELETE
-    op.pFrom = ctypes.cast(buf, wintypes.LPCWSTR)
-    op.pTo = None
-    op.fFlags = _FOF_ALLOWUNDO | _FOF_NOCONFIRMATION | _FOF_SILENT | _FOF_NOERRORUI
-    res = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
-    if res == 0 and not op.fAnyOperationsAborted:
-        return True, ""
-    # 兜底审计：操作报错但文件已不存在（如被其它进程/系统移走）→ 仍按成功记录，保证留痕
-    if not p.exists():
-        return True, "文件已不存在(可能已被移动/删除，已记录留痕)"
-    return False, f"SHFileOperation 失败 code={res}, aborted={op.fAnyOperationsAborted}"
+    result = OperationJournal().restore(operation_id, should_stop)
+    return result["ok"], result.get("error") or "已恢复隔离文件"
 
 
 # ── 删除日志（留痕，供追溯/恢复指引）──────────

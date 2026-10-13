@@ -22,15 +22,15 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Optional
 
-from utils.library import Item, build_item
-from utils.media_server import KIND_AUTO, KIND_UNKNOWN, detect, normalize_server_url
+from utils.library import Item, build_item, _check_cancel
+from utils.media_server import KIND_AUTO, KIND_UNKNOWN, detect, normalize_server_url, server_identity
 
 #: 与本地数据库口径对齐：``BaseItems.MediaType='Video'`` 覆盖的条目类型
 VIDEO_ITEM_TYPES = "Movie,Video,Episode,Trailer,MusicVideo"
 
 #: 请求这些字段：Path/Tags/Genres/Studios 是分析必需，MediaSources 提供文件大小，
 #: People 提供演员。ProductionYear / Name / Id / UserData 是 BaseItemDto 的标准字段。
-ITEM_FIELDS = "Path,Tags,Genres,Studios,MediaSources,People"
+ITEM_FIELDS = "Path,Tags,Genres,Studios,MediaSources,MediaStreams,People"
 
 _PAGE_SIZE = 500
 
@@ -53,23 +53,37 @@ def _req(method: str, url: str, api_key: str, timeout: int = 30):
         raise LibraryApiError(str(e)[:140]) from e
 
 
-def pick_user_id(server: str, api_key: str, log: Optional[Callable[[str], None]] = None):
-    """挑一个用户 ID——优先管理员。
+def list_users(server: str, api_key: str) -> list[dict]:
+    """Read selectable watching accounts. No credentials in returned data."""
+    _code, data = _req("GET", f"{normalize_server_url(server)}/Users", api_key, timeout=15)
+    if not isinstance(data, list):
+        raise LibraryApiError("服务器未返回有效用户列表")
+    return [{"id": str(u["Id"]), "name": str(u.get("Name") or u["Id"]),
+             "is_admin": bool((u.get("Policy") or {}).get("IsAdministrator"))}
+            for u in data if isinstance(u, dict) and u.get("Id")]
+
+
+def pick_user_id(server: str, api_key: str, log: Optional[Callable[[str], None]] = None,
+                 user_id: str = ""):
+    """选择显式观看用户；仅一个账号时可自动选，多账号必须确认。
 
     行为数据（收藏/播放）是**按用户**存放的，不指定 userId 的话
     ``/Items`` 返回体里根本没有 ``UserData`` 字段，收藏数会全是 0。
     """
-    base = normalize_server_url(server)
-    _code, data = _req("GET", f"{base}/Users", api_key, timeout=15)
-    if not isinstance(data, list) or not data:
+    users = list_users(server, api_key)
+    if user_id:
+        wanted = str(user_id).replace("-", "").lower()
+        matches = [u for u in users if u["id"].replace("-", "").lower() == wanted]
+        if len(matches) != 1:
+            raise LibraryApiError("已选择的观看用户不存在或不可访问，请重新选择")
+        return matches[0]["id"]
+    if len(users) > 1:
+        raise LibraryApiError("服务器有多个用户，请在设置中明确选择观看账号")
+    if not users:
         if log:
             log("  · 未取到用户列表，收藏/播放数据将不可用")
         return None
-    for user in data:
-        if isinstance(user, dict) and (user.get("Policy") or {}).get("IsAdministrator"):
-            return user.get("Id")
-    first = data[0]
-    return first.get("Id") if isinstance(first, dict) else None
+    return users[0]["id"]
 
 
 def _iter_pages(server: str, api_key: str, user_id: Optional[str],
@@ -119,6 +133,32 @@ def _size_of(raw: dict) -> Optional[int]:
     return max(sizes) if sizes else None
 
 
+def _media_facts_of(raw):
+    """Use facts from the source matching this physical path, never a different version."""
+    sources = [s for s in (raw.get("MediaSources") or []) if isinstance(s, dict)]
+    matches = [s for s in sources if s.get("Path") == raw.get("Path") and raw.get("Path")]
+    selected = matches[0] if matches else (sources[0] if len(sources) == 1 else {})
+    streams = selected.get("MediaStreams") or raw.get("MediaStreams") or []
+    videos = [s for s in streams if isinstance(s, dict) and str(s.get("Type")).lower() == "video"
+              and not s.get("IsAttachedPic")]
+    video = videos[0] if videos else {}
+    result = {}
+    for key, value in (("width", video.get("Width")), ("height", video.get("Height")),
+                       ("bitrate", video.get("BitRate"))):
+        try:
+            if value and int(value) > 0:
+                result[key] = int(value)
+        except (ValueError, TypeError):
+            pass
+    try:
+        ticks = selected.get("RunTimeTicks") or raw.get("RunTimeTicks")
+        if ticks and float(ticks) > 0:
+            result["duration"] = float(ticks) / 10_000_000
+    except (TypeError, ValueError):
+        pass
+    return result
+
+
 def _actors_of(raw: dict) -> list:
     """取演员名（People 里 Type=Actor）。"""
     out = []
@@ -134,7 +174,7 @@ def _behavior_of(raw: dict) -> dict:
     """把 API 的 UserData 映射成 Item 的行为字段（缺失时什么都不给）。"""
     ud = raw.get("UserData")
     if not isinstance(ud, dict):
-        return {}
+        return {"behavior_known": False}
     try:
         pos = int(ud.get("PlaybackPositionTicks") or 0)
     except (TypeError, ValueError):
@@ -146,6 +186,7 @@ def _behavior_of(raw: dict) -> dict:
         "has_progress": pos > 0,
         "last_played": ud.get("LastPlayedDate"),
         "rating": ud.get("Rating"),
+        "behavior_known": True,
     }
 
 
@@ -157,6 +198,7 @@ def collect_library_api(
     should_stop: Optional[Callable[[], bool]] = None,
     exclude_keywords: Optional[list] = None,
     declared_kind: str = KIND_AUTO,
+    user_id: str = "",
 ) -> tuple[list[Item], str]:
     """通过 REST API 采集全库条目。
 
@@ -171,6 +213,7 @@ def collect_library_api(
         if log:
             log(msg)
 
+    _check_cancel(should_stop)
     base = normalize_server_url(server)
     if not base or not api_key:
         raise LibraryApiError("未配置服务器地址或 API Key")
@@ -181,7 +224,7 @@ def collect_library_api(
     kind = probe.kind
     _log(f"已连接：{probe.describe()}")
 
-    user_id = pick_user_id(base, api_key, log=_log)
+    user_id = pick_user_id(base, api_key, log=_log, user_id=user_id)
     if user_id:
         _log("  · 已定位用户，收藏/播放数据可用")
     else:
@@ -221,14 +264,17 @@ def collect_library_api(
                 actors=_actors_of(raw),
                 size=_size_of(raw),
                 # API 不返回封面在本机的路径，build_item 会退回视频目录 sidecar 图
-                behavior=_behavior_of(raw),
+                behavior=_behavior_of(raw) | {"behavior_user_id": user_id or "",
+                                             "source_identity": "server:" + server_identity(base)},
                 listing_cache=listing_cache,
+                media_facts=_media_facts_of(raw),
             ))
             if progress and seen:
                 progress(min(99, seen))
             if should_stop and should_stop():
                 break
 
+    _check_cancel(should_stop)
     _log(f"✅ API 采集完成：{len(items)} 部（按范围排除 {skipped} 条）")
     if progress:
         progress(100)

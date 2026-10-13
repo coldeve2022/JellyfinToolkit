@@ -6,7 +6,10 @@
 - 待复核(边界/无元数据/CD分卷) = 卡片流人工快判
 每打一条回填画像、全库重排；绝不把"没看过"当删除依据。
 """
+
 from __future__ import annotations
+
+from ui.services import busy, start_task, stop_page, events, state_context
 
 import os
 import re as _re_num
@@ -14,10 +17,23 @@ import subprocess
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QFrame, QMessageBox, QGroupBox, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget,
-    QStackedWidget, QScrollArea,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGridLayout,
+    QLabel,
+    QPushButton,
+    QProgressBar,
+    QFrame,
+    QMessageBox,
+    QGroupBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QAbstractItemView,
+    QTabWidget,
+    QStackedWidget,
+    QScrollArea,
 )
 
 from config import DATA_DIR, ToolkitConfig
@@ -26,6 +42,7 @@ from ui.widgets import LogPanel, CoverThumb
 from utils import scoring
 from utils.deck_state import DeckState, ORDER_RANDOM, ORDER_SCORE
 from utils.labels import LabelStore
+from ui.services import analysis_worker, accept_snapshot, after_stopped
 from workers.scorer import AnalyzeWorker, RerankWorker
 
 DEC_TEXT = {
@@ -53,7 +70,7 @@ class NumItem(QTableWidgetItem):
 
 
 _NUM_RE = _re_num.compile(r"^[-\d.]+(?:\s*(?:%|MB|GB|TB))?$")
-ROLE_PATH = Qt.UserRole + 1   # 文件路径专用角色（UserRole 留给数值排序）
+ROLE_PATH = Qt.UserRole + 1  # 文件路径专用角色（UserRole 留给数值排序）
 
 
 class ReviewPage(QWidget):
@@ -62,21 +79,25 @@ class ReviewPage(QWidget):
     def __init__(self, cfg: ToolkitConfig, parent=None):
         super().__init__(parent)
         self.cfg = cfg
-        self.store = LabelStore(DATA_DIR / "smart.db")
-        self.deck_state = DeckState(DATA_DIR / "smart.db")
+        self._state_context = state_context(cfg)
+        self._last_action_context = self._state_context
+        self._adoption_context = self._state_context
+        self.store = LabelStore(DATA_DIR / "smart.db", context=state_context(self.cfg))
+        self.deck_state = DeckState(DATA_DIR / "smart.db", context=state_context(self.cfg))
         self.analyzer: AnalyzeWorker | None = None
         self.reranker: RerankWorker | None = None
 
         self.items: list = []
         self.results: list = []
         self.labels: dict = self.store.all()
+        events.labels_changed.connect(self._refresh_labels)
         self.deck_ids: list = []
         self.pos: int = 0
-        self._label_anchor: str | None = None   # 打标后重排的定位锚点（当前这张的下一张）
-        self._order_mode: str = self.deck_state.get_order()   # score / random
-        self._skipped: set = self.deck_state.skipped()        # 跳过(搁置)的 item_id 集合
-        self._last_action: tuple | None = None   # (item_id, old_label_or_None)
-        self._rerank_pending: bool = False       # 连按时只保留最后一次重排
+        self._label_anchor: str | None = None  # 打标后重排的定位锚点（当前这张的下一张）
+        self._order_mode: str = self.deck_state.get_order()  # score / random
+        self._skipped: set = self.deck_state.skipped()  # 跳过(搁置)的 item_id 集合
+        self._last_action: tuple | None = None  # (item_id, old_label_or_None)
+        self._rerank_pending: bool = False  # 连按时只保留最后一次重排
         self._last_counts: dict | None = None
         self._tab_rows: dict = {"like": [], "del": [], "done": []}
         # AI 批量预判待复核用
@@ -84,11 +105,16 @@ class ReviewPage(QWidget):
         self._ai_review_num2id: dict = {}
         self._ai_review_marks: list = []
         self._ai_review_idx = 0
+        self._ai_suggestions = {}
 
         self._setup_ui()
         self.setFocusPolicy(Qt.StrongFocus)
 
     # ── UI ──
+    def _refresh_labels(self):
+        self.store = LabelStore(DATA_DIR / "smart.db", context=state_context(self.cfg))
+        self.labels = self.store.all()
+
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)
@@ -134,6 +160,7 @@ class ReviewPage(QWidget):
         order_row.addWidget(self._restore_skipped_btn)
         order_row.addStretch()
         self._order_label = QLabel("")
+        self._order_label.setWordWrap(True)
         self._order_label.setProperty("cssClass", "text-muted")
         order_row.addWidget(self._order_label)
         root.addLayout(order_row)
@@ -156,12 +183,16 @@ class ReviewPage(QWidget):
         self.btn_view.clicked.connect(self._toggle_view)
         tool2.addWidget(self.btn_view)
         self.btn_ai_review = QPushButton("🤖 AI 批量预判待复核")
-        self.btn_ai_review.setToolTip("让 AI 分批判断待复核作品 KEEP/DELETE；判 DELETE 的写入删除暂存(需到删除页确认)，大幅减少人工。")
+        self.btn_ai_review.setToolTip(
+            "让 AI 分批判断待复核作品 KEEP/DELETE；判 DELETE 的写入删除暂存(需到删除页确认)，大幅减少人工。"
+        )
         self.btn_ai_review.clicked.connect(self._ai_review_and_mark)
         tool2.addWidget(self.btn_ai_review)
         self.btn_ai_score = QPushButton("🧮 AI 语义打分")
-        self.btn_ai_score.setToolTip("对边界(待复核)作品做 AI 内容相似度打分并存缓存，"
-                                     "下次重排自动与规则命中度融合(算法一部分)。连不上本地 LLM 时自动退回纯规则。")
+        self.btn_ai_score.setToolTip(
+            "对边界(待复核)作品做 AI 内容相似度打分并存缓存，"
+            "下次重排自动与规则命中度融合(算法一部分)。连不上本地 LLM 时自动退回纯规则。"
+        )
         self.btn_ai_score.clicked.connect(self._ai_score_all)
         tool2.addWidget(self.btn_ai_score)
         root.addLayout(tool2)
@@ -170,7 +201,11 @@ class ReviewPage(QWidget):
         self.main_tabs = QTabWidget()
         rev_tab = QWidget()
         rl = QVBoxLayout(rev_tab)
-        rl.addWidget(QLabel("待复核 · 卡片快判（右箭头=喜欢/保留，左箭头=不喜欢，↓跳过，空格打开文件，Ctrl+Z 撤销）"))
+        rl.addWidget(
+            QLabel(
+                "待复核 · 卡片快判（右箭头=喜欢/保留，左箭头=不喜欢，↓跳过，空格打开文件，Ctrl+Z 撤销）"
+            )
+        )
         self.card = QFrame()
         self.card.setProperty("cssClass", "panel-card")
         self.card_lay = QVBoxLayout(self.card)
@@ -181,11 +216,13 @@ class ReviewPage(QWidget):
         self.tab_like = self._make_table(["番号", "名称", "命中度", "理由", "标签/演员"])
         self.tab_del = self._make_table(["番号", "名称", "命中度", "理由", "标签/演员"])
         self.tab_done = self._make_table(["番号", "名称", "打标", "大小"])
-        self._list_stack: dict = {}      # key -> QStackedWidget（0表格 / 1卡片）
-        self._list_cardlay: dict = {}    # key -> 卡片容器 layout
-        for key, table, name in [("like", self.tab_like, "② 可能喜欢"),
-                                 ("del", self.tab_del, "③ 建议删除"),
-                                 ("done", self.tab_done, "④ 已打标")]:
+        self._list_stack: dict = {}  # key -> QStackedWidget（0表格 / 1卡片）
+        self._list_cardlay: dict = {}  # key -> 卡片容器 layout
+        for key, table, name in [
+            ("like", self.tab_like, "② 可能喜欢"),
+            ("del", self.tab_del, "③ 建议删除"),
+            ("done", self.tab_done, "④ 已打标"),
+        ]:
             container = QWidget()
             cl = QVBoxLayout(container)
             cl.setContentsMargins(0, 0, 0, 0)
@@ -203,6 +240,22 @@ class ReviewPage(QWidget):
             self._list_stack[key] = stack
             self._list_cardlay[key] = ccl
             self.main_tabs.addTab(container, name)
+        ai_tab = QWidget()
+        ai_layout = QVBoxLayout(ai_tab)
+        ai_layout.addWidget(
+            QLabel("机器建议尚未改变人工标签。核对理由后勾选采纳，之后仍须确认删除计划。")
+        )
+        self.ai_suggestions = QTableWidget(0, 4)
+        self.ai_suggestions.setHorizontalHeaderLabels(["采纳", "作品", "AI建议", "依据"])
+        self.ai_suggestions.horizontalHeader().setStretchLastSection(True)
+        ai_layout.addWidget(self.ai_suggestions, 1)
+        adopt = QPushButton("采纳勾选的 AI 建议…")
+        adopt.clicked.connect(self._adopt_ai_suggestions)
+        ai_layout.addWidget(adopt)
+        undo_ai = QPushButton("撤销上次AI采纳")
+        undo_ai.clicked.connect(self._undo_ai_adoption)
+        ai_layout.addWidget(undo_ai)
+        self.main_tabs.addTab(ai_tab, "AI建议·人工采纳")
         root.addWidget(self.main_tabs, 1)
 
         g = QGroupBox("日志")
@@ -222,12 +275,12 @@ class ReviewPage(QWidget):
         # 全部 Interactive + 固定初始宽：拖任意一列只改该列，不带动其它列。
         # 不用 Stretch/stretchLastSection（伸缩列会导致"调一列其余跟着动"）。
         h.setSectionResizeMode(QHeaderView.Interactive)
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)   # 番号
+        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 番号
         h.setDefaultSectionSize(130)
         h.setMinimumSectionSize(80)
         h.setStretchLastSection(False)
         if t.columnCount() > 1:
-            t.setColumnWidth(1, 420)     # 名称列给较宽初始（可再手动拖）
+            t.setColumnWidth(1, 420)  # 名称列给较宽初始（可再手动拖）
         t.verticalHeader().setVisible(False)
         t.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -238,21 +291,26 @@ class ReviewPage(QWidget):
 
     # ── 分析 ──
     def _start(self) -> None:
+        self._refresh_labels()
         if self.analyzer and self.analyzer.isRunning():
             return
         self.btn_analyze.setEnabled(False)
         self.progress.setValue(0)
         self.log.clear()
-        self.analyzer = AnalyzeWorker(
-            self.cfg, self.labels,
+        self.analyzer = analysis_worker(
+            self.cfg,
+            self.labels,
             exclude_keywords=self.cfg.exclude_path_keywords,
-            th_keep=self.cfg.score_th_keep / 100, th_delete=self.cfg.score_th_delete / 100)
+            th_keep=self.cfg.score_th_keep / 100,
+            th_delete=self.cfg.score_th_delete / 100,
+        )
         self.analyzer.log.connect(self.log.log)
         self.analyzer.progress.connect(self.progress.setValue)
         self.analyzer.finished.connect(self._on_analyzed)
-        self.analyzer.start()
+        start_task(self, self.analyzer)
 
     def _on_analyzed(self, data: dict) -> None:
+        accept_snapshot(self, data)
         self.btn_analyze.setEnabled(True)
         self.progress.setValue(100 if "results" in data else 0)
         if "error" in data:
@@ -271,7 +329,9 @@ class ReviewPage(QWidget):
         self._order_mode = ORDER_RANDOM if self._order_mode == ORDER_SCORE else ORDER_SCORE
         self.deck_state.set_order(self._order_mode)
         self._sync_order_ui()
-        self.log.log_success(f"队列顺序已切换为「{'随机' if self._order_mode == ORDER_RANDOM else '命中度'}」。")
+        self.log.log_success(
+            f"队列顺序已切换为「{'随机' if self._order_mode == ORDER_RANDOM else '命中度'}」。"
+        )
         if self.results:
             self._rebuild_deck()
 
@@ -294,7 +354,8 @@ class ReviewPage(QWidget):
         self._order_btn.setText("🔀 随机顺序" if random else "📊 命中度顺序")
         self._order_btn.setToolTip("点击切换队列展示顺序。随机可避免反复打开时按同一顺序处理。")
         self._order_label.setText(
-            "当前：随机（每次打开/重排都重新洗牌）" if random
+            "当前：随机（每次打开/重排都重新洗牌）"
+            if random
             else "当前：命中度升序（先处理不太可能喜欢的）"
         )
 
@@ -308,15 +369,17 @@ class ReviewPage(QWidget):
         """
         seen_labeled = set(self.labels.keys())
         deck = [
-            r for r in self.results
+            r
+            for r in self.results
             if r.decision == scoring.DEC_REVIEW
             and not r.is_seen
             and r.item.id not in seen_labeled
-            and r.item.id not in self._skipped   # 跳过(搁置)的不再出现
+            and r.item.id not in self._skipped  # 跳过(搁置)的不再出现
         ]
         if self._order_mode == ORDER_RANDOM:
             import random as _r
-            _r.shuffle(deck)   # 随机洗牌；配合 skip 持久化，避免反复按同一顺序处理
+
+            _r.shuffle(deck)  # 随机洗牌；配合 skip 持久化，避免反复按同一顺序处理
         else:
             deck.sort(key=lambda r: r.s_content)
         self.deck_ids = [r.item.id for r in deck]
@@ -347,8 +410,11 @@ class ReviewPage(QWidget):
             return
         item_id = self.deck_ids[idx]
         item = next(x for x in self.items if x.id == item_id)
-        old = self.labels.get(item_id)
+        old = self.store.get(item_id)
+        self._last_action_context = state_context(self.cfg)
         if action == "keep":
+            new = scoring.LABEL_LIKE
+        elif action == "protect":
             new = scoring.LABLE_KEEP
         elif action == "delete":
             new = scoring.LABEL_DELETE
@@ -356,7 +422,9 @@ class ReviewPage(QWidget):
             self._skipped.add(item_id)
             self.deck_state.add_skipped(item_id)
             self._last_action = (item_id, "_skip")
-            self.log.log_warning(f"跳过(搁置) {item.name[:30]} —— 已记录，不再按原顺序出现；可点「恢复跳过的」再浏览。")
+            self.log.log_warning(
+                f"跳过(搁置) {item.name[:30]} —— 已记录，不再按原顺序出现；可点「恢复跳过的」再浏览。"
+            )
             # 直接从当前队列移除，定位到下一张；若清空则重排
             self.deck_ids.pop(idx)
             if not self.deck_ids:
@@ -370,12 +438,14 @@ class ReviewPage(QWidget):
         self._label_anchor = self.deck_ids[idx + 1] if idx + 1 < len(self.deck_ids) else None
         self.store.set(item_id, new)
         self.labels[item_id] = new
+        events.labels_changed.emit()
         self._last_action = (item_id, old)
         self.log.log_success(f"打标 {item.name[:30]} → {new}")
         self._refresh_after_change()
 
     def _undo(self) -> None:
-        if not self._last_action:
+        if not self._last_action or self._last_action_context != state_context(self.cfg):
+            self._last_action = None
             return
         item_id, old = self._last_action
         # 撤销"跳过(搁置)"：把该作品从 skip 集合移除并恢复进队列
@@ -397,6 +467,7 @@ class ReviewPage(QWidget):
         self._label_anchor = item_id
         self._last_action = None
         self.log.log_warning("已撤销上一条打标")
+        events.labels_changed.emit()
         self._refresh_after_change()
 
     def _refresh_after_change(self) -> None:
@@ -405,13 +476,27 @@ class ReviewPage(QWidget):
             self._rerank_pending = True
             return
         self._rerank_pending = False
-        self.reranker = RerankWorker(self.items, self.labels,
-                                     th_keep=self.cfg.score_th_keep / 100,
-                                     th_delete=self.cfg.score_th_delete / 100)
+        self.reranker = RerankWorker(
+            self.items,
+            self.labels,
+            th_keep=self.cfg.score_th_keep / 100,
+            th_delete=self.cfg.score_th_delete / 100,
+            source=self.cfg,
+        )
         self.reranker.finished.connect(self._on_reranked)
-        self.reranker.start()
+        start_task(self, self.reranker)
 
     def _on_reranked(self, data: dict) -> None:
+        if data.get("error") or data.get("cancelled"):
+            self._rerank_pending = False
+            self.log.log_warning(str(data.get("error") or "重排已取消"))
+            return
+        if not accept_snapshot(self, data):
+            self.log.log_warning(str(data.get("error") or "重排结果已失效"))
+            if self._rerank_pending:
+                self._rerank_pending = False
+                after_stopped(self, self._refresh_after_change)
+            return
         self.results = data["results"]
         self._rebuild_deck(anchor_id=self._label_anchor)
         self._label_anchor = None
@@ -424,13 +509,16 @@ class ReviewPage(QWidget):
 
     # ── AI 语义打分（对边界作品做内容相似度打分并缓存）──
     @staticmethod
-    def _profile_line(items) -> str:
+    def _profile_line(items, labels=None) -> str:
         """从"已看/收藏"正样本构建画像主线（喂给 AI 打分用）。"""
-        from utils.scoring import sample_weight
-        pos = [it for it in items if sample_weight(it) > 0]
+        from utils.scoring import positive_weight
+
+        labels = labels or {}
+        pos = [it for it in items if positive_weight(it, labels.get(it.id)) > 0]
         if not pos:
             return "（暂无已看样本，仅按元数据保守判断）"
         from collections import Counter
+
         actors = Counter(a for it in pos for a in it.actors if a)
         studios = Counter(s for it in pos for s in it.studios if s)
         genres = Counter(g for it in pos for g in it.genres if g)
@@ -449,9 +537,13 @@ class ReviewPage(QWidget):
         return "；".join(parts)
 
     def _ai_score_all(self) -> None:
+        if busy(self):
+            return
+        self._refresh_labels()
         if not self.cfg.ai_enabled:
-            QMessageBox.information(self, "未启用 AI",
-                                    "请在「设置」→「本地 AI 二次校验」启用本地 LLM（如 Ollama）。")
+            QMessageBox.information(
+                self, "未启用 AI", "请在「设置」→「本地 AI 二次校验」启用本地 LLM（如 Ollama）。"
+            )
             return
         if not self.results:
             QMessageBox.information(self, "无候选", "请先点击「🚀 开始分析」加载全库评分。")
@@ -460,9 +552,12 @@ class ReviewPage(QWidget):
             return
         # 候选 = 未看 + 待复核 + 有元数据（非 featureless/junk）
         cand = [
-            r.item for r in self.results
-            if not r.is_seen and r.item.id not in self.labels
-            and not r.is_junk and not r.featureless
+            r.item
+            for r in self.results
+            if not r.is_seen
+            and r.item.id not in self.labels
+            and not r.is_junk
+            and not r.featureless
             and r.decision == scoring.DEC_REVIEW
         ]
         if not cand:
@@ -470,57 +565,110 @@ class ReviewPage(QWidget):
             return
         # 按桶分组，避免 prompt 里混桶造成画像混乱
         from collections import defaultdict
+
         by_bucket = defaultdict(list)
         for it in cand:
             by_bucket[it.bucket].append(it)
-        bucket_cn = {"jav": "常规番号 JAV", "uncensored": "无码/FC2/PPV",
-                     "hentai": "里番H动画", "other": "其它"}.get
-        line = self._profile_line(self.items)
+        bucket_cn = {
+            "jav": "常规番号 JAV",
+            "uncensored": "无码/FC2/PPV",
+            "hentai": "里番H动画",
+            "other": "其它",
+        }.get
+        line = {
+            bucket: self._profile_line(
+                [it for it in self.items if it.bucket == bucket], self.labels
+            )
+            for bucket in by_bucket
+        }
+        from ui.services import _snapshot_key
+
+        self._score_request_key = _snapshot_key(self.cfg)
+        self._score_labels = dict(self.labels)
+        self._score_context = state_context(self.cfg)
+        self._score_fingerprint_value = self._score_fingerprint()
+        self._score_parameters = (self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model)
+        self._score_total = 0
         self.btn_ai_score.setEnabled(False)
         # 每个桶最多 60 条，总计最多 200 条；其它桶放最后，避免混桶画像
         self._score_pending = []
         buckets_ordered = sorted(by_bucket.keys(), key=lambda b: (b == "other", b))
         for b in buckets_ordered:
             for it in by_bucket[b][:60]:
-                self._score_pending.append({
-                    "item_id": it.id, "num": it.num or "", "name": it.name,
-                    "actors": list(it.actors[:4]), "studios": list(it.studios[:3]),
-                    "genres": list(it.genres[:4]), "tags": list(it.tags[:5]),
-                    "bucket": b, "bucket_cn": bucket_cn(b) or "其它",
-                })
+                self._score_pending.append(
+                    {
+                        "item_id": it.id,
+                        "num": it.num or "",
+                        "name": it.name,
+                        "actors": list(it.actors[:4]),
+                        "studios": list(it.studios[:3]),
+                        "genres": list(it.genres[:4]),
+                        "tags": list(it.tags[:5]),
+                        "bucket": b,
+                        "bucket_cn": bucket_cn(b) or "其它",
+                    }
+                )
         self._score_pending = self._score_pending[:200]
-        self.log.log_success(f"启动 AI 语义打分：{len(self._score_pending)} 条（分桶分批，连不上自动退回纯规则）")
+        self.log.log_success(
+            f"启动 AI 语义打分：{len(self._score_pending)} 条（分桶分批，连不上自动退回纯规则）"
+        )
         self._run_score_batch(line)
 
-    def _run_score_batch(self, profile_line: str) -> None:
+    def _run_score_batch(self, profile_line: dict | str) -> None:
         from workers.ai_score import AIScoreWorker
+
         batch = self._score_pending[:25]
         self._score_pending = self._score_pending[25:]
         self._score_worker = AIScoreWorker(
-            batch, profile_line, batch[0]["bucket_cn"] if batch else "其它",
+            batch,
+            profile_line,
+            batch[0]["bucket_cn"] if batch else "其它",
             DATA_DIR / "smart.db",
-            self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model)
+            *self._score_parameters,
+            context=self._score_context,
+            fingerprint=self._score_fingerprint_value,
+        )
         self._score_worker.log.connect(self.log.log)
-        self._score_worker.finished.connect(
-            lambda d: self._on_score_batch_done(d, profile_line))
-        self._score_worker.start()
+        self._score_worker.finished.connect(lambda d: self._on_score_batch_done(d, profile_line))
+        start_task(self, self._score_worker)
 
-    def _on_score_batch_done(self, data: dict, profile_line: str) -> None:
+    def _on_score_batch_done(self, data: dict, profile_line: dict | str) -> None:
+        self._score_total += data.get("scored", 0)
+        from ui.services import _snapshot_key
+
+        if (
+            self._score_request_key != _snapshot_key(self.cfg)
+            or self._score_labels != self.store.all()
+            or data.get("cancelled")
+        ):
+            self._score_pending = []
+            self.btn_ai_score.setEnabled(True)
+            self.log.log_warning(
+                "AI任务已取消，或配置/反馈已变更。旧任务缓存保持原范围，重新分析后可重新评分。"
+            )
+            return
         if data.get("error"):
             self.btn_ai_score.setEnabled(True)
-            self.log.log_warning(f"AI 打分中断（{data['error'][:60]}），已打分的保留，评分退回纯规则。")
+            self.log.log_warning(
+                f"AI 打分中断（{data['error'][:60]}），已打分的保留，评分退回纯规则。"
+            )
             self._refresh_after_change()
             return
         if self._score_pending:
             self._run_score_batch(profile_line)
             return
         self.btn_ai_score.setEnabled(True)
-        self.log.log_success(f"AI 语义打分完成：{data.get('scored', 0)} 条已缓存。触发一次重排以融合进评分…")
+        self.log.log_success(
+            f"AI 语义打分完成：{self._score_total} 条已缓存。触发一次重排以融合进评分…"
+        )
         self._refresh_after_change()
-        QMessageBox.information(self, "AI 语义打分完成",
-                                f"已对 {data.get('scored', 0)} 条作品做内容相似度打分并缓存。\n"
-                                "下次「开始分析」或打标重排会自动与规则命中度融合。\n"
-                                "连不上本地 LLM 时评分为纯规则，不受影响。")
+        QMessageBox.information(
+            self,
+            "AI 语义打分完成",
+            f"已对 {self._score_total} 条作品做内容相似度打分并缓存。\n"
+            "下次「开始分析」或打标重排会自动与规则命中度融合。\n"
+            "连不上本地 LLM 时评分为纯规则，不受影响。",
+        )
 
     # ── AI 二次复核 ──
     def _build_candidates(self, context: str) -> list:
@@ -535,20 +683,28 @@ class ReviewPage(QWidget):
             else:
                 if r.decision != scoring.DEC_DELETE or r.is_junk:
                     continue
-            cand.append({
-                "num": it.num or "", "name": it.name,
-                "hit": f"{r.s_content:.0%}", "reason": r.reason,
-                "actors": list(it.actors[:4]), "studios": list(it.studios[:4]),
-                "genres": list(it.genres[:4]),
-            })
+            cand.append(
+                {
+                    "item_id": it.id,
+                    "num": it.num or "",
+                    "name": it.name,
+                    "hit": f"{r.s_content:.0%}",
+                    "reason": r.reason,
+                    "actors": list(it.actors[:4]),
+                    "studios": list(it.studios[:4]),
+                    "genres": list(it.genres[:4]),
+                }
+            )
         return cand[:25]
 
     def _ai_recheck(self, context: str) -> None:
         if not self.cfg.ai_enabled:
             QMessageBox.information(
-                self, "未启用 AI",
+                self,
+                "未启用 AI",
                 "请在「设置」→「本地 AI 二次校验」勾选启用并配置本地 LLM（如 Ollama）。\n"
-                "未启用 AI 时，规则结果照常可用。")
+                "未启用 AI 时，规则结果照常可用。",
+            )
             return
         if not self.results:
             QMessageBox.information(self, "无候选", "请先点击「🚀 开始分析」加载全库评分。")
@@ -558,8 +714,10 @@ class ReviewPage(QWidget):
         cand = self._build_candidates(context)
         if not cand:
             QMessageBox.information(
-                self, "无候选",
-                f"当前没有「{'可能喜欢' if context == 'like' else '建议删除'}」候选可复核。")
+                self,
+                "无候选",
+                f"当前没有「{'可能喜欢' if context == 'like' else '建议删除'}」候选可复核。",
+            )
             return
         tag = "可能喜欢" if context == "like" else "建议删除"
         self.log.log_success(f"启动 AI 复核：{len(cand)} 条（{tag}）")
@@ -568,13 +726,15 @@ class ReviewPage(QWidget):
         else:
             self.btn_ai_del.setEnabled(False)
         from workers.ai import AIRecheckWorker
+
         self._ai_worker = AIRecheckWorker(
-            cand, self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model,
-            context=context)
+            cand, self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model, context=context
+        )
         self._ai_worker.result.connect(lambda s: self.log.log(str(s)[:300]))
         self._ai_worker.log.connect(self.log.log)
+        self._ai_worker.verdict.connect(self._collect_ai_suggestion)
         self._ai_worker.finished.connect(lambda d: self._on_ai_done(d, context))
-        self._ai_worker.start()
+        start_task(self, self._ai_worker)
 
     def _on_ai_done(self, data: dict, context: str) -> None:
         if context == "like":
@@ -586,22 +746,28 @@ class ReviewPage(QWidget):
             QMessageBox.warning(self, "AI 复核失败", str(data["error"]))
             return
         QMessageBox.information(
-            self, "AI 复核完成",
-            f"已复核 {data.get('ok', 0)}/{data.get('total', 0)} 条，判定详情见日志。")
+            self,
+            "AI 复核完成",
+            f"已复核 {data.get('ok', 0)}/{data.get('total', 0)} 条，判定详情见日志。",
+        )
 
     # ── AI 批量预判待复核 ──
     def _ai_review_and_mark(self) -> None:
         if not self.cfg.ai_enabled:
-            QMessageBox.information(self, "未启用 AI",
-                                    "请在「设置」→「本地 AI 二次校验」启用本地 LLM 后使用。")
+            QMessageBox.information(
+                self, "未启用 AI", "请在「设置」→「本地 AI 二次校验」启用本地 LLM 后使用。"
+            )
             return
         if not self.results:
             QMessageBox.information(self, "无候选", "请先点击「🚀 开始分析」。")
             return
         cand = [
-            r for r in self.results
-            if not r.is_seen and r.item.id not in self.labels
-            and not r.is_junk and not r.featureless
+            r
+            for r in self.results
+            if not r.is_seen
+            and r.item.id not in self.labels
+            and not r.is_junk
+            and not r.featureless
             and r.decision == scoring.DEC_REVIEW
         ]
         if not cand:
@@ -612,36 +778,50 @@ class ReviewPage(QWidget):
         # 分批（每批 25），串行跑
         self._ai_review_num2id = {r.item.num or "": r.item.id for r in cand}
         self._ai_review_pool = [
-            [{
-                "num": r.item.num or "", "name": r.item.name,
-                "hit": f"{r.s_content:.0%}", "reason": r.reason or "",
-                "actors": list(r.item.actors[:4]), "studios": list(r.item.studios[:4]),
-                "genres": list(r.item.genres[:4]),
-            } for r in cand[i:i + 25]]
-            for i in range(0, len(cand), 25)]
+            [
+                {
+                    "item_id": r.item.id,
+                    "num": r.item.num or "",
+                    "name": r.item.name,
+                    "hit": f"{r.s_content:.0%}",
+                    "reason": r.reason or "",
+                    "actors": list(r.item.actors[:4]),
+                    "studios": list(r.item.studios[:4]),
+                    "genres": list(r.item.genres[:4]),
+                }
+                for r in cand[i : i + 25]
+            ]
+            for i in range(0, len(cand), 25)
+        ]
         # 只处理一个有意义的量（防止几十批串行太久）：一次最多 8 批(200部)
         self._ai_review_pool = self._ai_review_pool[:8]
         self._ai_review_marks = []
         self._ai_review_idx = 0
         self.btn_ai_review.setEnabled(False)
-        self.log.log_success(f"AI 批量预判待复核：共 {len(cand)} 部，将处理前 {min(len(cand), len(self._ai_review_pool) * 25)} 部。")
+        self.log.log_success(
+            f"AI 批量预判待复核：共 {len(cand)} 部，将处理前 {min(len(cand), len(self._ai_review_pool) * 25)} 部。"
+        )
         self._run_review_batch()
 
     def _run_review_batch(self) -> None:
         from workers.ai import AIRecheckWorker
+
         batch = self._ai_review_pool[self._ai_review_idx]
         self._ai_review_worker = AIRecheckWorker(
-            batch, self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model,
-            context="review")
+            batch, self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model, context="review"
+        )
         self._ai_review_worker.log.connect(self.log.log)
-        self._ai_review_worker.result.connect(self._collect_review_verdicts)
+        self._ai_review_worker.verdict.connect(self._collect_ai_suggestion)
         self._ai_review_worker.finished.connect(self._on_review_batch_done)
-        self._ai_review_worker.start()
+        start_task(self, self._ai_review_worker)
 
     def _collect_review_verdicts(self, text: str) -> None:
         import re as _re
-        for line in (_re.split(r"[\r\n]+", str(text)) if text else []):
-            m = _re.match(r"\s*([A-Za-z0-9\-]+)\s*[:：]\s*(KEEP|DELETE|UNSURE)", line.strip().upper())
+
+        for line in _re.split(r"[\r\n]+", str(text)) if text else []:
+            m = _re.match(
+                r"\s*([A-Za-z0-9\-]+)\s*[:：]\s*(KEEP|DELETE|UNSURE)", line.strip().upper()
+            )
             if m and m.group(2) == "DELETE":
                 num = line.strip().split(":")[0].strip().split("：")[0].strip()
                 item_id = self._ai_review_num2id.get(num)
@@ -659,14 +839,111 @@ class ReviewPage(QWidget):
             return
         # 全部批次完成：写入删除标签并重排
         for item_id in self._ai_review_marks:
-            self.store.set(item_id, scoring.LABEL_DELETE)
+            pass  # machine predictions remain suggestions until explicit human adoption
         self.btn_ai_review.setEnabled(True)
         n = len(self._ai_review_marks)
-        self.log.log_warning(f"AI 预判完成：{n} 部标记为建议删除（已进删除暂存，需到删除页二次确认）。")
+        self.log.log_warning(f"AI 预判完成：{n} 部删除建议，请审阅并勾选采纳；尚未改变人工标签。")
         QMessageBox.information(
-            self, "AI 批量预判完成",
-            f"已处理 {self._ai_review_idx} 批。\nAI 判定 {n} 部待复核作品为可删，"
-            "已写入删除暂存（到「删除暂存」页二次确认后再删）。\n其余保留，可继续人工快判。")
+            self,
+            "AI 批量预判完成",
+            f"已处理 {self._ai_review_idx} 批，{n} 部删除建议。\n请在AI建议列表审阅并明确采纳，机器建议不会自动写为人工标签。",
+        )
+        self._refresh_after_change()
+
+    def _score_fingerprint(self):
+        from utils.state_context import score_fingerprint
+
+        return score_fingerprint(self.items, self.labels, self.cfg)
+
+    def _collect_ai_suggestion(self, data):
+        item_id = str(data.get("item_id") or "")
+        verdict = data.get("verdict")
+        if item_id not in {item.id for item in self.items} or verdict not in (
+            "KEEP",
+            "DELETE",
+            "UNSURE",
+        ):
+            return
+        self._ai_suggestions[item_id] = dict(
+            data, context=state_context(self.cfg), fingerprint=self._score_fingerprint()
+        )
+        if verdict == "DELETE" and item_id not in self._ai_review_marks:
+            self._ai_review_marks.append(item_id)
+        self.ai_suggestions.setRowCount(0)
+        by_id = {item.id: item for item in self.items}
+        for sid, suggestion in self._ai_suggestions.items():
+            row = self.ai_suggestions.rowCount()
+            self.ai_suggestions.insertRow(row)
+            check = QTableWidgetItem("")
+            check.setFlags(check.flags() | Qt.ItemIsUserCheckable)
+            check.setCheckState(Qt.Unchecked)
+            check.setData(Qt.UserRole, sid)
+            self.ai_suggestions.setItem(row, 0, check)
+            for col, text in enumerate(
+                (by_id[sid].name, suggestion["verdict"], suggestion.get("reason", "")), start=1
+            ):
+                item = QTableWidgetItem(str(text))
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.ai_suggestions.setItem(row, col, item)
+
+    def _adopt_ai_suggestions(self):
+        if busy(self):
+            return
+        selected = []
+        for row in range(self.ai_suggestions.rowCount()):
+            item = self.ai_suggestions.item(row, 0)
+            if item.checkState() == Qt.Checked:
+                suggestion = self._ai_suggestions[item.data(Qt.UserRole)]
+                if (
+                    suggestion.get("context") != state_context(self.cfg)
+                    or suggestion.get("fingerprint") != self._score_fingerprint()
+                    or suggestion["item_id"] not in {it.id for it in self.items}
+                ):
+                    self.log.log_warning("AI建议已因来源、用户或反馈变化失效，请重新生成。")
+                    continue
+                if suggestion["verdict"] != "UNSURE":
+                    selected.append(suggestion)
+        if not selected:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "确认采纳AI建议",
+                f"把明确勾选的 {len(selected)} 条建议转为你的人工决定。文件不会在这里删除。继续？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        self._adoption_context = state_context(self.cfg)
+        self._last_ai_adoption = [
+            (suggestion["item_id"], self.labels.get(suggestion["item_id"]))
+            for suggestion in selected
+        ]
+        for suggestion in selected:
+            self.store.set(
+                suggestion["item_id"],
+                scoring.LABLE_KEEP if suggestion["verdict"] == "KEEP" else scoring.LABEL_DELETE,
+            )
+        self._refresh_labels()
+        events.labels_changed.emit()
+        self._refresh_after_change()
+
+    def _undo_ai_adoption(self):
+        if self._adoption_context != state_context(self.cfg):
+            self._last_ai_adoption = []
+            return
+        if busy(self):
+            return
+        for item_id, label in getattr(self, "_last_ai_adoption", []):
+            if label is None:
+                self.store.remove(item_id)
+            else:
+                self.store.set(item_id, label)
+        self._last_ai_adoption = []
+        self._refresh_labels()
+        events.labels_changed.emit()
         self._refresh_after_change()
 
     # ── 表格 ──
@@ -698,12 +975,28 @@ class ReviewPage(QWidget):
             if r.item.id in self.labels:
                 done_rows.append((it.num or "", it.name, self.labels[r.item.id], mb, it.path))
             elif r.decision == scoring.DEC_LIKE and not r.is_seen:
-                like_rows.append((it.num or "", it.name, f"{r.s_content:.0%}",
-                                  r.reason, self._feat_summary(it), it.path))
+                like_rows.append(
+                    (
+                        it.num or "",
+                        it.name,
+                        f"{r.s_content:.0%}",
+                        r.reason,
+                        self._feat_summary(it),
+                        it.path,
+                    )
+                )
             elif r.decision == scoring.DEC_DELETE and not r.is_seen and not r.is_junk:
                 # 排除 Jellyfin 附属文件(theme/缩略图)，它们不是作品，不该进删除建议
-                del_rows.append((it.num or "", it.name, f"{r.s_content:.0%}",
-                                 r.reason, self._feat_summary(it), it.path))
+                del_rows.append(
+                    (
+                        it.num or "",
+                        it.name,
+                        f"{r.s_content:.0%}",
+                        r.reason,
+                        self._feat_summary(it),
+                        it.path,
+                    )
+                )
         self._set_table(self.tab_like, like_rows)
         self._set_table(self.tab_del, del_rows)
         self._set_table(self.tab_done, done_rows)
@@ -711,6 +1004,9 @@ class ReviewPage(QWidget):
         self._tab_rows = {"like": like_rows, "del": del_rows, "done": done_rows}
         # 路径 → 封面 映射（卡片视图缩略图用）
         self._tab_covers = {it.path: it.cover for it in self.items if it.cover}
+        for key, stack in self._list_stack.items():
+            if stack.currentIndex() == 1:
+                self._rebuild_cards(key)
 
     def _set_table(self, table: QTableWidget, rows: list) -> None:
         # 必须先关排序再填充：排序开启时逐行 setItem 会因首列排序移行，导致错位/空白
@@ -727,12 +1023,12 @@ class ReviewPage(QWidget):
                     # 数值列(命中度/大小)：显示原文、按数值排序
                     item = NumItem(s)
                     try:
-                        item.setData(Qt.UserRole, float(s.split()[0]))
+                        item.setData(Qt.UserRole, float(s.split()[0].rstrip("%")))
                     except (TypeError, ValueError):
                         item.setData(Qt.UserRole, 0.0)
                 else:
                     item = QTableWidgetItem(s)
-                item.setData(ROLE_PATH, row[-1])     # 文件路径（自定义角色，不占 UserRole）
+                item.setData(ROLE_PATH, row[-1])  # 文件路径（自定义角色，不占 UserRole）
                 item.setToolTip(str(row[-1]))
                 table.setItem(r, c, item)
         table.setSortingEnabled(True)
@@ -740,7 +1036,7 @@ class ReviewPage(QWidget):
     # ── 表格/卡片视图切换（列表 tab）──
     def _current_list_key(self):
         idx = self.main_tabs.currentIndex()
-        if idx == 0:
+        if idx == 0 or idx > 3:
             return None
         return ("like", "del", "done")[idx - 1]
 
@@ -803,6 +1099,7 @@ class ReviewPage(QWidget):
             def _open(ev, p=path):
                 if ev.button() == Qt.LeftButton and os.path.exists(p):
                     subprocess.Popen(f'explorer /select,"{os.path.normpath(p)}"')
+
             card.mouseDoubleClickEvent = _open
         return card
 
@@ -871,8 +1168,12 @@ class ReviewPage(QWidget):
         m.setWordWrap(True)
         detail.addWidget(m)
 
-        for label, vals in [("演员", it.actors), ("厂商", it.studios),
-                            ("类型", it.genres), ("标签", it.tags)]:
+        for label, vals in [
+            ("演员", it.actors),
+            ("厂商", it.studios),
+            ("类型", it.genres),
+            ("标签", it.tags),
+        ]:
             if vals:
                 v = QLabel(f"{label}: {', '.join(str(x) for x in vals[:8])}")
                 v.setWordWrap(True)
@@ -880,11 +1181,13 @@ class ReviewPage(QWidget):
 
         if r.featureless:
             bar_label = QLabel("该条没有任何可用元数据（无法预测），只能人工判断")
+            bar_label.setWordWrap(True)
             bar_label.setStyleSheet(f"color:{theme.color('warning')};")
             detail.addWidget(bar_label)
         else:
             pct = int(r.s_content * 100)
             bar_label = QLabel(f"命中度（内容跟你喜欢的有多像）: {pct}%")
+            bar_label.setWordWrap(True)
             bar_label.setStyleSheet(f"color:{txt};")
             detail.addWidget(bar_label)
             bar = QProgressBar()
@@ -900,6 +1203,7 @@ class ReviewPage(QWidget):
 
         # 系统建议提示（更新为纯鼠标友好文案）
         sug = QLabel("系统建议: 待复核 — 你来定（点下方按钮 或 用 →/← 键）")
+        sug.setWordWrap(True)
         sug.setStyleSheet(f"font-size:14px; font-weight:bold; color:{col};")
         detail.addWidget(sug)
 
@@ -907,29 +1211,32 @@ class ReviewPage(QWidget):
         self.card_lay.addLayout(body)
 
         # 纯鼠标操作按钮排（解决"只能快捷键"的痛点，避免强迫键盘操作）
-        btns = QHBoxLayout()
+        btns = QGridLayout()
         btns.setSpacing(10)
         btn_like = QPushButton("👍 喜欢/保留 (→)")
         btn_like.setProperty("cssClass", "success")
         btn_like.setMinimumHeight(38)
         btn_like.clicked.connect(lambda: self._label("keep"))
-        btns.addWidget(btn_like, 1)
+        btns.addWidget(btn_like, 0, 0)
+        btn_protect = QPushButton("仅保留（不计喜好）")
+        btn_protect.clicked.connect(lambda: self._label("protect"))
+        btns.addWidget(btn_protect, 0, 1)
 
         btn_del = QPushButton("👎 不喜欢/建议删 (←)")
         btn_del.setProperty("cssClass", "danger")
         btn_del.setMinimumHeight(38)
         btn_del.clicked.connect(lambda: self._label("delete"))
-        btns.addWidget(btn_del, 1)
+        btns.addWidget(btn_del, 1, 0)
 
         btn_skip = QPushButton("⏭ 跳过待定 (↓)")
         btn_skip.setMinimumHeight(38)
         btn_skip.clicked.connect(lambda: self._label("skip"))
-        btns.addWidget(btn_skip, 1)
+        btns.addWidget(btn_skip, 1, 1)
 
         btn_undo = QPushButton("↩ 撤销 (Ctrl+Z)")
         btn_undo.setMinimumHeight(38)
         btn_undo.clicked.connect(self._undo)
-        btns.addWidget(btn_undo, 0)
+        btns.addWidget(btn_undo, 2, 0, 1, 2)
 
         self.card_lay.addLayout(btns)
 
@@ -952,7 +1259,8 @@ class ReviewPage(QWidget):
         else:
             self.counts_label.setText(
                 f"已人工打标: {len(self.labels)} ｜ 待复核: {len(self.deck_ids)}"
-                f" ｜ 跳过(搁置): {len(self._skipped)}")
+                f" ｜ 跳过(搁置): {len(self._skipped)}"
+            )
             return
         success = theme.color("success")
         warning = theme.color("warning")
@@ -977,6 +1285,9 @@ class ReviewPage(QWidget):
 
     # ── 键盘 ──
     def keyPressEvent(self, event):
+        if busy(self):
+            event.ignore()
+            return
         key = event.key()
         if key == Qt.Key_Right:
             self._label("keep")
@@ -1008,8 +1319,13 @@ class ReviewPage(QWidget):
             subprocess.Popen(f'explorer /select,"{os.path.normpath(item.path)}"')
 
     def shutdown(self) -> None:
-        for w in (self.analyzer, self.reranker, getattr(self, "_ai_worker", None),
-                  getattr(self, "_ai_review_worker", None),
-                  getattr(self, "_score_worker", None)):
-            if w and w.isRunning():
-                w.wait(3000)
+        stop_page(self)
+
+    def on_context_changed(self):
+        self._last_action = None
+        self._last_ai_adoption = []
+        self._ai_suggestions = {}
+        self._ai_review_marks = []
+        self._ai_review_pool = []
+        self._label_anchor = None
+        self.ai_suggestions.setRowCount(0)

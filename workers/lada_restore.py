@@ -37,7 +37,8 @@ class LadaProbeWorker(QThread):
                 f"读取完成：预设 {len(info['presets'])} 个、"
                 f"检测模型 {len(info['detection_models'])} 个、"
                 f"修复模型 {len(info['restoration_models'])} 个、"
-                f"设备 {len(info['devices'])} 个")
+                f"设备 {len(info['devices'])} 个"
+            )
         else:
             self.log.emit(f"读取失败：{info.get('error') or '未知原因'}")
         self.done.emit(info)
@@ -68,8 +69,7 @@ class LadaRestoreWorker(QThread):
     file_done = Signal(str, bool, str)
     finished = Signal(dict)
 
-    def __init__(self, cfg, videos, cli_path, options=None, ffprobe: str = "ffprobe",
-                 parent=None):
+    def __init__(self, cfg, videos, cli_path, options=None, ffprobe: str = "ffprobe", parent=None):
         super().__init__(parent)
         self.cfg = cfg
         self.videos = [str(v) for v in (videos or [])]
@@ -80,6 +80,7 @@ class LadaRestoreWorker(QThread):
         #: 绑核用的核心列表（run() 里按配置解析一次，避免每个文件都重算）
         self.affinity_info: dict = {}
         self.affinity_cores: list = []
+        self._vram_gate = gpu.VramGate(cfg.lada_vram_high, cfg.lada_vram_low)
 
     def stop(self) -> None:
         self._stopped = True
@@ -95,16 +96,23 @@ class LadaRestoreWorker(QThread):
         # 绑核：按配置解析一次，并把**判定来源**明确告诉用户 ——
         # 这项优化只对 Intel 混合架构有明显效果，别的 CPU 上会自动退回全部核心。
         self.affinity_info = cpu_affinity.detect_affinity(
-            cfg.lada_cpu_affinity, cfg.lada_cpu_affinity_cores)
+            cfg.lada_cpu_affinity, cfg.lada_cpu_affinity_cores
+        )
         self.affinity_cores = list(self.affinity_info.get("cores") or [])
         self.log.emit(f"CPU 绑定：{cpu_affinity.describe_affinity(self.affinity_info)}")
-        if self.affinity_info.get("mode") == "auto" and \
-                self.affinity_info.get("source") != cpu_affinity._SRC_API:
-            self.log.emit("    （自动探测没拿到精确拓扑，已按说明退回；"
-                          "想让任务跑在特定核心上，可在设置里改成自定义）")
+        if (
+            self.affinity_info.get("mode") == "auto"
+            and self.affinity_info.get("source") != cpu_affinity._SRC_API
+        ):
+            self.log.emit(
+                "    （自动探测没拿到精确拓扑，已按说明退回；"
+                "想让任务跑在特定核心上，可在设置里改成自定义）"
+            )
         if cfg.lada_vram_gate:
-            self.log.emit(f"显存门控已开启：占用超过 {cfg.lada_vram_high:.1f} GB 时暂停，"
-                          f"低于 {cfg.lada_vram_low:.1f} GB 时继续")
+            self.log.emit(
+                f"显存门控已开启：占用超过 {cfg.lada_vram_high:.1f} GB 时暂停，"
+                f"低于 {cfg.lada_vram_low:.1f} GB 时继续"
+            )
 
         pending = list(self.videos)
         lock = threading.Lock()
@@ -117,11 +125,13 @@ class LadaRestoreWorker(QThread):
 
         def gate():
             """显存门控：占用过高时等待。返回是否因为停止而退出。"""
-            if not cfg.lada_vram_gate:
+            if not cfg.lada_vram_gate or not str(cfg.lada_device).startswith("cuda"):
                 return False
             while not self._stopped:
-                used = gpu.vram_used_gb()
-                if used < 0 or used <= cfg.lada_vram_high:
+                used = gpu.vram_used_gb(cfg.lada_device)
+                with lock:
+                    allowed = self._vram_gate.allow(used)
+                if allowed:
                     return False
                 stats["gated"] = True
                 with lock:
@@ -155,8 +165,9 @@ class LadaRestoreWorker(QThread):
                 if total:
                     self.progress.emit(int(current / total * 100))
 
-        threads = [threading.Thread(target=body, name=f"lada-{i + 1}", daemon=True)
-                   for i in range(n)]
+        threads = [
+            threading.Thread(target=body, name=f"lada-{i + 1}", daemon=True) for i in range(n)
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -168,16 +179,23 @@ class LadaRestoreWorker(QThread):
         else:
             self.log.emit("")
             self.log.emit(f"全部完成：成功 {stats['ok']} / 失败 {stats['fail']}")
-        self.finished.emit({
-            "ok": stats["ok"], "fail": stats["fail"], "fails": stats["fails"],
-            "cancelled": cancelled, "stopped_by_gate": bool(stats["gated"]),
-        })
+        self.finished.emit(
+            {
+                "ok": stats["ok"],
+                "fail": stats["fail"],
+                "fails": stats["fails"],
+                "cancelled": cancelled,
+                "stopped_by_gate": bool(stats["gated"]),
+            }
+        )
 
     def _one(self, path: str, wid: str) -> tuple:
         """处理单个视频，返回 ``(是否成功, 说明)``。"""
         cfg = self.cfg
         video = Path(path)
-        out_dir = Path(cfg.lada_output_dir) if cfg.lada_output_dir else video.parent
+        from utils.file_ops import mapped_output_directory
+
+        out_dir = mapped_output_directory(path, cfg.lada_output_dir, self.videos)
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -189,42 +207,64 @@ class LadaRestoreWorker(QThread):
             temp_dir = Path(temp_dir) / wid.replace("lada-", "w")
 
         pattern = cfg.lada_output_pattern or lada_tool.OUTPUT_PATTERN
+        if self.options is not None and "--output-file-pattern" not in self.options:
+            pattern = lada_tool.OUTPUT_PATTERN
         expected = Path(out_dir) / pattern.replace("{orig_file_name}", video.stem)
+        from utils.file_ops import path_key
 
-        result = lada_tool.run_one(
-            self.cli_path, path, str(out_dir),
-            options=self.options,
-            device=cfg.lada_device,
-            encoding_preset=cfg.lada_encoding_preset,
-            detection_model=cfg.lada_detection_model,
-            restoration_model=cfg.lada_restoration_model,
-            max_clip_length=cfg.lada_max_clip_length,
-            fp16=cfg.lada_fp16,
-            temporary_dir=str(temp_dir),
-            detect_face_mosaics=cfg.lada_detect_face_mosaics,
-            mp4_fast_start=cfg.lada_mp4_fast_start,
-            output_pattern=pattern,
-            on_line=self._on_tool_line,
-            progress=lambda pct, p=path: self.file_progress.emit(p, pct),
-            should_stop=lambda: self._stopped,
-            cpu_affinity=self.affinity_cores or None,
-        )
-        if result.get("error"):
-            return False, result["error"]
+        if path_key(expected) == path_key(video):
+            return False, "输出与原文件路径相同，已拒绝覆盖"
+        if expected.exists():
+            return False, "已有恢复产物，请先审阅或移走；本次没有生成新文件"
 
-        # 退出码 0 ≠ 一定成功：Lada 有过"静默产出坏文件"的情况
-        if not expected.is_file() or expected.stat().st_size == 0:
-            tail = (result["lines"] or ["(无输出)"])[-1][:120]
-            return False, f"未生成输出文件（末行：{tail}）"
+        import tempfile
+        from utils.file_ops import safe_replace
 
-        if cfg.lada_validate_output:
-            ok, why = lada_tool.validate_output_timing(
-                path, expected, self.ffprobe)
-            if not ok:
-                return False, f"{why}（输出文件已保留，请自行确认）"
-
-        size_mb = expected.stat().st_size / 1048576
-        self.log.emit(f"    ✅ 完成：{expected.name}（{size_mb:.0f} MB）")
+        if self.options is not None and "--output" not in self.options:
+            return False, "该工具不能指定隔离输出目录，已拒绝运行"
+        if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+            return False, "输出命名必须位于指定目录内"
+        with tempfile.TemporaryDirectory(prefix=".toolkit-lada-", dir=out_dir) as staging_dir:
+            staged = Path(staging_dir) / pattern.replace("{orig_file_name}", video.stem)
+            result = lada_tool.run_one(
+                self.cli_path,
+                path,
+                staging_dir,
+                options=self.options,
+                device=cfg.lada_device,
+                encoding_preset=cfg.lada_encoding_preset,
+                detection_model=cfg.lada_detection_model,
+                restoration_model=cfg.lada_restoration_model,
+                max_clip_length=cfg.lada_max_clip_length,
+                fp16=cfg.lada_fp16,
+                temporary_dir=str(temp_dir),
+                detect_face_mosaics=cfg.lada_detect_face_mosaics,
+                mp4_fast_start=cfg.lada_mp4_fast_start,
+                output_pattern=pattern,
+                on_line=self._on_tool_line,
+                progress=lambda pct, p=path: self.file_progress.emit(p, pct),
+                should_stop=lambda: self._stopped,
+                cpu_affinity=self.affinity_cores or None,
+            )
+            if result.get("error") or result.get("code") != 0 or self._stopped:
+                return False, result.get("error") or "Lada失败或已停止"
+            if not staged.is_file() or not staged.stat().st_size:
+                return False, "未生成有效的新产物"
+            if cfg.lada_validate_output:
+                ok, why = lada_tool.validate_output_timing(path, staged, self.ffprobe)
+                if not ok:
+                    return False, why + "（原视频已保留）"
+            installed = safe_replace(
+                staged,
+                expected,
+                move_source=True,
+                allow_overwrite=False,
+                should_stop=lambda: self._stopped,
+                kind="lada_generate",
+            )
+            if not installed["ok"]:
+                return False, installed["error"]
+        self.log.emit(f"新产物已生成：{expected}")
         return True, ""
 
     def _on_tool_line(self, line: str) -> None:

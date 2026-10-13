@@ -1,18 +1,40 @@
 """分集合并页面 — 分层树形列表：番号为父节点，CD1/CD2 等分集为子节点，直接勾选合并或删除。"""
+
 from __future__ import annotations
+
+from ui.services import busy, start_task, stop_page
 
 import os
 import subprocess
 import sys
+import copy
+from ui.services import CallWorker, after_stopped
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QGroupBox, QHBoxLayout, QHeaderView,
-    QFrame, QLabel, QListWidget, QListWidgetItem, QMenu, QMessageBox,
-    QProgressBar, QPushButton, QDialog, QDialogButtonBox, QFileDialog,
-    QPlainTextEdit, QScrollArea, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QAbstractItemView,
+    QComboBox,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QFrame,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMenu,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QPlainTextEdit,
+    QScrollArea,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -26,8 +48,11 @@ from utils.merge import (
     discover_pending_merged_outputs,
 )
 from utils.merge_archive import (
-    add_journal_entries, archive_group_for_merge, group_backup_dir,
-    load_journal, rollbackable_entries,
+    add_journal_entries,
+    archive_group_for_merge,
+    group_backup_dir,
+    load_journal,
+    rollbackable_entries,
 )
 from utils.merge_repair import archived_merge_items
 from utils.trash import DeleteJournal
@@ -193,6 +218,7 @@ class MergePage(QWidget):
             return str(resolve_backup_root(self.cfg) / subfolder)
         except Exception:  # noqa: BLE001  提示文案不该因为路径解析失败而让整个流程崩掉
             from config import DATA_DIR
+
             return str(DATA_DIR / "backups" / subfolder)
 
     # ── UI ──
@@ -315,12 +341,16 @@ class MergePage(QWidget):
         action_row.addWidget(self.btn_delete_checked)
 
         self.btn_rediscover = QPushButton("🔎 检测未替换合并")
-        self.btn_rediscover.setToolTip("重新扫描当前目录中已生成、还没替换原文件的「番号 合并.mp4」，无需重新合并。")
+        self.btn_rediscover.setToolTip(
+            "重新扫描当前目录中已生成、还没替换原文件的「番号 合并.mp4」，无需重新合并。"
+        )
         self.btn_rediscover.clicked.connect(self._rediscover_pending)
         action_row.addWidget(self.btn_rediscover)
 
         self.btn_legacy = QPushButton("🧹 整理旧合并")
-        self.btn_legacy.setToolTip("扫描旧「番号 合并.mp4」，改名为「番号.mp4」并同步 NFO，随后刷新 Jellyfin。")
+        self.btn_legacy.setToolTip(
+            "扫描旧「番号 合并.mp4」，改名为「番号.mp4」并同步 NFO，随后刷新 Jellyfin。"
+        )
         self.btn_legacy.clicked.connect(self._legacy_rename_clicked)
         action_row.addWidget(self.btn_legacy)
 
@@ -339,7 +369,9 @@ class MergePage(QWidget):
         rb_layout = QVBoxLayout(rollback_box)
         self.rollback_list = QListWidget()
         self.rollback_list.setMaximumHeight(110)
-        self.rollback_list.setToolTip("勾选要恢复的原文件/同名 sidecar，点击下方按钮恢复到原始路径。")
+        self.rollback_list.setToolTip(
+            "勾选要恢复的原文件/同名 sidecar，点击下方按钮恢复到原始路径。"
+        )
         rb_layout.addWidget(self.rollback_list)
         self.btn_rollback = QPushButton("↩ 回滚选中文件")
         self.btn_rollback.setEnabled(False)
@@ -376,7 +408,9 @@ class MergePage(QWidget):
 
         self.repair_list = QListWidget()
         self.repair_list.setMaximumHeight(160)
-        self.repair_list.setToolTip("扫描后勾选要修复的旧合并；每个番号会恢复原分集、删除坏文件并重新合并替换。")
+        self.repair_list.setToolTip(
+            "扫描后勾选要修复的旧合并；每个番号会恢复原分集、删除坏文件并重新合并替换。"
+        )
         repair_layout.addWidget(self.repair_list)
         self.repair_status_label = QLabel("尚未扫描")
         self.repair_status_label.setProperty("cssClass", "muted-label")
@@ -412,7 +446,9 @@ class MergePage(QWidget):
             menu.addAction(act_uncheck)
         elif item is not None and self._is_part_item(item):
             act_open = QAction("打开所在文件夹", self.tree)
-            act_open.triggered.connect(lambda: self._open_path_in_explorer(self._path_for_item(item)))
+            act_open.triggered.connect(
+                lambda: self._open_path_in_explorer(self._path_for_item(item))
+            )
             menu.addAction(act_open)
         act_expand = QAction("全部展开", self.tree)
         act_collapse = QAction("全部折叠", self.tree)
@@ -473,8 +509,11 @@ class MergePage(QWidget):
         ffmpeg = resolve_tool("ffmpeg") or ""
         ffprobe = _resolve_ffprobe(ffmpeg)
         if not ffprobe:
-            QMessageBox.warning(self, "缺少 ffprobe",
-                                "未找到 ffprobe，无法扫描分集参数。请安装 FFmpeg 并加入 PATH。")
+            QMessageBox.warning(
+                self,
+                "缺少 ffprobe",
+                "未找到 ffprobe，无法扫描分集参数。请安装 FFmpeg 并加入 PATH。",
+            )
             return
         if ffmpeg:
             self.log_panel.log("画面指纹去重已启用")
@@ -485,13 +524,14 @@ class MergePage(QWidget):
         self.progress.setValue(0)
         self.status_label.setText("正在扫描…")
         self._scan_worker = ScanMergeWorker(
-            roots, ffmpeg or "", ffprobe or "", self._collect_options())
+            roots, ffmpeg or "", ffprobe or "", self._collect_options()
+        )
         self._scan_worker.log.connect(self.log_panel.log)
         self._scan_worker.progress.connect(self.progress.setValue)
         self._scan_worker.plan_ready.connect(self._on_plan_ready)
         self._scan_worker.error.connect(self._on_scan_error)
         self._scan_worker.finished.connect(self._on_scan_finished)
-        self._scan_worker.start()
+        start_task(self, self._scan_worker)
 
     def _on_scan_error(self, msg: str) -> None:
         self.log_panel.log_error(msg)
@@ -518,25 +558,36 @@ class MergePage(QWidget):
         self.log_panel.log_success(
             f"扫描完成：可合并 {self._plan.stats.get('ready', 0)}，"
             f"待确认 {self._plan.stats.get('needs_review', 0)}，"
-            f"单文件已略过 {self._plan.stats.get('skip', 0)}")
+            f"单文件已略过 {self._plan.stats.get('skip', 0)}"
+        )
 
     def _discover_pending_merged_outputs(self) -> None:
-        """重启后从磁盘重新发现已生成但未替换的「番号 合并.mp4」。"""
         if not self._group_map:
             return
-        discovered = discover_pending_merged_outputs(list(self._group_map.values()))
+        groups = copy.deepcopy(list(self._group_map.values()))
+        self._discover_worker = CallWorker(lambda cancel: discover_pending_merged_outputs(groups))
+        self._discover_worker.result.connect(self._show_pending_outputs)
+        self._discover_worker.error.connect(self.log_panel.log_error)
+        start_task(self, self._discover_worker, "检测未替换合并产物")
+
+    def _show_pending_outputs(self, discovered):
         for number, info in discovered.items():
             info["archived"] = False
             info["use_tree_selection"] = True
             self._merged[number] = info
+        self._populate_tree()
+        self._update_counts()
+        self.status_label.setText(f"检测到 {len(discovered)} 个未替换合并产物")
         if discovered:
             self.log_panel.log_success(
-                f"发现 {len(discovered)} 个未替换的合并文件，可直接点击“替换原文件”。")
+                f"发现 {len(discovered)} 个未替换合并产物，可审阅后替换原文件。"
+            )
 
     def _refresh_summary(self) -> None:
         if not self._plan:
             return
         from collections import Counter
+
         counts = Counter(g.status for g in self._plan.groups)
         self._plan.stats = {
             "total_groups": len(self._plan.groups),
@@ -553,7 +604,8 @@ class MergePage(QWidget):
         self.summary_label.setText(
             f"共 {s['total_groups']} 个番号分组｜可合并 {s['ready']}｜待确认 {s['needs_review']}"
             f"｜冲突 {s['conflict']}｜多版本 {s['skip_variant']}｜重复 {s['skip_duplicate']}"
-            f"｜未识别 {s['unrecognized']}｜单文件已略过 {s['skip']}")
+            f"｜未识别 {s['unrecognized']}｜单文件已略过 {s['skip']}"
+        )
 
     def _on_filter_changed(self) -> None:
         data = self.combo_filter.currentData()
@@ -562,7 +614,8 @@ class MergePage(QWidget):
 
     def _populate_tree(self) -> None:
         groups = [
-            g for g in self._group_map.values()
+            g
+            for g in self._group_map.values()
             if g.status != "skip"
             and (self._current_filter is None or g.status in self._current_filter)
         ]
@@ -572,10 +625,10 @@ class MergePage(QWidget):
         for g in groups:
             top = MergeTreeItem(self.tree)
             label = display_number_for_group(g) or g.number
-            title = next((p.title.strip() for p in g.parts
-                          if p.title and p.title.strip()), "")
-            top.setText(0, f"{label} — {title}"
-                        if title and title.lower() != label.lower() else label)
+            title = next((p.title.strip() for p in g.parts if p.title and p.title.strip()), "")
+            top.setText(
+                0, f"{label} — {title}" if title and title.lower() != label.lower() else label
+            )
             top.setData(0, Qt.UserRole, ("group", g.number))
             top.setData(0, Qt.UserRole + 1, g.number)
             top.setText(1, _STATUS_CN.get(g.status, g.status))
@@ -614,7 +667,9 @@ class MergePage(QWidget):
                 if saved is not None:
                     child.setCheckState(0, Qt.CheckState(saved))
                 else:
-                    child.setCheckState(0, Qt.Checked if self._default_checked(g, p) else Qt.Unchecked)
+                    child.setCheckState(
+                        0, Qt.Checked if self._default_checked(g, p) else Qt.Unchecked
+                    )
                 child.setToolTip(0, p.path)
             top.setFlags(top.flags() | Qt.ItemIsUserCheckable)
             top.setCheckState(0, self._child_check_summary(top))
@@ -641,7 +696,11 @@ class MergePage(QWidget):
         elif p.part_kind == "cd":
             idx = f"CD{p.part_index}"
         elif p.part_kind == "letter":
-            idx = chr(ord("A") + p.part_index - 1) if 1 <= p.part_index <= 26 else f"字母{p.part_index}"
+            idx = (
+                chr(ord("A") + p.part_index - 1)
+                if 1 <= p.part_index <= 26
+                else f"字母{p.part_index}"
+            )
         else:
             idx = f"第{p.part_index}集"
         name = p.title or p.name
@@ -805,11 +864,16 @@ class MergePage(QWidget):
 
     def _any_worker_running(self) -> bool:
         workers = (
-            self._scan_worker, self._merge_worker, self._trash_worker,
-            self._rollback_worker, self._repair_scan_worker, self._repair_worker,
-            self._legacy_worker, self._jellyfin_worker,
+            self._scan_worker,
+            self._merge_worker,
+            self._trash_worker,
+            self._rollback_worker,
+            self._repair_scan_worker,
+            self._repair_worker,
+            self._legacy_worker,
+            self._jellyfin_worker,
         )
-        return any(w is not None and w.isRunning() for w in workers)
+        return busy(self, mutating=True) or any(w is not None and w.isRunning() for w in workers)
 
     def _checked_delete_items(self) -> list:
         out = []
@@ -827,12 +891,14 @@ class MergePage(QWidget):
         merge_n = len(self._checked_merge_groups())
         delete_n = len(self._checked_delete_items())
         self.count_label.setText(f"可合并 {merge_n} 组｜已勾选 {delete_n} 个文件")
-        running = ((self._merge_worker is not None and self._merge_worker.isRunning())
-                   or (self._trash_worker is not None and self._trash_worker.isRunning()))
+        running = (self._merge_worker is not None and self._merge_worker.isRunning()) or (
+            self._trash_worker is not None and self._trash_worker.isRunning()
+        )
         self.btn_merge_checked.setEnabled(merge_n > 0 and not running)
         self.btn_delete_checked.setEnabled(delete_n > 0 and not running)
-        self.btn_replace.setEnabled(any(
-            info.get("archived") is not True for info in self._merged.values()))
+        self.btn_replace.setEnabled(
+            any(info.get("archived") is not True for info in self._merged.values())
+        )
 
     def _on_shortcut(self, action: str) -> None:
         if action == "all":
@@ -848,7 +914,8 @@ class MergePage(QWidget):
                     for i in range(top.childCount()):
                         child = top.child(i)
                         child.setCheckState(
-                            0, Qt.Unchecked if child.checkState(0) == Qt.Checked else Qt.Checked)
+                            0, Qt.Unchecked if child.checkState(0) == Qt.Checked else Qt.Checked
+                        )
                         self._record_part_check(child)
             finally:
                 self.tree.blockSignals(False)
@@ -867,7 +934,9 @@ class MergePage(QWidget):
             self.tree.blockSignals(True)
             try:
                 for it in items:
-                    it.setCheckState(0, Qt.Unchecked if it.checkState(0) == Qt.Checked else Qt.Checked)
+                    it.setCheckState(
+                        0, Qt.Unchecked if it.checkState(0) == Qt.Checked else Qt.Checked
+                    )
                     self._record_part_check(it)
             finally:
                 self.tree.blockSignals(False)
@@ -918,15 +987,19 @@ class MergePage(QWidget):
         transcode_hint = (
             "\n\n⚠️ 检测到部分分集参数不一致（帧率/采样率/分辨率等）。"
             "将先转码统一后再合并，会占用较多 CPU、耗时较长。"
-            if need_reencode else ""
+            if need_reencode
+            else ""
         )
         r = QMessageBox.question(
-            self, "确认合并",
+            self,
+            "确认合并",
             f"将拼接 {len(tasks)} 个分集组（共 {n_parts} 个分集），"
             f"输出 {ext}，不重编码。\n输出示例：{out_dir}\\{first_label} 合并.{ext}\n"
             "原文件不会删除，合并完成后再由你确认是否替换。"
             f"{transcode_hint}\n继续？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
         if r != QMessageBox.Yes:
             return
         if need_reencode:
@@ -935,13 +1008,12 @@ class MergePage(QWidget):
         self.btn_stop.setEnabled(True)
         self.progress.setValue(0)
         self.status_label.setText("正在合并…")
-        self._merge_worker = MergeWorker(
-            [group for group, _ in tasks], ffmpeg, options, ffprobe)
+        self._merge_worker = MergeWorker([group for group, _ in tasks], ffmpeg, options, ffprobe)
         self._merge_worker.log.connect(self.log_panel.log)
         self._merge_worker.progress.connect(self.progress.setValue)
         self._merge_worker.group_done.connect(self._on_group_done)
         self._merge_worker.finished.connect(self._on_merge_finished)
-        self._merge_worker.start()
+        start_task(self, self._merge_worker)
 
     def _on_group_done(self, number: str, ok: bool, msg: str) -> None:
         if not ok:
@@ -988,6 +1060,7 @@ class MergePage(QWidget):
             QMessageBox.information(self, "提示", "没有要删除的文件。")
             return
         from collections import defaultdict
+
         by_group = defaultdict(list)
         for group, path in items:
             by_group[group.number].append(path)
@@ -1005,18 +1078,22 @@ class MergePage(QWidget):
                 size = part.probe.size if part else None
                 targets.append((path, size))
         if not targets:
-            QMessageBox.warning(self, "不能全部删除",
-                                f"以下番号至少保留一个文件，已跳过：{', '.join(blocked)}")
+            QMessageBox.warning(
+                self, "不能全部删除", f"以下番号至少保留一个文件，已跳过：{', '.join(blocked)}"
+            )
             return
         total = sum(s or 0 for _, s in targets)
         suffix = ""
         if blocked:
             suffix = f"\n\n已跳过整组删除：{', '.join(blocked)}"
         r = QMessageBox.question(
-            self, "确认移入回收站",
-            f"将把 {len(targets)} 个文件移入回收站（约 {total / 1024 / 1024:.0f} MB）。\n"
-            "回收站中可恢复，但请先核对路径。确定继续？" + suffix,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            self,
+            "确认移入可恢复隔离区",
+            f"将把 {len(targets)} 个文件移入可恢复隔离区（约 {total / 1024 / 1024:.0f} MB）。\n"
+            "可恢复隔离区中可恢复，但请先核对路径。确定继续？" + suffix,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
         if r != QMessageBox.Yes:
             return
         if self._any_worker_running():
@@ -1032,16 +1109,18 @@ class MergePage(QWidget):
         self._trash_worker.log.connect(self.log_panel.log)
         self._trash_worker.progress.connect(self.progress.setValue)
         self._trash_worker.finished.connect(self._on_trash_done)
-        self._trash_worker.start()
+        start_task(self, self._trash_worker)
 
     def _on_trash_done(self, stats: dict) -> None:
         self.btn_stop.setEnabled(False)
         self.progress.setValue(100)
         self.log_panel.log_success(
-            f"回收站操作完成：成功 {stats.get('ok', 0)} / 失败 {stats.get('fail', 0)}")
+            f"可恢复隔离区操作完成：成功 {stats.get('ok', 0)} / 失败 {stats.get('fail', 0)}"
+        )
         if stats.get("fail"):
-            QMessageBox.warning(self, "部分失败",
-                                f"{stats.get('fail')} 个文件未能移入回收站（原文件已保留）")
+            QMessageBox.warning(
+                self, "部分失败", f"{stats.get('fail')} 个文件未能移入可恢复隔离区（原文件已保留）"
+            )
         fail_paths = {path for path, _ in stats.get("fails", [])}
         removed = [p for p in self._trash_paths if p not in fail_paths]
         if removed:
@@ -1066,8 +1145,7 @@ class MergePage(QWidget):
         self._update_counts()
 
     # ── 最终确认替换 ──
-    def _ask_batch_replace_confirm(self, total_groups: int, total_parts: int,
-                                   lines: list) -> bool:
+    def _ask_batch_replace_confirm(self, total_groups: int, total_parts: int, lines: list) -> bool:
         """批量替换确认：明细放入可滚动文本区，按钮始终可见。"""
         dialog = QDialog(self)
         dialog.setWindowTitle("确认替换原文件")
@@ -1078,7 +1156,8 @@ class MergePage(QWidget):
 
         title = QLabel(
             f"将把 {total_groups} 个合并结果替换原分集，共 {total_parts} 个原分集。\n"
-            f"原文件及同名 NFO/字幕/图片会备份到：\n{self._backup_root_text()}\n确认后开始逐个替换。")
+            f"原文件及同名 NFO/字幕/图片会备份到：\n{self._backup_root_text()}\n确认后开始逐个替换。"
+        )
         title.setWordWrap(True)
         layout.addWidget(title)
 
@@ -1101,8 +1180,11 @@ class MergePage(QWidget):
         if self._any_worker_running():
             QMessageBox.warning(self, "提示", "有任务正在进行，请稍候或先停止！")
             return
-        pending = [(number, info) for number, info in self._merged.items()
-                   if info.get("archived") is not True]
+        pending = [
+            (number, info)
+            for number, info in self._merged.items()
+            if info.get("archived") is not True
+        ]
         if not pending:
             QMessageBox.information(self, "提示", "没有待替换的合并结果。")
             return
@@ -1118,9 +1200,12 @@ class MergePage(QWidget):
             usable.append((number, info))
         if skipped:
             QMessageBox.information(
-                self, "部分待替换项已跳过",
+                self,
+                "部分待替换项已跳过",
                 "以下番号没有在树中勾选至少两个分集，已跳过：\n"
-                + "\n".join(skipped) + "\n\n请在树中勾选原分集后重试。")
+                + "\n".join(skipped)
+                + "\n\n请在树中勾选原分集后重试。",
+            )
         if not usable:
             return
         pending = usable
@@ -1133,10 +1218,61 @@ class MergePage(QWidget):
         total_parts = sum(len(info.get("originals") or []) for _, info in pending)
         if not self._ask_batch_replace_confirm(len(pending), total_parts, lines):
             return
-        for number, info in pending:
-            self._archive_one(number, info, confirm=False)
-        if self._merged:
-            self._request_jellyfin_refresh()
+        self._archive_batch(pending)
+
+    def _archive_batch(self, pending):
+        cfg = copy.deepcopy(self.cfg)
+        tasks = copy.deepcopy(pending)
+
+        def archive(cancel):
+            results = []
+            for number, info in tasks:
+                if cancel():
+                    break
+                label = info.get("display_number") or number
+                ok, entries, errors, output = archive_group_for_merge(
+                    cfg,
+                    label,
+                    info.get("originals") or [],
+                    info.get("output") or "",
+                    should_stop=cancel,
+                )
+                if ok:
+                    add_journal_entries(entries)
+                results.append(
+                    {
+                        "number": number,
+                        "ok": ok,
+                        "entries": entries,
+                        "errors": errors,
+                        "output": output,
+                    }
+                )
+            return {
+                "results": results,
+                "fail": sum(not row["ok"] for row in results),
+                "cancelled": cancel(),
+            }
+
+        self._archive_worker = CallWorker(archive)
+        self._archive_worker.result.connect(self._on_archive_batch)
+        self._archive_worker.error.connect(self.log_panel.log_error)
+        start_task(self, self._archive_worker, "备份分集并安装已审核合并产物", mutating=True)
+
+    def _on_archive_batch(self, data):
+        for row in data["results"]:
+            if not row["ok"]:
+                self.log_panel.log_error("替换失败：" + "；".join(row["errors"]))
+                continue
+            info = self._merged.get(row["number"])
+            if info is not None:
+                info.update(archived=True, output=row["output"], entries=row["entries"])
+                self._mark_top_archived(row["number"])
+            self.log_panel.log_success("已替换并留存备份：" + row["output"])
+        self._archive_entries = load_journal()
+        self._refresh_rollback_list()
+        if any(row["ok"] for row in data["results"]):
+            after_stopped(self, self._request_jellyfin_refresh)
 
     def _request_jellyfin_refresh(self) -> None:
         """替换完成后，异步请求 Jellyfin 全库刷新以同步文件名/NFO。"""
@@ -1144,18 +1280,18 @@ class MergePage(QWidget):
         api_key = getattr(self.cfg, "jellyfin_api_key", "")
         if not server or not api_key:
             self.log_panel.log_warning(
-                "⚠️ 未配置 Jellyfin 服务器/API Key，已跳过自动同步；请手动刷新媒体库。")
+                "⚠️ 未配置 Jellyfin 服务器/API Key，已跳过自动同步；请手动刷新媒体库。"
+            )
             return
         self._jellyfin_worker = JellyfinRefreshWorker(server, api_key)
         self._jellyfin_worker.log.connect(self.log_panel.log)
         self._jellyfin_worker.finished.connect(self._on_jellyfin_refresh_finished)
-        self._jellyfin_worker.start()
+        start_task(self, self._jellyfin_worker)
 
     def _on_jellyfin_refresh_finished(self, stats: dict) -> None:
         self._jellyfin_worker = None
         if not stats.get("ok"):
-            self.log_panel.log_warning(
-                f"⚠️ Jellyfin 刷新未完成：{stats.get('message')}")
+            self.log_panel.log_warning(f"⚠️ Jellyfin 刷新未完成：{stats.get('message')}")
 
     def _archive_one(self, number: str, info: dict, confirm: bool = True) -> None:
         originals = info.get("originals") or []
@@ -1167,31 +1303,17 @@ class MergePage(QWidget):
         backup = group_backup_dir(self.cfg, label)
         if confirm:
             r = QMessageBox.question(
-                self, "确认替换原文件",
+                self,
+                "确认替换原文件",
                 f"番号 {label}：\n合并文件已生成：{output}\n"
                 f"将把 {len(originals)} 个原分集及同名 NFO/字幕/图片备份到：\n{backup}\n"
                 "替换后合并文件会改名为「番号.<容器>」，并同步生成/更新对应 NFO。\n确认吗？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
             if r != QMessageBox.Yes:
                 return
-        ok, entries, errors, final_output = archive_group_for_merge(
-            self.cfg, label, originals, output)
-        if not ok:
-            for e in errors:
-                self.log_panel.log_error(f"  ❌ 替换失败: {e}")
-            QMessageBox.warning(self, "替换失败", "\n".join(errors) or "替换失败")
-            return
-        add_journal_entries(entries)
-        for e in errors:
-            self.log_panel.log_warning(f"  ⚠️ 非致命问题: {e}")
-        self.log_panel.log_success(
-            f"✅ 番号 {label} 已替换：{final_output}\n（原分集已备份到 {self._backup_root_text()}）")
-        info["archived"] = True
-        info["output"] = final_output
-        info["entries"] = entries
-        self._mark_top_archived(number)
-        self._archive_entries = load_journal()
-        self._refresh_rollback_list()
+        self._archive_batch([(number, info)])
 
     def _mark_top_archived(self, number: str) -> None:
         top = self._group_items.get(number)
@@ -1208,15 +1330,15 @@ class MergePage(QWidget):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
             item.setData(Qt.UserRole, e.get("id"))
-            item.setToolTip(
-                f"原路径：{e.get('original_path')}\n备份路径：{e.get('backup_path')}")
+            item.setToolTip(f"原路径：{e.get('original_path')}\n备份路径：{e.get('backup_path')}")
             self.rollback_list.addItem(item)
         self._update_rollback_button()
 
     def _update_rollback_button(self) -> None:
         checked = any(
             self.rollback_list.item(i).checkState() == Qt.Checked
-            for i in range(self.rollback_list.count()))
+            for i in range(self.rollback_list.count())
+        )
         self.btn_rollback.setEnabled(checked)
 
     def _checked_rollback_entries(self) -> list:
@@ -1239,10 +1361,13 @@ class MergePage(QWidget):
             QMessageBox.information(self, "提示", "请先勾选要恢复的备份文件。")
             return
         r = QMessageBox.question(
-            self, "确认回滚",
+            self,
+            "确认回滚",
             f"将把 {len(entries)} 个备份文件恢复到原始路径。\n"
             "恢复的是单个文件，不会自动删除合并后的视频。继续吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
         if r != QMessageBox.Yes:
             return
         if self._rollback_worker and self._rollback_worker.isRunning():
@@ -1255,16 +1380,18 @@ class MergePage(QWidget):
         self._rollback_worker.log.connect(self.log_panel.log)
         self._rollback_worker.progress.connect(self.progress.setValue)
         self._rollback_worker.finished.connect(self._on_rollback_done)
-        self._rollback_worker.start()
+        start_task(self, self._rollback_worker)
 
     def _on_rollback_done(self, stats: dict) -> None:
         self.btn_stop.setEnabled(False)
         self.progress.setValue(100)
         self.log_panel.log_success(
-            f"回滚完成：成功 {stats.get('ok', 0)} / 失败 {stats.get('fail', 0)}")
+            f"回滚完成：成功 {stats.get('ok', 0)} / 失败 {stats.get('fail', 0)}"
+        )
         if stats.get("fail"):
-            QMessageBox.warning(self, "部分失败",
-                                f"{stats.get('fail')} 个文件恢复失败（备份文件仍保留）")
+            QMessageBox.warning(
+                self, "部分失败", f"{stats.get('fail')} 个文件恢复失败（备份文件仍保留）"
+            )
         self._archive_entries = load_journal()
         self._refresh_rollback_list()
         self._rollback_worker = None
@@ -1289,7 +1416,8 @@ class MergePage(QWidget):
             self.repair_list.addItem(li)
         self.repair_list.blockSignals(False)
         self.repair_status_label.setText(
-            f"已列出 {len(items)} 个已处理合并，默认全选；可手动取消个别项后开始修复。")
+            f"已列出 {len(items)} 个已处理合并，默认全选；可手动取消个别项后开始修复。"
+        )
         self.btn_repair_start.setEnabled(True)
         self._update_repair_buttons()
 
@@ -1310,9 +1438,7 @@ class MergePage(QWidget):
             QMessageBox.warning(self, "缺少 ffmpeg", "未找到 ffmpeg，无法校验旧合并。")
             return
         ffprobe = _resolve_ffprobe(ffmpeg)
-        self._repair_items = {
-            item["number"]: item for item in archived_merge_items(load_journal())
-        }
+        self._repair_items = {item["number"]: item for item in archived_merge_items(load_journal())}
         self.repair_list.blockSignals(True)
         self.repair_list.clear()
         self.repair_list.blockSignals(False)
@@ -1323,14 +1449,12 @@ class MergePage(QWidget):
         self.btn_stop.setEnabled(True)
         self.repair_status_label.setText("正在扫描并校验…")
         self.progress.setValue(0)
-        self._repair_scan_worker = RepairScanWorker(
-            ffmpeg, load_journal(), ffprobe or ""
-        )
+        self._repair_scan_worker = RepairScanWorker(ffmpeg, load_journal(), ffprobe or "")
         self._repair_scan_worker.log.connect(self.log_panel.log)
         self._repair_scan_worker.progress.connect(self.progress.setValue)
         self._repair_scan_worker.item_done.connect(self._on_repair_scan_item)
         self._repair_scan_worker.finished.connect(self._on_repair_scan_finished)
-        self._repair_scan_worker.start()
+        start_task(self, self._repair_scan_worker)
 
     def _on_repair_scan_item(self, number: str, path: str, ok: bool, detail: str) -> None:
         info = self._repair_items.get(number)
@@ -1386,8 +1510,9 @@ class MergePage(QWidget):
             self.repair_list.item(i).checkState() == Qt.Checked
             for i in range(self.repair_list.count())
         )
-        running = ((self._repair_worker is not None and self._repair_worker.isRunning())
-                   or (self._repair_scan_worker is not None and self._repair_scan_worker.isRunning()))
+        running = (self._repair_worker is not None and self._repair_worker.isRunning()) or (
+            self._repair_scan_worker is not None and self._repair_scan_worker.isRunning()
+        )
         self.btn_repair_start.setEnabled(checked and not running)
         self.btn_repair_all.setEnabled(self.repair_list.count() > 0 and not running)
 
@@ -1405,11 +1530,14 @@ class MergePage(QWidget):
             QMessageBox.warning(self, "缺少 FFmpeg", "需要 ffmpeg 和 ffprobe 才能重新合并。")
             return
         r = QMessageBox.question(
-            self, "确认批量修复",
+            self,
+            "确认批量修复",
             f"将修复 {len(items)} 个旧合并：\n"
             "恢复原分集 → 删除坏文件 → 用新链路重新合并 → 重新替换。\n"
             f"原分集会再次备份到：\n{self._backup_root_text()}\n不会直接物理删除。继续吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
         if r != QMessageBox.Yes:
             return
         self.btn_repair_start.setEnabled(False)
@@ -1420,12 +1548,13 @@ class MergePage(QWidget):
         self.progress.setValue(0)
         self.repair_status_label.setText(f"正在修复 {len(items)} 个合并…")
         self._repair_worker = RepairMergeWorker(
-            items, self.cfg, ffmpeg, ffprobe, self._collect_options())
+            items, self.cfg, ffmpeg, ffprobe, self._collect_options()
+        )
         self._repair_worker.log.connect(self.log_panel.log)
         self._repair_worker.progress.connect(self.progress.setValue)
         self._repair_worker.item_done.connect(self._on_repair_item_done)
         self._repair_worker.finished.connect(self._on_repair_finished)
-        self._repair_worker.start()
+        start_task(self, self._repair_worker)
 
     def _on_repair_item_done(self, number: str, ok: bool, detail: str) -> None:
         for i in range(self.repair_list.count()):
@@ -1443,8 +1572,9 @@ class MergePage(QWidget):
         self.log_panel.log_success(f"批量修复完成：成功 {ok} / 失败 {fail}")
         self.repair_status_label.setText(f"修复完成：成功 {ok} / 失败 {fail}")
         if fail:
-            QMessageBox.warning(self, "部分失败",
-                                f"{fail} 个合并修复失败，原分集/备份仍保留，请查看日志。")
+            QMessageBox.warning(
+                self, "部分失败", f"{fail} 个合并修复失败，原分集/备份仍保留，请查看日志。"
+            )
         self._archive_entries = load_journal()
         self._refresh_rollback_list()
         self._repair_worker = None
@@ -1466,40 +1596,44 @@ class MergePage(QWidget):
         roots = self.file_list.get_all_paths()
         if not roots:
             chosen = QFileDialog.getExistingDirectory(
-                self, "选择要整理旧合并的目录", str(Path.home()))
+                self, "选择要整理旧合并的目录", str(Path.home())
+            )
             if not chosen:
                 return
             self.file_list.add_item(os.path.basename(chosen), chosen)
             roots = [chosen]
-        items = discover_legacy_merged_files(roots)
-        if not items and roots:
-            chosen = QFileDialog.getExistingDirectory(
-                self, "当前列表未发现旧合并，请选择其他目录", str(Path.home()))
-            if chosen:
-                self.file_list.add_item(os.path.basename(chosen), chosen)
-                roots.append(chosen)
-                items = discover_legacy_merged_files(roots)
+        self._legacy_scan = CallWorker(lambda cancel: discover_legacy_merged_files(roots))
+        self._legacy_scan.result.connect(
+            lambda items: after_stopped(self, lambda: self._show_legacy_preview(items))
+        )
+        self._legacy_scan.error.connect(self.log_panel.log_error)
+        start_task(self, self._legacy_scan, "扫描旧合并文件")
+
+    def _show_legacy_preview(self, items):
         if not items:
             QMessageBox.information(
-                self, "提示",
-                "没有发现旧合并文件。请确认目录里存在「番号 合并.mp4」这类文件，"
-                "或先把对应目录拖入上方列表后再试。")
+                self, "没有旧合并文件", "请添加包含「番号 合并.mp4」的目录后重新扫描。"
+            )
             return
-
         dialog = QDialog(self)
         dialog.setWindowTitle("整理旧合并")
         dialog.resize(720, 520)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
-        layout.addWidget(QLabel(
-            f"将整理 {len(items)} 个旧合并文件：去掉「合并」后缀、同步同名 NFO/字幕，"
-            "并按设置请求 Jellyfin 刷新。"))
+        layout.addWidget(
+            QLabel(
+                f"将整理 {len(items)} 个旧合并文件：去掉「合并」后缀、同步同名 NFO/字幕，"
+                "并按设置请求 Jellyfin 刷新。"
+            )
+        )
         detail = QPlainTextEdit()
         detail.setReadOnly(True)
-        detail.setPlainText("\n".join(
-            f"{Path(item['path']).name}  →  {Path(item['target']).name}"
-            for item in items))
+        detail.setPlainText(
+            "\n".join(
+                f"{Path(item['path']).name}  →  {Path(item['target']).name}" for item in items
+            )
+        )
         detail.setMinimumHeight(260)
         layout.addWidget(detail, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Yes | QDialogButtonBox.No)
@@ -1526,7 +1660,7 @@ class MergePage(QWidget):
         self._legacy_worker.progress.connect(self.progress.setValue)
         self._legacy_worker.item_done.connect(self._on_legacy_item_done)
         self._legacy_worker.finished.connect(self._on_legacy_finished)
-        self._legacy_worker.start()
+        start_task(self, self._legacy_worker)
 
     def _on_legacy_item_done(self, path: str, ok: bool, detail: str) -> None:
         if ok:
@@ -1542,10 +1676,12 @@ class MergePage(QWidget):
         self.btn_rediscover.setEnabled(True)
         self.progress.setValue(100)
         self.status_label.setText(
-            f"旧合并整理完成：成功 {stats.get('ok', 0)} / 失败 {stats.get('fail', 0)}")
+            f"旧合并整理完成：成功 {stats.get('ok', 0)} / 失败 {stats.get('fail', 0)}"
+        )
         if stats.get("fail"):
-            QMessageBox.warning(self, "部分失败",
-                                f"{stats.get('fail')} 个文件整理失败，请查看日志。")
+            QMessageBox.warning(
+                self, "部分失败", f"{stats.get('fail')} 个文件整理失败，请查看日志。"
+            )
         self._discover_pending_merged_outputs()
         self._populate_tree()
         self._update_counts()
@@ -1566,7 +1702,7 @@ class MergePage(QWidget):
             self.log_panel.log_warning("已请求停止旧合并修复，正在结束当前 ffmpeg")
         if self._trash_worker and self._trash_worker.isRunning():
             self._trash_worker.stop()
-            self.log_panel.log_warning("已请求停止回收站操作")
+            self.log_panel.log_warning("已请求停止可恢复隔离区操作")
         if self._rollback_worker and self._rollback_worker.isRunning():
             self._rollback_worker.stop()
             self.log_panel.log_warning("已请求停止回滚")
@@ -1578,27 +1714,4 @@ class MergePage(QWidget):
         self.btn_stop.setEnabled(False)
 
     def shutdown(self) -> None:
-        self._stop()
-        if self._scan_worker and self._scan_worker.isRunning():
-            self._scan_worker.wait(3000)
-        if self._merge_worker and self._merge_worker.isRunning():
-            self._merge_worker.wait(3000)
-        if self._trash_worker and self._trash_worker.isRunning():
-            self._trash_worker.stop()
-            self._trash_worker.wait(3000)
-        if self._rollback_worker and self._rollback_worker.isRunning():
-            self._rollback_worker.stop()
-            self._rollback_worker.wait(3000)
-        if self._legacy_worker and self._legacy_worker.isRunning():
-            self._legacy_worker.stop()
-            self._legacy_worker.wait(3000)
-        if self._jellyfin_worker and self._jellyfin_worker.isRunning():
-            self._jellyfin_worker.wait(3000)
-        if self._repair_scan_worker and self._repair_scan_worker.isRunning():
-            self._repair_scan_worker.stop()
-            self._repair_scan_worker.wait(3000)
-        if self._repair_worker and self._repair_worker.isRunning():
-            self._repair_worker.wait(3000)
-        if self._repair_worker and self._repair_worker.isRunning():
-            self._repair_worker.stop()
-            self._repair_worker.wait(3000)
+        stop_page(self)

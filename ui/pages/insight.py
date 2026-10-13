@@ -1,19 +1,38 @@
 """库概览仪表盘 - 可筛选/排序的分布表格 + 占比条形图 + 指标卡。
 样式走 cssClass，随主题切换。"""
+
 from __future__ import annotations
+
+from ui.services import start_task, stop_page, after_stopped, CallWorker, state_context, busy
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea,
-    QGroupBox, QFrame, QMessageBox, QComboBox,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QProgressBar,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QScrollArea,
+    QGroupBox,
+    QFrame,
+    QMessageBox,
+    QComboBox,
 )
 
 from config import ToolkitConfig
 from ui.widgets import (
-    LogPanel, TableBarDelegate, make_number_item, DonutChart, VBarChart,
+    LogPanel,
+    TableBarDelegate,
+    make_number_item,
+    DonutChart,
+    VBarChart,
 )
 from workers.ingest import IngestWorker
+from ui.services import accept_snapshot
 
 BUCKET_LABEL = {
     "jav": "常规番号 JAV",
@@ -23,8 +42,7 @@ BUCKET_LABEL = {
     "other": "其它(无番号/未知)",
 }
 
-_FILTERS = ["全部", "分类桶", "年份", "Top 厂商", "Top 演员",
-            "收藏偏好演员", "待预测池", "重复"]
+_FILTERS = ["全部", "分类桶", "年份", "Top 厂商", "Top 演员", "收藏偏好演员", "待预测池", "重复"]
 
 
 class InsightPage(QWidget):
@@ -33,9 +51,10 @@ class InsightPage(QWidget):
     def __init__(self, cfg: ToolkitConfig, parent=None):
         super().__init__(parent)
         self.cfg = cfg
+        self._state_context = state_context(cfg)
         self._worker: IngestWorker | None = None
         self._summary: dict | None = None
-        self._all_rows: list = []          # (维度, 名称, 数量, max)
+        self._all_rows: list = []  # (维度, 名称, 数量, max)
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -155,9 +174,12 @@ class InsightPage(QWidget):
     def _source_text(self) -> str:
         """当前生效的数据来源（库文件 / 服务器 API）；没配好时说明原因而不是留空。"""
         from utils import library_source
+
         return "数据来源：" + library_source.describe(self.cfg)
 
     def _start_scan(self) -> None:
+        if busy(self):
+            return
         if self._worker and self._worker.isRunning():
             return
         self.db_label.setText(self._source_text())
@@ -165,12 +187,11 @@ class InsightPage(QWidget):
         self.btn_stop.setEnabled(True)
         self.progress.setValue(0)
         self.log.clear()
-        self._worker = IngestWorker(self.cfg,
-                                    exclude_keywords=self.cfg.exclude_path_keywords)
+        self._worker = IngestWorker(self.cfg, exclude_keywords=self.cfg.exclude_path_keywords)
         self._worker.log.connect(self.log.log)
         self._worker.progress.connect(self.progress.setValue)
         self._worker.finished.connect(self._on_done)
-        self._worker.start()
+        start_task(self, self._worker)
 
     def _stop_scan(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -178,6 +199,7 @@ class InsightPage(QWidget):
             self.log.log_warning("正在停止...")
 
     def _on_done(self, result: dict) -> None:
+        accept_snapshot(self, result)
         self.btn_scan.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.progress.setValue(100 if "summary" in result else 0)
@@ -185,11 +207,35 @@ class InsightPage(QWidget):
             self.log.log_error(f"❌ {result['error']}")
             QMessageBox.warning(self, "错误", str(result["error"]))
             return
+        self.items = result.get("items", [])
+        from utils.library_source import capabilities
+
+        import copy
+
+        cfg, items = copy.deepcopy(self.cfg), list(self.items)
+
+        def check_capabilities():
+            self._capability_worker = CallWorker(lambda cancel: capabilities(cfg, items))
+            self._capability_worker.result.connect(
+                lambda caps: self.db_label.setText(
+                    self._source_text()
+                    + f"\n本地可访问 {caps['local_items']} / {caps['items']} 项；远程仅元数据 {caps['remote_items']} 项。"
+                    + (
+                        " 请在设置配置路径映射后进行文件处理。"
+                        if caps["remote_items"]
+                        else " 可进行本地文件处理。"
+                    )
+                )
+            )
+            start_task(self, self._capability_worker, "检查本地文件可访问能力")
+
+        after_stopped(self, check_capabilities)
         self._summary = result["summary"]
         self._render_summary(result["summary"])
         self.log.log_success(
             f"✅ 统计完成：{result['summary']['total']} 部 | "
-            f"收藏 {result['summary']['favorite']} | 看过 {result['summary']['played']}")
+            f"收藏 {result['summary']['favorite']} | 看过 {result['summary']['played']}"
+        )
 
     # ── 指标卡 ──
     def _clear_metrics(self) -> None:
@@ -226,9 +272,14 @@ class InsightPage(QWidget):
 
     def _render_summary(self, s: dict) -> None:
         self._clear_metrics()
-        for label, val in [("总数", s["total"]), ("收藏", s["favorite"]),
-                           ("看过", s["played"]), ("播放过", s["ever_play"]),
-                           ("未看(待预测)", s["unwatched"]), ("重复组", s["dup_groups"])]:
+        for label, val in [
+            ("总数", s["total"]),
+            ("收藏", s["favorite"]),
+            ("看过", s["played"]),
+            ("播放过", s["ever_play"]),
+            ("未看(待预测)", s["unwatched"]),
+            ("重复组", s["dup_groups"]),
+        ]:
             self._metric_card(label, str(val))
 
         # ── 图表数据 ──
@@ -247,9 +298,13 @@ class InsightPage(QWidget):
         rows: list = []
         rows.append(("待预测池", "未看作品(从未播放)", s["unwatched"]))
         rows.append(("待预测池", "未看且较老(≤2022)", s["unwatched_old"]))
-        for key, label in [("jav", BUCKET_LABEL["jav"]), ("uncensored", BUCKET_LABEL["uncensored"]),
-                           ("hentai", BUCKET_LABEL["hentai"]), ("trailer", BUCKET_LABEL["trailer"]),
-                           ("other", BUCKET_LABEL["other"])]:
+        for key, label in [
+            ("jav", BUCKET_LABEL["jav"]),
+            ("uncensored", BUCKET_LABEL["uncensored"]),
+            ("hentai", BUCKET_LABEL["hentai"]),
+            ("trailer", BUCKET_LABEL["trailer"]),
+            ("other", BUCKET_LABEL["other"]),
+        ]:
             rows.append(("分类桶", label, s["by_bucket"].get(key, 0)))
         rows.append(("重复", "重复组(同番号≥2)", s["dup_groups"]))
         rows.append(("重复", "涉及路径数", s["dup_paths"]))
@@ -272,7 +327,11 @@ class InsightPage(QWidget):
         f = self.filter_combo.currentText()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
-        maxn = max((n for _c, _n, n in self._all_rows if isinstance(n, (int, float))), default=1)
+        maxn = (
+            (self._summary or {}).get("total")
+            or sum(n for cat, _, n in self._all_rows if cat == "分类桶")
+            or 1
+        )
         for cat, name, n in self._all_rows:
             if f != "全部" and cat != f:
                 continue
@@ -290,6 +349,10 @@ class InsightPage(QWidget):
         self.table.sortItems(2, Qt.DescendingOrder)
 
     def shutdown(self) -> None:
-        if self._worker and self._worker.isRunning():
-            self._worker.stop()
-            self._worker.wait(3000)
+        stop_page(self)
+
+    def on_context_changed(self):
+        self._summary = None
+        self._all_rows = []
+        self.table.setRowCount(0)
+        self._clear_metrics()

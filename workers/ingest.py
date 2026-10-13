@@ -4,11 +4,13 @@
 Jellyfin 与 Emby 共用这一条路径。
 """
 from __future__ import annotations
+from copy import deepcopy
 
 from PySide6.QtCore import QThread, Signal
 
 from utils import library_source
 from utils.library import summarize
+from utils.state_context import resolved_identity, state_context
 
 
 class IngestWorker(QThread):
@@ -23,8 +25,8 @@ class IngestWorker(QThread):
 
     def __init__(self, source, exclude_keywords: list | None = None, parent=None):
         super().__init__(parent)
-        self.source = source
-        self.exclude_keywords = exclude_keywords or []
+        self.source = deepcopy(source)
+        self.exclude_keywords = list(exclude_keywords or [])
         self._stopped = False
 
     def stop(self) -> None:
@@ -39,7 +41,14 @@ class IngestWorker(QThread):
                 should_stop=lambda: self._stopped,
                 exclude_keywords=self.exclude_keywords,
             )
+            if self._stopped:
+                raise library_source.CollectionCancelled("采集已取消；未发布部分统计")
             summary = summarize(items)
-            self.finished.emit({"items": items, "summary": summary})
+            user, source = resolved_identity(items, self.source)
+            self.finished.emit({"items": items, "summary": summary, "status": "succeeded",
+                                "source_context": state_context(self.source, items),
+                                "resolved_user_id": user, "resolved_source_identity": source})
+        except library_source.CollectionCancelled as e:
+            self.finished.emit({"cancelled": True, "status": "cancelled", "error": str(e)})
         except Exception as e:  # noqa: BLE001
-            self.finished.emit({"error": str(e)})
+            self.finished.emit({"error": str(e), "status": "failed"})

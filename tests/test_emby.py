@@ -384,10 +384,13 @@ def test_collect_library_api_paginates(monkeypatch):
     assert any(it.num == "ABC-9999" for it in items)
 
 
-def test_pick_user_id_prefers_admin(monkeypatch):
+def test_pick_user_id_requires_choice_with_multiple_users(monkeypatch):
     req, _calls = _api_req([], users=[("u-normal", False), ("u-admin", True)])
     monkeypatch.setattr(library_api, "_req", req)
-    assert library_api.pick_user_id("http://demo:8096", "k") == "u-admin"
+    # Administrators may not be the viewer; guessing changes deletion evidence.
+    with pytest.raises(library_api.LibraryApiError):
+        library_api.pick_user_id("http://demo:8096", "k")
+    assert library_api.pick_user_id("http://demo:8096", "k", user_id="u-normal") == "u-normal"
 
     req2, _c2 = _api_req([], users=[("only", False)])
     monkeypatch.setattr(library_api, "_req", req2)
@@ -541,7 +544,7 @@ def test_version_declares_supported_servers():
     import version
 
     assert version.SUPPORTED_SERVERS == ("Jellyfin", "Emby")
-    assert version.VERSION_TUPLE[:2] == (3, 7)
+    assert version.VERSION_TUPLE == tuple(map(int, version.__version__.split('.'))) + (0,)
 
 
 def test_workers_accept_config_object(qapp):
@@ -552,11 +555,17 @@ def test_workers_accept_config_object(qapp):
 
     cfg = ToolkitConfig()
     ingest = IngestWorker(cfg)
-    assert ingest.source is cfg
+    assert ingest.source == cfg
+    assert ingest.source is not cfg
     assert ingest.exclude_keywords == []
 
     analyze = AnalyzeWorker(cfg, {})
-    assert analyze.source is cfg
+    assert analyze.source == cfg
+    assert analyze.source is not cfg
+    # Each job owns a config snapshot; mid-run changes must not switch accounts/sources.
+    cfg.jellyfin_user_id = "new-viewer"
+    assert ingest.source.jellyfin_user_id == ""
+    assert analyze.source.jellyfin_user_id == ""
 
     # 旧式调用（传路径字符串）仍要能用
     assert IngestWorker("C:/x/jellyfin.db").source == "C:/x/jellyfin.db"

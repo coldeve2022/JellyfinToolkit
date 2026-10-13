@@ -48,6 +48,18 @@ def _isolate_data_dir():
 
 
 @pytest.fixture(autouse=True)
+def _restore_data_root():
+    """Keep runtime redirection in one test from changing later tests' journals."""
+    import config
+
+    original = config.BASE_DIR
+    try:
+        yield
+    finally:
+        config.set_data_root(original, rebind_modules=True)
+
+
+@pytest.fixture(autouse=True)
 def _clean_probe_cache():
     """每个用例前清掉 ffmpeg 能力探测缓存，避免用例间互相影响。"""
     from utils import tools

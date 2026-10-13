@@ -5,6 +5,7 @@
 - 用 ffmpeg 完整解码校验最终文件；
 - 生成可供后台修复线程使用的原始分集清单。
 """
+
 from __future__ import annotations
 
 import os
@@ -32,10 +33,18 @@ def validate_video_file(ffmpeg: str, path: str, timeout: int = 3600) -> tuple:
     if not ffmpeg or not path or not os.path.isfile(path):
         return False, "文件不存在或未找到 ffmpeg"
     cmd = [
-        ffmpeg, "-v", "error",
-        "-i", path,
-        "-map", "0:v:0", "-map", "0:a:0?",
-        "-f", "null", "-",
+        ffmpeg,
+        "-v",
+        "error",
+        "-i",
+        path,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-f",
+        "null",
+        "-",
     ]
     try:
         r = subprocess.run(
@@ -57,9 +66,16 @@ def validate_video_file(ffmpeg: str, path: str, timeout: int = 3600) -> tuple:
         return False, err[-500:] or "ffmpeg 解码返回非零"
     low = err.lower()
     error_markers = (
-        "error while decoding", "invalid data found", "invalid nal",
-        "corrupt", "failed to open", "co located poc", "missing picture",
-        "packet size mismatch", "non-existing pps", "decode_slice_header error",
+        "error while decoding",
+        "invalid data found",
+        "invalid nal",
+        "corrupt",
+        "failed to open",
+        "co located poc",
+        "missing picture",
+        "packet size mismatch",
+        "non-existing pps",
+        "decode_slice_header error",
     )
     if any(marker in low for marker in error_markers):
         return False, err[-500:] or "检测到解码错误"
@@ -67,11 +83,22 @@ def validate_video_file(ffmpeg: str, path: str, timeout: int = 3600) -> tuple:
 
 
 _CORRUPTION_MARKERS = (
-    "non-monoton", "non monoton", "invalid dts", "invalid pts",
-    "timestamp discontinuity", "application provided invalid",
-    "corrupt", "invalid data found", "invalid nal", "error while",
-    "failed to open", "truncated", "broken header", "missing moov",
-    "moov atom not found", "packet corrupt",
+    "non-monoton",
+    "non monoton",
+    "invalid dts",
+    "invalid pts",
+    "timestamp discontinuity",
+    "application provided invalid",
+    "corrupt",
+    "invalid data found",
+    "invalid nal",
+    "error while",
+    "failed to open",
+    "truncated",
+    "broken header",
+    "missing moov",
+    "moov atom not found",
+    "packet corrupt",
 )
 
 
@@ -80,10 +107,22 @@ def validate_video_stream(ffmpeg: str, path: str, timeout: int = 3600) -> tuple:
     if not ffmpeg or not path or not os.path.isfile(path):
         return False, "文件不存在或未找到 ffmpeg"
     cmd = [
-        ffmpeg, "-hide_banner", "-v", "warning", "-xerror",
-        "-i", path,
-        "-map", "0:v:0", "-map", "0:a:0?",
-        "-c", "copy", "-f", "null", "-",
+        ffmpeg,
+        "-hide_banner",
+        "-v",
+        "warning",
+        "-xerror",
+        "-i",
+        path,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c",
+        "copy",
+        "-f",
+        "null",
+        "-",
     ]
     try:
         r = subprocess.run(
@@ -110,8 +149,9 @@ def validate_video_stream(ffmpeg: str, path: str, timeout: int = 3600) -> tuple:
     return True, "容器结构正常"
 
 
-def validate_final_metadata(ffprobe: str, final_path: str,
-                            media_entries: list, timeout: int = 120) -> tuple:
+def validate_final_metadata(
+    ffprobe: str, final_path: str, media_entries: list, timeout: int = 120
+) -> tuple:
     """轻量校验旧合并结果：只读 ffprobe 元数据，对比原分集时长/帧率/音轨。
 
     原分集优先读原路径，不存在则读备份路径；全程不解码，CPU 占用接近 0。
@@ -129,7 +169,7 @@ def validate_final_metadata(ffprobe: str, final_path: str,
     first_audio = ""
     for e in media_entries:
         src = e.get("original_path") or ""
-        if not src or not Path(src).exists():
+        if not src or Path(src).resolve() == Path(final_path).resolve() or not Path(src).exists():
             backup = e.get("backup_path") or ""
             if backup and Path(backup).exists():
                 src = backup
@@ -149,16 +189,12 @@ def validate_final_metadata(ffprobe: str, final_path: str,
         expected = sum(source_durations)
         tolerance = max(2.0, expected * 0.02)
         if abs(final_probe.duration - expected) > tolerance:
-            return False, (
-                f"时长异常：{final_probe.duration:.2f}s，预期约 {expected:.2f}s"
-            )
+            return False, (f"时长异常：{final_probe.duration:.2f}s，预期约 {expected:.2f}s")
 
     if first_fps > 0 and final_probe.fps > 0:
         diff = abs(final_probe.fps - first_fps)
         if diff > max(0.05, first_fps * 0.10):
-            return False, (
-                f"帧率异常：{final_probe.fps:.3f}fps，预期约 {first_fps:.3f}fps"
-            )
+            return False, (f"帧率异常：{final_probe.fps:.3f}fps，预期约 {first_fps:.3f}fps")
 
     if first_audio and not final_probe.audio_codec:
         return False, "最终文件丢失音轨"
@@ -166,13 +202,12 @@ def validate_final_metadata(ffprobe: str, final_path: str,
     return True, "元数据校验正常"
 
 
-def validate_merged_video_quick(ffmpeg: str, ffprobe: str, final_path: str,
-                                media_entries: list, timeout: int = 3600) -> tuple:
+def validate_merged_video_quick(
+    ffmpeg: str, ffprobe: str, final_path: str, media_entries: list, timeout: int = 3600
+) -> tuple:
     """不解码的合并完整性检测：先元数据，再做容器/流复制校验。"""
     if ffprobe:
-        ok, detail = validate_final_metadata(
-            ffprobe, final_path, media_entries, timeout=120
-        )
+        ok, detail = validate_final_metadata(ffprobe, final_path, media_entries, timeout=120)
         if not ok:
             return ok, detail
     if ffmpeg:
@@ -190,14 +225,18 @@ def archived_merge_items(entries=None) -> list:
     - backup_count / original_count（当前可用的来源数量）
     """
     all_entries = entries if entries is not None else load_journal()
-    by_number: dict[str, list] = {}
+    by_number: dict[tuple, list] = {}
     for e in all_entries:
         number = e.get("number")
-        if number:
-            by_number.setdefault(number, []).append(e)
+        if number and not e.get("rolled_back"):
+            # Legacy logs have no session; scope by physical library directory.
+            source = e.get("original_path") or e.get("final_path") or ""
+            directory = str(Path(source).parent.resolve()) if source else ""
+            scope = e.get("session_id") or directory
+            by_number.setdefault((number, scope), []).append(e)
 
     items = []
-    for number, group_entries in by_number.items():
+    for (number, session_id), group_entries in by_number.items():
         media_by_original: dict[str, dict] = {}
         for e in group_entries:
             if e.get("kind") != "media":
@@ -216,7 +255,8 @@ def archived_merge_items(entries=None) -> list:
             elif new_has == cur_has:
                 media_by_original[op] = e
         media = [
-            e for e in media_by_original.values()
+            e
+            for e in media_by_original.values()
             if Path(e.get("original_path", "")).exists()
             or (e.get("backup_path") and Path(e["backup_path"]).exists())
         ]
@@ -227,7 +267,9 @@ def archived_merge_items(entries=None) -> list:
             op = e.get("original_path") or ""
             if not op:
                 continue
-            if not (Path(op).exists() or (e.get("backup_path") and Path(e["backup_path"]).exists())):
+            if not (
+                Path(op).exists() or (e.get("backup_path") and Path(e["backup_path"]).exists())
+            ):
                 continue
             if op not in sidecar_by_original:
                 sidecar_by_original[op] = e
@@ -241,28 +283,38 @@ def archived_merge_items(entries=None) -> list:
                 sidecar_by_original[op] = e
         sidecar_entries = list(sidecar_by_original.values())
         outputs = [
-            e for e in group_entries
-            if e.get("kind") == "merged_output" and e.get("final_path")
+            e
+            for e in group_entries
+            if e.get("kind") == "merged_output"
+            and e.get("final_path")
+            and e.get("session_complete", True)
+            and e.get("state", "succeeded") == "succeeded"
         ]
         if not media or not outputs:
             continue
         final_path = outputs[-1].get("final_path") or ""
         backup_count = sum(
-            1 for e in media
-            if e.get("backup_path") and Path(e["backup_path"]).exists()
+            1 for e in media if e.get("backup_path") and Path(e["backup_path"]).exists()
         )
         original_count = sum(
-            1 for e in media
-            if e.get("original_path") and Path(e["original_path"]).exists()
+            1 for e in media if e.get("original_path") and Path(e["original_path"]).exists()
         )
-        items.append({
-            "number": number,
-            "final_path": final_path,
-            "media_entries": media,
-            "backup_count": backup_count,
-            "original_count": original_count,
-            "sidecar_entries": sidecar_entries,
-        })
+        items.append(
+            {
+                "number": number,
+                "session_id": session_id,
+                "final_path": final_path,
+                "media_entries": media,
+                "backup_count": backup_count,
+                "original_count": original_count,
+                "sidecar_entries": sidecar_entries,
+                "output_hash": __import__("utils.file_ops", fromlist=["file_hash"]).file_hash(
+                    final_path
+                )
+                if Path(final_path).is_file()
+                else None,
+            }
+        )
     return items
 
 
@@ -278,16 +330,18 @@ def build_parts_from_paths(paths: list, number: str, ffprobe: str) -> list:
         display_number = extract_number_ext(stem) or number
         part_index, part_kind = parse_part_index(stem, display_number)
         variants = strip_variant_tokens(stem)[1]
-        parts.append(PartFile(
-            path=path,
-            name=name,
-            stem=stem,
-            number=display_number,
-            part_index=part_index,
-            part_kind=part_kind,
-            variants=variants,
-            probe=probe,
-        ))
+        parts.append(
+            PartFile(
+                path=path,
+                name=name,
+                stem=stem,
+                number=display_number,
+                part_index=part_index,
+                part_kind=part_kind,
+                variants=variants,
+                probe=probe,
+            )
+        )
     parts.sort(key=lambda p: p.part_index)
     return parts
 

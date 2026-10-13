@@ -19,8 +19,14 @@ ORDER_RANDOM = "random"    # 随机洗牌
 class DeckState:
     """持久化打标队列的排序模式与跳过状态。线程安全：每次操作独立短连接。"""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, context: str = ""):
         self.path = Path(path)
+        self.context = context
+        from utils.state_context import ScopedState
+        self._scoped = ScopedState(path, "deck", context) if context else None
+        self._skips = ScopedState(path, "deck_skipped", context) if context else None
+        if self._scoped:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
@@ -45,11 +51,17 @@ class DeckState:
             )
 
     def _get(self, key: str, default=None):
+        if self._scoped:
+            value = self._scoped.get(key)
+            return default if value is None else value
         with self._connect() as conn:
             row = conn.execute("SELECT v FROM deck_state WHERE k=?", (key,)).fetchone()
             return row["v"] if row else default
 
     def _set(self, key: str, value: str) -> None:
+        if self._scoped:
+            self._scoped.set(key, value)
+            return
         with self._connect() as conn:
             conn.execute(
                 """INSERT INTO deck_state(k, v) VALUES(?,?)
@@ -68,10 +80,15 @@ class DeckState:
 
     # ── 跳过(搁置) ──
     def skipped(self) -> set[str]:
+        if self._skips:
+            return set(self._skips.all())
         with self._connect() as conn:
             return {r["item_id"] for r in conn.execute("SELECT item_id FROM deck_skipped")}
 
     def add_skipped(self, item_id: str) -> None:
+        if self._skips:
+            self._skips.set(item_id, True)
+            return
         with self._connect() as conn:
             conn.execute(
                 """INSERT INTO deck_skipped(item_id, skipped_at) VALUES(?,?)
@@ -80,9 +97,15 @@ class DeckState:
             )
 
     def remove_skipped(self, item_id: str) -> None:
+        if self._skips:
+            self._skips.remove(item_id)
+            return
         with self._connect() as conn:
             conn.execute("DELETE FROM deck_skipped WHERE item_id=?", (item_id,))
 
     def clear_skipped(self) -> None:
+        if self._skips:
+            self._skips.clear()
+            return
         with self._connect() as conn:
             conn.execute("DELETE FROM deck_skipped")

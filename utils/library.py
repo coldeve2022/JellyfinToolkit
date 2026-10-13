@@ -17,6 +17,15 @@ from typing import Callable, Optional
 
 from utils.nfo_source import read_nfo_features, read_nfo_title
 
+
+class LibraryCollectionCancelled(Exception):
+    """Incomplete media evidence must never be published as a complete scan."""
+
+
+def _check_cancel(should_stop):
+    if should_stop and should_stop():
+        raise LibraryCollectionCancelled("采集已取消；部分库不参与统计或分类")
+
 # ── 分类桶 ──
 BUCKET_JAV = "jav"                  # 常规有码番号
 BUCKET_UNC = "uncensored"           # 无码 / FC2 / PPV 等
@@ -60,7 +69,15 @@ class Item:
     has_progress: bool = False
     last_played: Optional[str] = None
     rating: Optional[float] = None
+    behavior_known: bool = True            # False = missing/ambiguous watching account, not unwatched
+    behavior_user_id: Optional[str] = None
+    source_identity: Optional[str] = None
+    source_path: Optional[str] = None       # server path before an explicit local mapping
     cover: Optional[str] = None           # 本地封面图路径（打标卡片预览用，允许为空）
+    width: Optional[int] = None
+    height: Optional[int] = None
+    duration: Optional[float] = None
+    bitrate: Optional[int] = None
 
     @property
     def size_mb(self) -> Optional[float]:
@@ -85,7 +102,7 @@ def extract_number(name: str) -> Optional[str]:
     if not name:
         return None
     n = re.sub(r"\.(mp4|mkv|avi|ts|mov|wmv|flv|rmvb)$", "", name, flags=re.I)
-    m = re.search(r"\bfc2\s*[-_ .]?\s*(\d{5,7})", n, re.I)
+    m = re.search(r"\bfc2\s*[-_ .]?\s*(?:ppv\s*[-_ .]?\s*)?(\d{5,7})(?!\d)", n, re.I)
     if m:
         return f"FC2-{m.group(1)}"
     m = re.search(r"(?<![A-Za-z0-9])([A-Za-z]{2,8})\s*[-_ ]\s*(\d{2,6})(?![0-9])", n)
@@ -139,7 +156,8 @@ def classify_bucket(name: str, path: str, num: Optional[str], type_full: str) ->
         prefix = num.split("-")[0].upper()
         if prefix in UNCENSORED_PREFIX or prefix == "FC2":
             return BUCKET_UNC, True
-        return BUCKET_JAV, False
+        from utils.naming import is_uncensored_filename
+        return BUCKET_JAV, is_uncensored_filename(split_path_name(path) + " " + name, ())
 
     return BUCKET_OTHER, False
 
@@ -149,11 +167,11 @@ def _readonly_conn(db_path: str) -> sqlite3.Connection:
 
 
 # ── 数据库架构探测 ──────────────────────────────────────────
-# Jellyfin 10.9+ 换成 EF Core 生成的 jellyfin.db（BaseItems/Peoples/...）；
-# Jellyfin 10.8 及更早、以及 Emby 用的是 library.db（TypedBaseItems，元数据在 data 列 JSON 里）。
+# Jellyfin 10.11+ 使用 EF Core jellyfin.db（BaseItems/Peoples/...）；
+# Jellyfin 10.10 及更早、以及 Emby 用 library.db（TypedBaseItems）。
 # 两者表结构完全不同，SQL 不能混用，必须先探测再分派。
-SCHEMA_JELLYFIN_EF = "jellyfin_ef"     # BaseItems 架构（Jellyfin 10.9+）
-SCHEMA_LEGACY = "legacy"               # TypedBaseItems 架构（Jellyfin ≤10.8 / Emby）
+SCHEMA_JELLYFIN_EF = "jellyfin_ef"     # BaseItems 架构（Jellyfin 10.11+）
+SCHEMA_LEGACY = "legacy"               # TypedBaseItems 架构（Jellyfin ≤10.10 / Emby）
 SCHEMA_UNKNOWN = "unknown"
 
 
@@ -198,10 +216,29 @@ def _column_names(conn: sqlite3.Connection, table: str) -> set:
         return set()
 
 
+def _behavior_user(conn, table, user_id="", log=None):
+    """Select one watching account without ever merging or picking an arbitrary one."""
+    if "userid" not in _column_names(conn, table):
+        if log:
+            log("  · 行为表缺少观看用户身份，已按未知处理")
+        return None, False
+    users = [r[0] for r in conn.execute(f"SELECT DISTINCT UserId FROM {table}") if r[0] is not None]
+    if user_id:
+        wanted = str(user_id).replace("-", "").lower()
+        matches = [u for u in users if _guid_str(u).replace("-", "").lower() == wanted]
+        if len(matches) == 1:
+            return matches[0], True
+    elif len(users) == 1:
+        return users[0], True
+    if log:
+        log("  · 观看用户未选择、不存在或有多个用户；行为信息为未知，请在设置中指定观看账号")
+    return None, False
+
+
 def _guid_str(value) -> str:
     """把 legacy 架构里的 guid 统一成字符串。
 
-    Emby / Jellyfin ≤10.8 把 .NET Guid 存成 16 字节 BLOB（``Guid.ToByteArray()``
+    Emby / Jellyfin ≤10.10 把 .NET Guid 存成 16 字节 BLOB（``Guid.ToByteArray()``
     的小端混合序），也可能存成 TEXT。两种都兜住，保证同一台机器上 id 稳定。
     """
     if value is None:
@@ -230,7 +267,8 @@ def _as_list(value) -> list:
     if value is None:
         return []
     if isinstance(value, (list, tuple)):
-        return [str(x).strip() for x in value if str(x).strip()]
+        return [str(x.get("Name", "") if isinstance(x, dict) else x).strip()
+                for x in value if str(x.get("Name", "") if isinstance(x, dict) else x).strip()]
     text = str(value).strip()
     return [text] if text else []
 
@@ -556,6 +594,7 @@ def build_item(
     behavior: Optional[dict] = None,
     nfo_fallback: bool = True,
     listing_cache: Optional[dict] = None,
+    media_facts: Optional[dict] = None,
 ) -> Item:
     """把"各数据源给出的原始字段"归一成 ``Item``。
 
@@ -568,12 +607,15 @@ def build_item(
     """
     path = path or ""
     name = name or ""
-    genres_list = [str(x).strip() for x in (genres or []) if str(x).strip()]
-    tags_list = [str(x).strip() for x in (tags or []) if str(x).strip()]
-    studios_list = [str(x).strip() for x in (studios or []) if str(x).strip()]
+    genres_list = _as_list(genres)
+    tags_list = _as_list(tags)
+    studios_list = _as_list(studios)
 
-    num = extract_number(name or path)
-    cd_idx, is_cd = detect_cd(name)
+    filename = split_path_name(path)
+    num = extract_number(name) or extract_number(filename)
+    cd_idx, is_cd = detect_cd(filename)
+    if not is_cd:
+        cd_idx, is_cd = detect_cd(name)
     bucket, is_unc = classify_bucket(name, path, num, type_full)
 
     display_name = name
@@ -612,6 +654,10 @@ def build_item(
         is_uncensored=is_unc,
         unknown_actor="未知演员" in path or "未知女优" in path,
         cover=cover,
+        width=(media_facts or {}).get("width"),
+        height=(media_facts or {}).get("height"),
+        duration=(media_facts or {}).get("duration"),
+        bitrate=(media_facts or {}).get("bitrate"),
     )
     for key, value in (behavior or {}).items():
         if hasattr(item, key):
@@ -625,8 +671,9 @@ def _collect_ef(
     progress: Optional[Callable[[int], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     exclude_keywords: Optional[list] = None,
+    user_id: str = "",
 ) -> list[Item]:
-    """读取 Jellyfin 10.9+ 的 ``jellyfin.db``（EF Core 架构），构造全库 Item 列表。
+    """读取 Jellyfin 10.11+ 的 ``jellyfin.db``（EF Core 架构），构造全库 Item 列表。
 
     Args:
         db_path: jellyfin.db 路径
@@ -639,6 +686,7 @@ def _collect_ef(
         if log:
             log(msg)
 
+    _check_cancel(should_stop)
     db_path = Path(db_path)
     if not db_path.exists():
         raise FileNotFoundError(f"数据库不存在: {db_path}")
@@ -668,10 +716,14 @@ def _collect_ef(
         # 3. UserData 行为（单用户）
         _log("读取播放记录...")
         behavior_map: dict[str, dict] = {}
-        for r in c.execute(
+        selected_user, known = _behavior_user(conn, "UserData", user_id, _log)
+        ud_rows = c.execute(
             "SELECT ItemId, IsFavorite, PlayCount, Played, PlaybackPositionTicks, "
             "LastPlayedDate, Rating FROM UserData"
-        ):
+            + (" WHERE UserId=?" if selected_user is not None else ""),
+            (selected_user,) if selected_user is not None else (),
+        ) if known else []
+        for r in ud_rows:
             item_id, fav, pc, played, pos, last, rating = r
             behavior_map[item_id] = {
                 "is_favorite": bool(fav),
@@ -698,8 +750,7 @@ def _collect_ef(
     # 同一目录里的条目共用一份列举结果（库在网络盘上时这是扫描速度的关键）
     listing_cache: dict = {}
     for i, (item_id, name, path, year, genres, tags, studios, size, type_full) in enumerate(rows):
-        if should_stop and should_stop():
-            break
+        _check_cancel(should_stop)
         path = path or ""
         if exclude and any(k in path.lower() for k in exclude):
             skipped += 1
@@ -713,12 +764,15 @@ def _collect_ef(
             size=size,
             # 封面优先级：服务器主封面(ImageType=0 刮削海报) > 视频目录 sidecar 盲猜
             cover=cover_map.get(item_id),
-            behavior=behavior_map.get(item_id),
+            behavior=behavior_map.get(item_id, {}) | {"behavior_known": known,
+                "behavior_user_id": _guid_str(selected_user) if known and selected_user is not None else "",
+                "source_identity": "db:" + os.path.normcase(str(db_path.resolve()))},
             listing_cache=listing_cache,
         ))
         if progress and total:
             progress(int((i + 1) / total * 100))
 
+    _check_cancel(should_stop)
     _log(f"✅ 采集完成：{len(items)} 部（按范围排除 {skipped} 条）")
     return items
 
@@ -734,8 +788,9 @@ def _collect_legacy(
     progress: Optional[Callable[[int], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     exclude_keywords: Optional[list] = None,
+    user_id: str = "",
 ) -> list[Item]:
-    """读取传统架构库（``TypedBaseItems``）—— Emby 与 Jellyfin 10.8 及更早。
+    """读取传统架构库（``TypedBaseItems``）—— Emby 与 Jellyfin 10.10 及更早。
 
     与 EF 架构的关键差异：Genres / Tags / Studios / ProductionYear / Size 这些
     元数据不在一等列里，而是塞在 ``data`` 列的 JSON 中，且不同版本的键名不完全一致。
@@ -744,7 +799,7 @@ def _collect_legacy(
     视频旁 ``.nfo`` 兜底（与 EF 架构共用同一套逻辑），不会静默产出错数据。
     实际从库里拿到了多少标签，会写进日志，便于排查。
 
-    行为数据（收藏/播放次数）在 Jellyfin ≤10.8 的 library.db 里有 ``UserData`` 表；
+    行为数据（收藏/播放次数）在 Jellyfin ≤10.10 的 library.db 里有 ``UserData`` 表；
     Emby 把它放在独立的 ``users.db`` 里，只给库文件是读不到的——这种情况会明确
     在日志里说明，而不是伪造成"没有播放记录"。
     """
@@ -752,6 +807,7 @@ def _collect_legacy(
         if log:
             log(msg)
 
+    _check_cancel(should_stop)
     db_path = Path(db_path)
     if not db_path.exists():
         raise FileNotFoundError(f"数据库不存在: {db_path}")
@@ -763,7 +819,7 @@ def _collect_legacy(
         cols = _column_names(conn, "TypedBaseItems")
         if not cols or "guid" not in cols:
             raise ValueError(
-                f"该文件不是 Emby / Jellyfin≤10.8 的库（缺少 TypedBaseItems.guid）：{db_path}")
+                f"该文件不是 Emby / Jellyfin≤10.10 的库（缺少 TypedBaseItems.guid）：{db_path}")
 
         wanted = ["guid", "type", "data", "path", "name", "isfolder"]
         sel = [w for w in wanted if w in cols]
@@ -776,6 +832,7 @@ def _collect_legacy(
 
         # 行为数据（可选）
         behavior_map: dict[str, dict] = {}
+        known = False
         tables = table_names(conn)
         ud_table = next((t for t in ("userdata", "userdatas") if t in tables), None)
         if ud_table:
@@ -784,7 +841,11 @@ def _collect_legacy(
                 pick = [k for k in ("itemId", "IsFavorite", "PlayCount", "Played",
                                     "PlaybackPositionTicks", "LastPlayedDate", "Rating")
                         if k.lower() in ucols]
-                for r in c.execute(f"SELECT {', '.join(pick)} FROM {ud_table}"):
+                selected_user, known = _behavior_user(conn, ud_table, user_id, _log)
+                ud_rows = c.execute(f"SELECT {', '.join(pick)} FROM {ud_table}"
+                                    + (" WHERE UserId=?" if selected_user is not None else ""),
+                                    (selected_user,) if selected_user is not None else ()) if known else []
+                for r in ud_rows:
                     rec = dict(zip(pick, r))
                     iid = _guid_str(rec.get("itemId"))
                     if not iid:
@@ -813,8 +874,7 @@ def _collect_legacy(
     no_tags = 0
     listing_cache: dict = {}
     for i, row in enumerate(rows):
-        if should_stop and should_stop():
-            break
+        _check_cancel(should_stop)
         item_id = _guid_str(row[pos["guid"]])
         type_full = str(row[pos["type"]] or "") if "type" in pos else ""
         if not any(tok in type_full.lower() for tok in _LEGACY_VIDEO_TOKENS):
@@ -857,12 +917,15 @@ def _collect_legacy(
             year=year, genres=genres_list, tags=tags_list, studios=studios_list,
             actors=[],          # 传统架构的演员在 People 关联表里，结构随版本变化，不做猜测
             size=size,
-            behavior=behavior_map.get(item_id),
+            behavior=behavior_map.get(item_id, {}) | {"behavior_known": known,
+                "behavior_user_id": _guid_str(selected_user) if known and selected_user is not None else "",
+                "source_identity": "db:" + os.path.normcase(str(db_path.resolve()))},
             listing_cache=listing_cache,
         ))
         if progress and total:
             progress(int((i + 1) / total * 100))
 
+    _check_cancel(should_stop)
     if no_tags:
         _log(f"  · 其中 {no_tags} 条在库文件里没有标签，已尝试用同目录 .nfo 兜底")
     _log(f"✅ 采集完成：{len(items)} 部（按范围排除 {skipped} 条）")
@@ -875,11 +938,12 @@ def collect_library(
     progress: Optional[Callable[[int], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     exclude_keywords: Optional[list] = None,
+    user_id: str = "",
 ) -> list[Item]:
     """按**数据库架构自动分派**，构造全库 Item 列表。
 
     保留原有签名（第一个参数是数据库路径），所以既有调用方与测试完全不受影响；
-    新增的是对传统架构（Emby / Jellyfin ≤10.8）的支持。
+    新增的是对传统架构（Emby / Jellyfin ≤10.10）的支持。
 
     需要"本地数据库 or 服务器 API 二选一"的统一入口，请用 ``utils.library_source``。
     """
@@ -887,14 +951,14 @@ def collect_library(
     if schema == SCHEMA_LEGACY:
         return _collect_legacy(db_path, log=log, progress=progress,
                                should_stop=should_stop,
-                               exclude_keywords=exclude_keywords)
+                               exclude_keywords=exclude_keywords, user_id=user_id)
     if schema == SCHEMA_UNKNOWN and Path(db_path).exists():
         raise ValueError(
             f"无法识别的数据库架构（既没有 BaseItems 也没有 TypedBaseItems）：{db_path}\n"
-            "· Jellyfin 请指向数据目录下的 jellyfin.db（10.9+）或 library.db（10.8 及更早）；\n"
+            "· Jellyfin 请指向数据目录下的 jellyfin.db（10.11+）或 library.db（10.10 及更早）；\n"
             "· Emby 的库文件结构随版本变化较大，建议在设置里把「库数据来源」改成「服务器 API」。")
     return _collect_ef(db_path, log=log, progress=progress,
-                       should_stop=should_stop, exclude_keywords=exclude_keywords)
+                        should_stop=should_stop, exclude_keywords=exclude_keywords, user_id=user_id)
 
 
 def summarize(items: list[Item]) -> dict:
@@ -919,13 +983,11 @@ def summarize(items: list[Item]) -> dict:
     fav_actors = Counter(a for it in items if it.is_favorite for a in it.actors if a)
 
     # 重复（同番号 >= 2，排除 trailer/other）
-    by_num = defaultdict(list)
-    for it in items:
-        if it.num and it.bucket not in (BUCKET_TRAILER, BUCKET_OTHER):
-            by_num[it.num].append(it)
-    dup_groups = {k: v for k, v in by_num.items() if len(v) >= 2}
-    cd_groups = sum(1 for v in dup_groups.values() if any(i.is_cd for i in v))
-    true_dup_candidates = sum(1 for v in dup_groups.values() if not any(i.is_cd for i in v))
+    from utils.scoring import dedup_groups
+    duplicate_groups = dedup_groups(items)
+    dup_groups = {g["num"]: g["items"] for g in duplicate_groups}
+    cd_groups = sum(g["all_cd"] for g in duplicate_groups)
+    true_dup_candidates = len(duplicate_groups) - cd_groups
 
     return {
         "total": total,

@@ -1,4 +1,5 @@
 """通用组件 — 可拖拽列表、日志面板、条形图等复用组件。"""
+
 from __future__ import annotations
 
 import os
@@ -7,9 +8,21 @@ import subprocess
 from PySide6.QtCore import Qt, Signal, QUrl, QMimeData, QRectF
 from PySide6.QtGui import QColor, QDrag, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QListWidget, QListWidgetItem, QTableWidget, QTableWidgetItem,
-    QTextEdit, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QHeaderView,
-    QAbstractItemView, QMenu, QFrame, QProgressBar, QStyledItemDelegate,
+    QListWidget,
+    QListWidgetItem,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QHeaderView,
+    QAbstractItemView,
+    QMenu,
+    QFrame,
+    QProgressBar,
+    QStyledItemDelegate,
     QStyle,
 )
 
@@ -17,6 +30,7 @@ from ui import theme
 
 
 # ───────────────── 可拖拽出入的列表 ─────────────────
+
 
 class DragDropListWidget(QListWidget):
     """支持外部文件拖入、内部文件拖出（到资源管理器）的通用列表组件。
@@ -26,8 +40,9 @@ class DragDropListWidget(QListWidget):
     - 右键菜单打开所在文件夹
     """
 
-    file_dropped = Signal(str)          # 拖入时发射文件路径
-    files_dropped = Signal(list)        # 批量拖入
+    file_dropped = Signal(str)  # 拖入时发射文件路径
+    files_dropped = Signal(list)  # 批量拖入
+    paths_changed = Signal(list)  # canonical file queue, including Delete/context removal
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -38,6 +53,12 @@ class DragDropListWidget(QListWidget):
         self.setDragDropMode(QAbstractItemView.DragOnly)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        self.model().rowsInserted.connect(self._notify_paths)
+        self.model().rowsRemoved.connect(self._notify_paths)
+        self.model().modelReset.connect(self._notify_paths)
+
+    def _notify_paths(self, *args) -> None:
+        self.paths_changed.emit(self.get_all_paths())
 
     # ── 拖拽 ──
     def startDrag(self, supportedActions):
@@ -87,6 +108,7 @@ class DragDropListWidget(QListWidget):
             # Qt 拖拽状态机遍历 model 时崩溃（C++ 层），原 tkinterdnd2 无此问题，
             # 故整合后需用 singleShot 延迟到事件堆栈弹出。
             from PySide6.QtCore import QTimer
+
             QTimer.singleShot(0, self, lambda: self.files_dropped.emit(paths))
         except Exception:
             # 任何异常都不应冒泡到 Qt 拖拽引擎，否则 PySide6 会 qFatal 崩溃
@@ -137,6 +159,7 @@ class DragDropListWidget(QListWidget):
 
 
 # ───────────────── 可拖拽表格（有码检测专用） ─────────────────
+
 
 class DragDropTableWidget(QTableWidget):
     """支持右键菜单、拖出文件、多选的表格组件。"""
@@ -232,6 +255,7 @@ class DragDropTableWidget(QTableWidget):
 
 # ───────────────── 日志面板 ─────────────────
 
+
 class LogPanel(QTextEdit):
     """只读日志面板，自动滚到底部。"""
 
@@ -259,6 +283,7 @@ class LogPanel(QTextEdit):
 
 # ───────────────── 提示卡片 ─────────────────
 
+
 class InfoCard(QLabel):
     """带背景色的信息提示卡片（样式由全局 QSS 的 cssClass="info-card" 控制）。"""
 
@@ -271,6 +296,7 @@ class InfoCard(QLabel):
 
 
 # ───────────────── 双列拖拽面板（替代用） ─────────────────
+
 
 class DualDropPanel(QWidget):
     """左/右两个 DragDropListWidget 的布局面板。"""
@@ -296,6 +322,7 @@ class DualDropPanel(QWidget):
 
 # ───────────────── 横向条形图（画像可视化） ─────────────────
 
+
 class HBarChart(QWidget):
     """一行行"名称 + 进度条 + 数值"的横向条形图，适合 Top 排名可视化。"""
 
@@ -310,11 +337,13 @@ class HBarChart(QWidget):
         while self._layout.count():
             it = self._layout.takeAt(0)
             if it.widget():
+                it.widget().hide()
                 it.widget().deleteLater()
         self._rows = []
 
-    def add(self, label: str, value: float, maxv: float,
-            sub: str = "", color_key: str = "accent") -> None:
+    def add(
+        self, label: str, value: float, maxv: float, sub: str = "", color_key: str = "accent"
+    ) -> None:
         """value: 当前值；maxv: 最大值用于归一化；sub: 右侧附加说明。"""
         row = QFrame()
         row.setObjectName("barRow")
@@ -334,8 +363,8 @@ class HBarChart(QWidget):
         col = theme.color(color_key)
         bar.setStyleSheet(f"""
             QProgressBar {{
-                background: {theme.color('bg_input')};
-                border: 1px solid {theme.color('border')};
+                background: {theme.color("bg_input")};
+                border: 1px solid {theme.color("border")};
                 border-radius: 5px; height: 14px;
             }}
             QProgressBar::chunk {{
@@ -353,6 +382,7 @@ class HBarChart(QWidget):
 
 # ───────────────── 表格占比条 delegate ─────────────────
 
+
 class TableBarDelegate(QStyledItemDelegate):
     """在单元格中绘制一个横向占比条 + 文字。项需在 Qt.UserRole 存入 0-100 数值。"""
 
@@ -360,12 +390,10 @@ class TableBarDelegate(QStyledItemDelegate):
         value = index.data(Qt.UserRole)
         if isinstance(value, (int, float)):
             # 背景
-            painter.fillRect(option.rect,
-                             QColor(theme.color("bg_input")))
+            painter.fillRect(option.rect, QColor(theme.color("bg_input")))
             ratio = max(0.0, min(1.0, float(value) / 100.0))
             w = int(option.rect.width() * ratio)
-            rc = QRectF(option.rect.left(), option.rect.top() + 2,
-                        w, option.rect.height() - 4)
+            rc = QRectF(option.rect.left(), option.rect.top() + 2, w, option.rect.height() - 4)
             painter.fillRect(rc, QColor(theme.color("accent")))
             # 文字
             text = index.data(Qt.DisplayRole)
@@ -397,6 +425,7 @@ def make_number_item(text: str, number: float) -> NumericItem:
 
 # ───────────────── 环形图（占比可视化，QPainter 自绘）─────────────────
 
+
 class DonutChart(QWidget):
     """环形图：显示一组 (label, value, color_key) 的占比。随主题切换用 theme.color()。
 
@@ -405,7 +434,7 @@ class DonutChart(QWidget):
 
     def __init__(self, parent=None, center_text: str = ""):
         super().__init__(parent)
-        self._segments: list[tuple[str, float, str]] = []   # (label, value, color_key)
+        self._segments: list[tuple[str, float, str]] = []  # (label, value, color_key)
         self._center_text = center_text
         self.setMinimumHeight(140)
 
@@ -463,6 +492,7 @@ class DonutChart(QWidget):
 
 # ───────────────── 竖直柱状图（趋势可视化）─────────────────
 
+
 class VBarChart(QWidget):
     """竖直柱状图：显示 (label, value, color_key) 序列，适合年份分布等趋势。"""
 
@@ -473,7 +503,7 @@ class VBarChart(QWidget):
         self.setMinimumHeight(120)
 
     def set_data(self, bars: list[tuple[str, float, str]]) -> None:
-        self._bars = bars[-self._max_bars:]
+        self._bars = bars[-self._max_bars :]
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -494,7 +524,9 @@ class VBarChart(QWidget):
         bar_w = min(slot * 0.6, 34)
         p.setPen(QColor(theme.color("text_muted")))
         # 网格线（3 条）
-        f = self.font(); f.setPointSize(8); p.setFont(f)
+        f = self.font()
+        f.setPointSize(8)
+        p.setFont(f)
         for g in range(4):
             gy = pad_t + plot_h * g / 3
             p.setPen(QColor(theme.color("border")))
@@ -509,16 +541,19 @@ class VBarChart(QWidget):
             # 数值
             p.setPen(QColor(theme.color("text_secondary")))
             p.setFont(f)
-            p.drawText(QRectF(x, max(0, y - 16), bar_w, 14),
-                       Qt.AlignCenter, f"{int(value)}")
+            p.drawText(QRectF(x, max(0, y - 16), bar_w, 14), Qt.AlignCenter, f"{int(value)}")
             # 标签
             p.setPen(QColor(theme.color("text_muted")))
-            p.drawText(QRectF(x - slot / 2 + pad_l / 2, pad_t + plot_h + 4, slot, 16),
-                       Qt.AlignCenter, str(label))
+            p.drawText(
+                QRectF(x - slot / 2 + pad_l / 2, pad_t + plot_h + 4, slot, 16),
+                Qt.AlignCenter,
+                str(label),
+            )
         p.end()
 
 
 # ───────────────── 封面缩略图（打标卡片/删除候选用）─────────────────
+
 
 class CoverThumb(QWidget):
     """居中显示一张封面图，按比例缩放适配，无图时画占位符。
@@ -548,8 +583,9 @@ class CoverThumb(QWidget):
         if self._path:
             pix = QPixmap(self._path)
             if not pix.isNull():
-                scaled = pix.scaled(self._size - 6, self._size - 6,
-                                    Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled = pix.scaled(
+                    self._size - 6, self._size - 6, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
                 x = (self.width() - scaled.width()) / 2
                 y = (self.height() - scaled.height()) / 2
                 p.drawPixmap(int(x), int(y), scaled)
@@ -578,8 +614,9 @@ class CoverThumbDelegate(QStyledItemDelegate):
         if path and os.path.isfile(str(path)):
             pix = QPixmap(str(path))
             if not pix.isNull():
-                scaled = pix.scaled(self.THUMB, self.THUMB,
-                                    Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled = pix.scaled(
+                    self.THUMB, self.THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
                 x = option.rect.center().x() - scaled.width() / 2
                 y = option.rect.center().y() - scaled.height() / 2
                 # 圆角裁剪

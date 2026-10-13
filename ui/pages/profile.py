@@ -1,7 +1,10 @@
 """喜好画像页 - 可视化你的口味：指标卡、无码偏好、Top 演员/类型/标签条形图，
 年份/不喜欢表格；「为你推荐」一次展示 20 部高匹配未看作品（卡片流，双击打开文件）；
 可导出 CSV。样式全部走 cssClass，随主题切换。"""
+
 from __future__ import annotations
+
+from ui.services import start_task, stop_page, events, state_context
 
 import os
 import subprocess
@@ -9,18 +12,35 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QFrame, QMessageBox, QGroupBox, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget,
-    QFileDialog, QTextEdit, QScrollArea,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGridLayout,
+    QLabel,
+    QPushButton,
+    QProgressBar,
+    QFrame,
+    QMessageBox,
+    QGroupBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QAbstractItemView,
+    QTabWidget,
+    QFileDialog,
+    QTextEdit,
+    QScrollArea,
 )
 
 from config import DATA_DIR, ToolkitConfig
 from ui import theme
 from ui.widgets import LogPanel, HBarChart
 from utils import profile as profile_mod
+from ui.services import analysis_worker, accept_snapshot
 from workers.scorer import AnalyzeWorker
 from workers.ai import AIReportWorker, AITasteWorker
+from utils.labels import LabelStore
+from utils.state_context import score_fingerprint, clear_ai_state
 
 _CAPTION = {"actor": "演员", "studio": "厂商", "genre": "类型", "tag": "标签"}
 
@@ -31,12 +51,14 @@ class ProfilePage(QWidget):
     def __init__(self, cfg: ToolkitConfig, parent=None):
         super().__init__(parent)
         self.cfg = cfg
+        self._state_context = state_context(cfg)
         self.analyzer: AnalyzeWorker | None = None
         self.items: list = []
         self.profile: dict = {}
-        self._rec_pool: list = []          # 推荐完整候选池（供「🎲 随机换一批」）
+        self._rec_pool: list = []  # 推荐完整候选池（供「🎲 随机换一批」）
         self._ai_worker: AIReportWorker | None = None
         self._setup_ui()
+        events.labels_changed.connect(self._on_labels_changed)
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -71,8 +93,9 @@ class ProfilePage(QWidget):
         act.addWidget(self.btn_ai)
         self.btn_ai_taste = QPushButton("🧠 AI 参与分类")
         self.btn_ai_taste.setEnabled(False)
-        self.btn_ai_taste.setToolTip("让 AI 提炼喜欢/不喜欢的标签画像并写回评分规则，"
-                                     "影响之后的分类（需在设置启用 AI）。")
+        self.btn_ai_taste.setToolTip(
+            "让 AI 提炼喜欢/不喜欢的标签画像并写回评分规则，影响之后的分类（需在设置启用 AI）。"
+        )
         self.btn_ai_taste.clicked.connect(self._ai_classify)
         act.addWidget(self.btn_ai_taste)
         self.btn_ai_clear = QPushButton("清除 AI 画像")
@@ -88,16 +111,17 @@ class ProfilePage(QWidget):
         root.addLayout(act)
 
         # 指标卡
-        self.metric_row = QHBoxLayout()
+        self.metric_row = QGridLayout()
         root.addLayout(self.metric_row)
 
         # 无码偏好大条
         self.unc_card = self._panel("无码偏好占比（你喜欢的作品里无码占多少）")
         self.unc_chart = HBarChart()
         self.unc_card.layout().insertWidget(1, self.unc_chart)
+        root.addWidget(self.unc_card)
 
         # 上半：Top 演员 / Top 标签 条形图（厂商压缩进 Tabs，标签比厂商更有参考价值）
-        mid = QHBoxLayout()
+        mid = QVBoxLayout()
         self.actor_card = self._panel("Top 演员")
         self.actor_chart = HBarChart()
         self.actor_card.layout().insertWidget(1, self.actor_chart)
@@ -120,9 +144,13 @@ class ProfilePage(QWidget):
         tabs.addTab(self.studio_panel, "Top 厂商")
         self.tab_tags = self._make_table(
             ["标签", "画像强度", "收藏", "看过"],
-            tooltips=["该标签在你已看/收藏作品里出现的特征",
-                      "行为权重累计：收藏=2、看完=1、有进度=0.6、播放过=0.3（只算真正看过的）",
-                      "带此特征的收藏作品数", "带此特征的看完作品数"])
+            tooltips=[
+                "该标签在你已看/收藏作品里出现的特征",
+                "行为权重累计：收藏=2、看完=1、有进度=0.6、播放过=0.3（只算真正看过的）",
+                "带此特征的收藏作品数",
+                "带此特征的看完作品数",
+            ],
+        )
         self.tab_years = self._make_table(["年份", "喜欢作品数"])
         self.tab_neg = self._make_table(["不喜欢特征", "出现次数"])
 
@@ -132,7 +160,9 @@ class ProfilePage(QWidget):
         rt_lay.setContentsMargins(0, 0, 0, 0)
         tool3 = QHBoxLayout()
         self.btn_rec_shuffle = QPushButton("🎲 随机换一批")
-        self.btn_rec_shuffle.setToolTip("从全部高匹配未看候选中按命中加权随机重抽 20 部，供探索（不重复覆盖同一批）。")
+        self.btn_rec_shuffle.setToolTip(
+            "从全部高匹配未看候选中按命中加权随机重抽 20 部，供探索（不重复覆盖同一批）。"
+        )
         self.btn_rec_shuffle.clicked.connect(self._shuffle_recs)
         tool3.addWidget(self.btn_rec_shuffle)
         tool3.addStretch()
@@ -148,8 +178,11 @@ class ProfilePage(QWidget):
         rt_lay.addWidget(self.rec_scroll, 1)
         self.btn_rec_shuffle.setEnabled(False)
 
-        for name, t in [("Top 标签", self.tab_tags), ("年份偏好", self.tab_years),
-                        ("不喜欢特征", self.tab_neg)]:
+        for name, t in [
+            ("Top 标签", self.tab_tags),
+            ("年份偏好", self.tab_years),
+            ("不喜欢特征", self.tab_neg),
+        ]:
             tabs.addTab(t, name)
         tabs.addTab(self.rec_tab, "为你推荐(未看 Top20)")
         self.ai_report = QTextEdit()
@@ -174,6 +207,7 @@ class ProfilePage(QWidget):
         lay.setContentsMargins(14, 12, 14, 12)
         t = QLabel(title)
         t.setProperty("cssClass", "panel-title")
+        t.setWordWrap(True)
         lay.addWidget(t)
         return f
 
@@ -188,12 +222,12 @@ class ProfilePage(QWidget):
         h = t.horizontalHeader()
         # 全 Interactive + 固定初始宽：拖任意列只改该列，不带动其它列（去掉 Stretch 联动）
         h.setSectionResizeMode(QHeaderView.Interactive)
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)   # 名称/键列自适应
+        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 名称/键列自适应
         h.setDefaultSectionSize(120)
         h.setMinimumSectionSize(70)
         h.setStretchLastSection(False)
         if t.columnCount() > 1:
-            t.setColumnWidth(1, 320)     # 数值列给足宽（可拖）
+            t.setColumnWidth(1, 320)  # 数值列给足宽（可拖）
         t.verticalHeader().setVisible(False)
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
         t.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -208,16 +242,20 @@ class ProfilePage(QWidget):
         self.btn_export.setEnabled(False)
         self.progress.setValue(0)
         self.log.clear()
-        self.analyzer = AnalyzeWorker(
-            self.cfg, {},
+        self.analyzer = analysis_worker(
+            self.cfg,
+            LabelStore(DATA_DIR / "smart.db", context=state_context(self.cfg)).all(),
             exclude_keywords=self.cfg.exclude_path_keywords,
-            th_keep=self.cfg.score_th_keep / 100, th_delete=self.cfg.score_th_delete / 100)
+            th_keep=self.cfg.score_th_keep / 100,
+            th_delete=self.cfg.score_th_delete / 100,
+        )
         self.analyzer.log.connect(self.log.log)
         self.analyzer.progress.connect(self.progress.setValue)
         self.analyzer.finished.connect(self._on_done)
-        self.analyzer.start()
+        start_task(self, self.analyzer)
 
     def _on_done(self, data: dict) -> None:
+        accept_snapshot(self, data)
         self.btn_analyze.setEnabled(True)
         self.progress.setValue(100 if "items" in data else 0)
         if "error" in data:
@@ -225,40 +263,65 @@ class ProfilePage(QWidget):
             return
         self.items = data["items"]
         from utils.labels import LabelStore
-        labels = LabelStore(DATA_DIR / "smart.db").all()
-        self.profile = profile_mod.build_profile(self.items, labels, data["results"])
+
+        labels = LabelStore(DATA_DIR / "smart.db", context=state_context(self.cfg)).all()
+        self.profile = data.get("profile") or profile_mod.build_profile(
+            self.items, labels, data["results"]
+        )
+        self._fingerprint = data.get("fingerprint") or score_fingerprint(
+            self.items, labels, self.cfg
+        )
         self._render_profile()
         self.btn_export.setEnabled(True)
         self.btn_ai.setEnabled(True)
         self.btn_ai_taste.setEnabled(True)
         self._refresh_ai_clear()
-        self.log.log_success(f"画像已生成：正样本 {self.profile['n_pos']} 部作品 · 覆盖演员 {self.profile['actors_covered']} 位")
+        self.log.log_success(
+            f"画像已生成：正样本 {self.profile['n_pos']} 部作品 · 覆盖演员 {self.profile['actors_covered']} 位"
+        )
 
     # ── AI 参与分类 ──
     def _refresh_ai_clear(self) -> None:
         from utils.ai_profile import AIProfileStore
-        self.btn_ai_clear.setEnabled(bool(AIProfileStore(DATA_DIR / "smart.db").load()))
+        from utils.ai_scoring import AIScoreStore
+
+        self.btn_ai_clear.setEnabled(
+            AIProfileStore(DATA_DIR / "smart.db", context=state_context(self.cfg)).has_saved()
+            or AIScoreStore(DATA_DIR / "smart.db", context=state_context(self.cfg)).has_saved()
+        )
 
     def _ai_classify(self) -> None:
-        if not self.profile:
+        if not self._profile_fresh():
             return
         if not self.cfg.ai_enabled:
             QMessageBox.information(
-                self, "未启用 AI",
+                self,
+                "未启用 AI",
                 "请在「设置」→「本地 AI 二次校验」勾选启用并配置本地 LLM（如 Ollama）。\n"
-                "未启用时可用纯规则分类。")
+                "未启用时可用纯规则分类。",
+            )
             return
         if getattr(self, "_taste_worker", None) and self._taste_worker.isRunning():
             return
         self.btn_ai_taste.setEnabled(False)
         self.ai_report.setPlainText("正在让 AI 提炼喜欢/不喜欢标签画像…")
         self._taste_worker = AITasteWorker(
-            self.profile, DATA_DIR / "smart.db",
-            self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model)
+            self.profile,
+            DATA_DIR / "smart.db",
+            self.cfg.ai_base_url,
+            self.cfg.ai_key,
+            self.cfg.ai_model,
+            context=state_context(self.cfg),
+            fingerprint=score_fingerprint(
+                self.items,
+                LabelStore(DATA_DIR / "smart.db", context=state_context(self.cfg)).all(),
+                self.cfg,
+            ),
+        )
         self._taste_worker.result.connect(self.ai_report.setPlainText)
         self._taste_worker.log.connect(self.log.log)
         self._taste_worker.finished.connect(self._on_ai_taste_done)
-        self._taste_worker.start()
+        start_task(self, self._taste_worker)
 
     def _on_ai_taste_done(self, data: dict) -> None:
         self.btn_ai_taste.setEnabled(True)
@@ -268,53 +331,65 @@ class ProfilePage(QWidget):
         self._refresh_ai_clear()
         self.log.log_success(
             f"AI 画像已写入评分规则：喜欢 {data.get('liked', 0)} 项 / 不喜欢 {data.get('disliked', 0)} 项。"
-            "重新「生成画像」或打标即生效。")
+            "重新「生成画像」或打标即生效。"
+        )
         QMessageBox.information(
-            self, "AI 已参与分类",
+            self,
+            "AI 已参与分类",
             "已写入评分规则（喜欢/不喜欢标签）。\n请点「🚀 生成我的喜好画像」或去「快速打标」触发一次重排，"
-            "新的分类就会用上 AI 提炼的标签。可在「清除 AI 画像」回滚。")
+            "新的分类就会用上 AI 提炼的标签。可在「清除 AI 画像」回滚。",
+        )
 
     def _ai_clear(self) -> None:
-        from utils.ai_profile import AIProfileStore
-        AIProfileStore(DATA_DIR / "smart.db").clear()
+        clear_ai_state(DATA_DIR / "smart.db", context=state_context(self.cfg))
+        events.labels_changed.emit()
         self.btn_ai_clear.setEnabled(False)
         self.log.log_warning("已清除 AI 画像，评分规则恢复为纯规则。")
         QMessageBox.information(self, "已清除", "AI 画像已清除，评分规则恢复为纯规则。")
 
     # ── AI 深度报告 ──
     def _ai_report(self) -> None:
-        if not self.profile:
+        if not self._profile_fresh():
             return
         if not self.cfg.ai_enabled:
-            QMessageBox.information(self, "未启用 AI",
-                                    "请在「设置」→「本地 AI 二次校验」勾选启用并配置本地 LLM（如 Ollama）。\n"
-                                    "未启用 AI 时，规则结果照常可用。")
+            QMessageBox.information(
+                self,
+                "未启用 AI",
+                "请在「设置」→「本地 AI 二次校验」勾选启用并配置本地 LLM（如 Ollama）。\n"
+                "未启用 AI 时，规则结果照常可用。",
+            )
             return
         self.btn_ai.setEnabled(False)
         self.ai_report.setPlainText("正在请求本地 LLM 分析画像…")
         self._ai_worker = AIReportWorker(
-            self.profile, self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model)
+            self.profile, self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model
+        )
         self._ai_worker.result.connect(self.ai_report.setPlainText)
         self._ai_worker.log.connect(self.log.log)
         self._ai_worker.finished.connect(lambda _: self.btn_ai.setEnabled(True))
-        self._ai_worker.start()
+        start_task(self, self._ai_worker)
 
     # ── 渲染 ──
     def _clear_metric_row(self) -> None:
         while self.metric_row.count():
             it = self.metric_row.takeAt(0)
             if it.widget():
+                it.widget().hide()
                 it.widget().deleteLater()
 
     def _empty(self) -> None:
         self._clear_metric_row()
-        self.unc_chart.clear(); self.actor_chart.clear()
-        self.tag_chart.clear(); self.studio_chart.clear(); self.genre_chart.clear()
+        self.unc_chart.clear()
+        self.actor_chart.clear()
+        self.tag_chart.clear()
+        self.studio_chart.clear()
+        self.genre_chart.clear()
         for t in (self.tab_tags, self.tab_years, self.tab_neg):
             t.setRowCount(0)
         while self.recs_lay.count():
             it = self.recs_lay.takeAt(0)
             if it.widget():
+                it.widget().hide()
                 it.widget().deleteLater()
         self._rec_pool = []
         self.btn_rec_shuffle.setEnabled(False)
@@ -327,10 +402,16 @@ class ProfilePage(QWidget):
         self._rec_pool = p.get("rec_candidates") or []
         self.btn_rec_shuffle.setEnabled(bool(self._rec_pool))
         self._clear_metric_row()
-        for label, val in [("看过作品", p["n_pos"]), ("收藏", p["n_fav"]),
-                           ("看完", p["n_played"]), ("覆盖演员", p["actors_covered"]),
-                           ("覆盖厂商", p["studios_covered"]),
-                           ("无码偏好", f"{p['unc_ratio']:.0%}")]:
+        for index, (label, val) in enumerate(
+            [
+                ("看过作品", p["n_pos"]),
+                ("收藏", p["n_fav"]),
+                ("看完", p["n_played"]),
+                ("覆盖演员", p["actors_covered"]),
+                ("覆盖厂商", p["studios_covered"]),
+                ("无码偏好", f"{p['unc_ratio']:.0%}"),
+            ]
+        ):
             card = QFrame()
             card.setProperty("cssClass", "metric-card")
             lay = QVBoxLayout(card)
@@ -343,19 +424,24 @@ class ProfilePage(QWidget):
             t.setAlignment(Qt.AlignCenter)
             lay.addWidget(v)
             lay.addWidget(t)
-            self.metric_row.addWidget(card, 1)
+            self.metric_row.addWidget(card, index // 3, index % 3)
 
         # 无码偏好（按 100% 归一）
         self.unc_chart.clear()
-        self.unc_chart.add("无码", p["unc_ratio"] * 100, 100,
-                           f"无码 {p['n_unc']} / {p['n_pos']} 部")
+        self.unc_chart.add(
+            "无码", p["unc_ratio"] * 100, 100, f"无码 {p['n_unc']} / {p['n_pos']} 部"
+        )
 
         def fill_chart(chart, rows):
             chart.clear()
             maxw = max((r["weight"] for r in rows), default=0)
             for r in rows[:14]:
-                chart.add(r["name"], r["weight"], maxw,
-                          f"强度{r['weight']:.0f} · 收{r['fav']} 看{r['played']}")
+                chart.add(
+                    r["name"],
+                    r["weight"],
+                    maxw,
+                    f"强度{r['weight']:.0f} · 收{r['fav']} 看{r['played']}",
+                )
 
         fill_chart(self.actor_chart, p["top_actors"])
         fill_chart(self.tag_chart, p["top_tags"])
@@ -373,18 +459,24 @@ class ProfilePage(QWidget):
                     v = str(row[c]) if c < len(row) else ""
                     table.setItem(r, c, QTableWidgetItem(v if v else "—"))  # 缺失显示占位，不空白
             table.setSortingEnabled(True)
-        fill_table(self.tab_tags, 4, [[a["name"], f"{a['weight']:.0f}", a["fav"], a["played"]]
-                                      for a in p["top_tags"]]
-                                     or [["（库中缺标签数据，已用类型/演员参与判断）", "", "", ""]])
+
+        fill_table(
+            self.tab_tags,
+            4,
+            [[a["name"], f"{a['weight']:.0f}", a["fav"], a["played"]] for a in p["top_tags"]]
+            or [["（库中缺标签数据，已用类型/演员参与判断）", "", "", ""]],
+        )
         fill_table(self.tab_years, 2, [[y, n] for y, n in p["year_pref"]])
         fill_table(self.tab_neg, 2, p["neg_features"] or [["（暂无明显内容类不喜欢特征）", ""]])
         self._fill_rec_cards()
 
     # ── 为你推荐 20 卡流 ──
     def _render_rec_cards(self, rows: list) -> None:
+        self._rec_current = list(rows)
         while self.recs_lay.count():
             it = self.recs_lay.takeAt(0)
             if it.widget():
+                it.widget().hide()
                 it.widget().deleteLater()
         if not rows:
             lbl = QLabel("暂无可推荐的未看作品（先生成喜好画像）。")
@@ -400,6 +492,7 @@ class ProfilePage(QWidget):
 
     def _shuffle_recs(self) -> None:
         import random
+
         pool = getattr(self, "_rec_pool", []) or []
         if len(pool) < 2:
             return
@@ -434,7 +527,8 @@ class ProfilePage(QWidget):
         lay.addWidget(meta)
         info = QLabel(
             f"演员: {'、'.join(r['actors']) or '—'}　|　厂商: {'、'.join(r['studios']) or '—'}"
-            f"　|　类型: {'、'.join(r.get('genres') or []) or '—'}")
+            f"　|　类型: {'、'.join(r.get('genres') or []) or '—'}"
+        )
         info.setWordWrap(True)
         lay.addWidget(info)
         path = r.get("path")
@@ -444,29 +538,60 @@ class ProfilePage(QWidget):
             def _open(ev, p=path):
                 if ev.button() == Qt.LeftButton and os.path.exists(p):
                     subprocess.Popen(f'explorer /select,"{os.path.normpath(p)}"')
+
             card.mouseDoubleClickEvent = _open
         return card
 
     def apply_theme(self) -> None:
         if self.profile:
+            current = list(getattr(self, "_rec_current", []))
             self._render_profile()
+            self._render_rec_cards(current)
 
     # ── 导出 ──
     def _export(self) -> None:
         if not self.profile:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出喜好画像报表", "喜好画像报表.csv", "CSV (*.csv)")
+            self, "导出喜好画像报表", "喜好画像报表.csv", "CSV (*.csv)"
+        )
         if not path:
             return
         try:
-            Path(path).write_text(profile_mod.profile_to_csv(self.profile),
-                                  encoding="utf-8-sig")
+            Path(path).write_text(profile_mod.profile_to_csv(self.profile), encoding="utf-8-sig")
             self.log.log_success(f"已导出: {path}")
         except OSError as e:
             QMessageBox.warning(self, "导出失败", str(e))
 
     def shutdown(self) -> None:
-        for w in (self.analyzer, self._ai_worker, getattr(self, "_taste_worker", None)):
-            if w and w.isRunning():
-                w.wait(3000)
+        stop_page(self)
+
+    def on_context_changed(self):
+        self.profile = {}
+        self._fingerprint = ""
+        self._empty()
+        self.btn_ai.setEnabled(False)
+        self.btn_ai_taste.setEnabled(False)
+        self.btn_export.setEnabled(False)
+        self._refresh_ai_clear()
+
+    def _on_labels_changed(self):
+        if self.profile:
+            self.profile = {}
+            self._fingerprint = ""
+            self._empty()
+            self.ai_report.clear()
+            self.btn_ai.setEnabled(False)
+            self.btn_ai_taste.setEnabled(False)
+            self.btn_export.setEnabled(False)
+            self.log.log_warning("人工反馈已变化，画像已过期，请重新生成。")
+        self._refresh_ai_clear()
+
+    def _profile_fresh(self):
+        if not self.profile:
+            return False
+        labels = LabelStore(DATA_DIR / "smart.db", context=state_context(self.cfg)).all()
+        if getattr(self, "_fingerprint", "") != score_fingerprint(self.items, labels, self.cfg):
+            self._on_labels_changed()
+            return False
+        return True

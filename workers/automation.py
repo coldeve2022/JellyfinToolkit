@@ -1,5 +1,7 @@
 """自动化工作台后台线程。"""
+
 from __future__ import annotations
+from copy import deepcopy
 
 from PySide6.QtCore import QThread, Signal
 
@@ -18,8 +20,8 @@ class AutomationWorker(QThread):
 
     def __init__(self, cfg: ToolkitConfig, options: dict | None = None, parent=None):
         super().__init__(parent)
-        self._cfg = cfg
-        self._options = dict(options or {})
+        self._cfg = deepcopy(cfg)
+        self._options = deepcopy(options or {})
         self._stopped = False
 
     def stop(self) -> None:
@@ -35,6 +37,8 @@ class AutomationWorker(QThread):
                 should_stop=lambda: self._stopped,
             )
             self.report_ready.emit(report)
+            if report.get("status") == "failed":
+                self.error.emit(report.get("error") or "自动化失败")
         except Exception as e:  # noqa: BLE001
             self.error.emit(str(e))
         finally:

@@ -20,9 +20,15 @@ import os
 import subprocess
 from typing import Optional
 
-__all__ = ["VRAM_HIGH_RATIO", "VRAM_LOW_RATIO", "vram_query",
-           "vram_used_gb", "vram_total_gb", "recommend_vram_thresholds",
-           "describe_thresholds"]
+__all__ = [
+    "VRAM_HIGH_RATIO",
+    "VRAM_LOW_RATIO",
+    "vram_query",
+    "vram_used_gb",
+    "vram_total_gb",
+    "recommend_vram_thresholds",
+    "describe_thresholds",
+]
 
 #: 高水位比例：占用超过它就不再启动新任务
 VRAM_HIGH_RATIO = 0.87
@@ -42,9 +48,10 @@ def vram_query(timeout: int = 20) -> Optional[list]:
     """
     try:
         proc = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total,memory.used",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=timeout,
+            ["nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
             creationflags=(_NO_WINDOW if os.name == "nt" else 0),
         )
     except (OSError, subprocess.SubprocessError):
@@ -65,16 +72,42 @@ def vram_query(timeout: int = 20) -> Optional[list]:
     return out or None
 
 
-def vram_used_gb() -> float:
+def _device_index(device):
+    try:
+        return max(0, int(str(device).split(":")[-1]))
+    except (ValueError, TypeError):
+        return 0
+
+
+def vram_used_gb(device="cuda:0") -> float:
     """当前第一块 GPU 的已用显存（GB）；读不到返回 ``-1``。"""
     data = vram_query()
-    return data[0][1] if data else -1.0
+    index = _device_index(device)
+    return data[index][1] if data and index < len(data) else -1.0
 
 
-def vram_total_gb() -> float:
+def vram_total_gb(device="cuda:0") -> float:
     """当前第一块 GPU 的总显存（GB）；读不到返回 ``-1``。"""
     data = vram_query()
-    return data[0][0] if data else -1.0
+    index = _device_index(device)
+    return data[index][0] if data and index < len(data) else -1.0
+
+
+class VramGate:
+    def __init__(self, high, low):
+        self.high = float(high)
+        self.low = min(float(low), self.high)
+        self.paused = False
+
+    def allow(self, used):
+        if used < 0:
+            return True
+        if self.paused:
+            if used <= self.low:
+                self.paused = False
+        elif used > self.high:
+            self.paused = True
+        return not self.paused
 
 
 def recommend_vram_thresholds(total_gb: float) -> tuple:
@@ -105,6 +138,8 @@ def describe_thresholds(high: float, low: float, total: float = -1.0) -> str:
         return "未设置阈值"
     base = f"占用超过 {high:.1f} GB 时暂缓新任务，低于 {low:.1f} GB 时继续"
     if total and total > 0:
-        base += (f"（按你显卡的 {total:.0f} GB 推算："
-                 f"{high / total * 100:.0f}% / {low / total * 100:.0f}%）")
+        base += (
+            f"（按你显卡的 {total:.0f} GB 推算："
+            f"{high / total * 100:.0f}% / {low / total * 100:.0f}%）"
+        )
     return base

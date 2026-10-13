@@ -3,10 +3,9 @@
 产出：
     <out>/jellyfin.db                        最小可用的 Jellyfin 结构（只含本工具用到的表）
     <out>/config.json                        指向上面这套演示数据的配置
-    <DEMO_ROOT>/<厂牌>/<番号>/...             占位的视频/NFO/字幕文件（0 字节，仅用于展示路径逻辑）
+    <out>/MediaDemo/Library/<厂牌>/<番号>/... 占位的视频/NFO/字幕文件（0 字节，仅用于展示路径逻辑）
 
-其中 DEMO_ROOT 是中性路径（Windows 用程序盘下的 MediaDemo 目录，
-其它平台用系统临时目录下的 MediaDemo），**不会**写进当前工作目录。
+文件仅写在明确指定的输出目录内，不覆盖已有数据库或修改其它目录中的同名媒体。
 
 用法：
     python tools/dev/seed_demo.py                    # 默认写到 ./demo/
@@ -40,6 +39,7 @@ GENRES = ["剧情", "记录", "合集", "特典", "重制"]
 ACTORS = ["示例演员甲", "示例演员乙", "示例演员丙", "示例演员丁", "示例演员戊"]
 STUDIOS = ["示例工作室一", "示例工作室二", "示例工作室三"]
 
+
 # 演示用根目录：中性路径，不出现构建目录、也不指向任何真实库。
 #
 # Windows 上用 r"C:\MediaDemo\Library"；但 POSIX 上 "C:\..." 只是一个
@@ -63,7 +63,7 @@ def demo_root_for(os_name: str = os.name, temp_base: str | None = None) -> str:
 DEMO_ROOT = demo_root_for()
 
 
-def _build_items(count: int):
+def _build_items(count: int, media_root=None):
     items = []
     for i in range(count):
         prefix = PREFIXES[i % len(PREFIXES)]
@@ -77,23 +77,25 @@ def _build_items(count: int):
         cd = 2 if i % 5 == 4 else None
         name = f"{num} 示例标题 {i:03d}" + (f"-cd{cd}" if cd else "")
         rel = f"{studio}\\{num}\\{name}.mp4"
-        items.append({
-            "id": f"demo-item-{i:04d}",
-            "name": name,
-            "path": f"{DEMO_ROOT}\\{rel}",
-            "year": year,
-            "genres": ",".join(genres),
-            "tags": ",".join([f"{s}:" for s in (studio,)] + genres),
-            "studios": studio,
-            "size": size,
-            "type": "Movie",
-            # 行为：约 1/3 收藏、1/2 看过
-            "favorite": 1 if i % 3 == 0 else 0,
-            "play_count": (i % 4),
-            "played": 1 if i % 2 == 0 else 0,
-            "rating": float(5 + (i % 5)) if i % 7 == 0 else None,
-            "actors": actors,
-        })
+        items.append(
+            {
+                "id": f"demo-item-{i:04d}",
+                "name": name,
+                "path": os.path.join(str(media_root or DEMO_ROOT), *rel.split("\\")),
+                "year": year,
+                "genres": ",".join(genres),
+                "tags": ",".join([f"{s}:" for s in (studio,)] + genres),
+                "studios": studio,
+                "size": size,
+                "type": "Movie",
+                # 行为：约 1/3 收藏、1/2 看过
+                "favorite": 1 if i % 3 == 0 else 0,
+                "play_count": (i % 4),
+                "played": 1 if i % 2 == 0 else 0,
+                "rating": float(5 + (i % 5)) if i % 7 == 0 else None,
+                "actors": actors,
+            }
+        )
     return items
 
 
@@ -108,10 +110,12 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE Peoples (Id TEXT PRIMARY KEY, Name TEXT);
         CREATE TABLE PeopleBaseItemMap (ItemId TEXT, PeopleId TEXT);
         CREATE TABLE UserData (
-            ItemId TEXT PRIMARY KEY, IsFavorite INTEGER, PlayCount INTEGER,
+            ItemId TEXT, UserId TEXT, IsFavorite INTEGER, PlayCount INTEGER,
             Played INTEGER, PlaybackPositionTicks INTEGER, LastPlayedDate TEXT,
-            Rating REAL
+            Rating REAL, PRIMARY KEY(ItemId, UserId)
         );
+        CREATE TABLE Users (Id TEXT PRIMARY KEY, Name TEXT);
+        INSERT INTO Users VALUES ('00000000000000000000000000000001', 'Synthetic Viewer');
         CREATE TABLE BaseItemImageInfos (
             ItemId TEXT, ImageType INTEGER, Path TEXT
         );
@@ -123,9 +127,9 @@ def seed(out: Path, count: int) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     db_path = out / "jellyfin.db"
     if db_path.exists():
-        db_path.unlink()
+        raise FileExistsError("演示生成器不覆盖已有数据库，请使用新目录")
 
-    items = _build_items(count)
+    items = _build_items(count, out / "MediaDemo" / "Library")
     conn = sqlite3.connect(str(db_path))
     try:
         _create_schema(conn)
@@ -133,22 +137,42 @@ def seed(out: Path, count: int) -> Path:
         for it in items:
             conn.execute(
                 "INSERT INTO BaseItems VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (it["id"], it["name"], it["path"], it["year"], it["genres"],
-                 it["tags"], it["studios"], it["size"], it["type"], 0, "Video"),
+                (
+                    it["id"],
+                    it["name"],
+                    it["path"],
+                    it["year"],
+                    it["genres"],
+                    it["tags"],
+                    it["studios"],
+                    it["size"],
+                    it["type"],
+                    0,
+                    "Video",
+                ),
             )
             conn.execute(
-                "INSERT INTO UserData VALUES (?,?,?,?,?,?,?)",
-                (it["id"], it["favorite"], it["play_count"], it["played"],
-                 0, "2024-01-0%dT20:00:00" % (1 + int(it["id"][-2:]) % 9),
-                 it["rating"]),
+                "INSERT INTO UserData VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    it["id"],
+                    "00000000000000000000000000000001",
+                    it["favorite"],
+                    it["play_count"],
+                    it["played"],
+                    0,
+                    ("2024-01-0%dT20:00:00" % (1 + int(it["id"][-2:]) % 9))
+                    if it["played"] or it["play_count"]
+                    else None,
+                    it["rating"],
+                ),
             )
             for actor in it["actors"]:
                 if actor not in people_ids:
                     people_ids[actor] = f"demo-person-{len(people_ids):03d}"
-                    conn.execute("INSERT INTO Peoples VALUES (?,?)",
-                                 (people_ids[actor], actor))
-                conn.execute("INSERT INTO PeopleBaseItemMap VALUES (?,?)",
-                             (it["id"], people_ids[actor]))
+                    conn.execute("INSERT INTO Peoples VALUES (?,?)", (people_ids[actor], actor))
+                conn.execute(
+                    "INSERT INTO PeopleBaseItemMap VALUES (?,?)", (it["id"], people_ids[actor])
+                )
 
             # 真的把文件建出来，方便文件类功能有东西可看（0 字节占位）
             video = Path(it["path"])
@@ -158,11 +182,12 @@ def seed(out: Path, count: int) -> Path:
                 (video.with_suffix(".nfo")).write_text(
                     f"<movie><title>{it['name']}</title>"
                     f"<plot>演示数据，与真实作品无关。</plot></movie>",
-                    encoding="utf-8")
+                    encoding="utf-8",
+                )
                 if int(it["id"][-2:]) % 3 == 0:
                     video.with_suffix(".zh.srt").write_text(
-                        "1\n00:00:00,000 --> 00:00:02,000\n演示字幕\n",
-                        encoding="utf-8")
+                        "1\n00:00:00,000 --> 00:00:02,000\n演示字幕\n", encoding="utf-8"
+                    )
             except OSError:
                 pass
         conn.commit()
@@ -171,6 +196,7 @@ def seed(out: Path, count: int) -> Path:
 
     cfg = {
         "jellyfin_db_path": str(db_path),
+        "jellyfin_user_id": "00000000000000000000000000000001",
         "jellyfin_data_dir": str(out / "data"),
         "theme": "dark",
         "merge_backup_root": "",
@@ -179,7 +205,8 @@ def seed(out: Path, count: int) -> Path:
         "ai_enabled": False,
     }
     (out / "config.json").write_text(
-        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return db_path
 
 
@@ -194,7 +221,7 @@ def main() -> int:
     print(f"演示库已生成: {db}")
     print(f"配置已写入:   {out / 'config.json'}")
     print("\n试用方式（不影响你自己的配置）：")
-    print(f'  set JELLYFIN_TOOLKIT_DATA_DIR={out}')
+    print(f"  set JELLYFIN_TOOLKIT_DATA_DIR={out}")
     print(f'  python main.py --data-dir "{out}"')
     return 0
 

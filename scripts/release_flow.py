@@ -37,6 +37,8 @@ import shutil
 import subprocess
 import sys
 import zipfile
+import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -53,11 +55,11 @@ INDEX_NAME = "INDEX.md"
 DEFAULT_ARCHIVE = Path.home() / "JellyfinToolkit-releases"
 
 #: 记住"上次用的归档位置"，免得每次都敲 --archive
-ARCHIVE_POINTER = (Path(os.environ.get("LOCALAPPDATA") or Path.home())
-                   / APP_ID / "archive_root.txt")
+ARCHIVE_POINTER = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / APP_ID / "archive_root.txt"
 
 
 # ── 基础工具 ──────────────────────────────────────────────
+
 
 def force_utf8_stdout() -> None:
     """见 utils/console.py 的说明：CI/管道下 stdout 可能是 cp1252，打印中文会崩。
@@ -124,8 +126,7 @@ def version_key(v: str):
 
 
 def read_repo_version() -> str:
-    m = re.search(r'__version__\s*=\s*"([^"]+)"',
-                  (ROOT / "version.py").read_text(encoding="utf-8"))
+    m = re.search(r'__version__\s*=\s*"([^"]+)"', (ROOT / "version.py").read_text(encoding="utf-8"))
     if not m:
         raise SystemExit("读不到 version.py 里的 __version__")
     return m.group(1)
@@ -140,8 +141,7 @@ def changelog_section(version: str) -> str:
         sys.path.insert(0, str(ROOT))
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location(
-            "rn", ROOT / "scripts" / "release_notes.py")
+        spec = importlib.util.spec_from_file_location("rn", ROOT / "scripts" / "release_notes.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return mod.extract_section(path.read_text(encoding="utf-8"), version)
@@ -151,8 +151,9 @@ def changelog_section(version: str) -> str:
 
 def git(*args) -> str:
     try:
-        r = subprocess.run(["git", "-C", str(ROOT), *args],
-                           capture_output=True, text=True, timeout=60)
+        r = subprocess.run(
+            ["git", "-C", str(ROOT), *args], capture_output=True, text=True, timeout=60
+        )
         return (r.stdout or "").strip()
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -160,10 +161,19 @@ def git(*args) -> str:
 
 # ── 归档单个版本 ──────────────────────────────────────────
 
-def archive_version(version: str, zip_path: Path, root: Path, *,
-                    source: str = "", extract: bool = True,
-                    notes: str = "", published: bool = True,
-                    note: str = "", commit: str = "") -> Path:
+
+def _archive_version_staged(
+    version: str,
+    zip_path: Path,
+    root: Path,
+    *,
+    source: str = "",
+    extract: bool = True,
+    notes: str = "",
+    published: bool = True,
+    note: str = "",
+    commit: str = "",
+) -> Path:
     """把一版产物放进归档，返回该版本的目录。
 
     已经归档过的版本**不会覆盖**（归档的意义就是"这一版当时长什么样"），
@@ -183,8 +193,7 @@ def archive_version(version: str, zip_path: Path, root: Path, *,
         shutil.copy2(zip_path, zip_copy)
 
     digest = sha256_of(zip_copy)
-    (dest / f"{zip_copy.name}.sha256").write_text(
-        f"{digest}  {zip_copy.name}\n", encoding="utf-8")
+    (dest / f"{zip_copy.name}.sha256").write_text(f"{digest}  {zip_copy.name}\n", encoding="utf-8")
 
     # 2) 解压出一份"双击就能跑"的目录
     run_dir = dest / "运行"
@@ -202,7 +211,8 @@ def archive_version(version: str, zip_path: Path, root: Path, *,
             if exes:
                 exe_sha = sha256_of(exes[0])
                 (dest / f"{APP_ID}.exe.sha256").write_text(
-                    f"{exe_sha}  {APP_ID}.exe\n", encoding="utf-8")
+                    f"{exe_sha}  {APP_ID}.exe\n", encoding="utf-8"
+                )
         except (OSError, zipfile.BadZipFile) as e:
             print(f"  ⚠️ 解压失败（发行包已归档，不影响）：{e}")
 
@@ -224,12 +234,15 @@ def archive_version(version: str, zip_path: Path, root: Path, *,
     if section:
         lines += ["## 这一版改了什么", "", section.strip(), ""]
     else:
-        lines += ["## 这一版改了什么", "",
-                  "（CHANGELOG 里没有找到对应小节，请在发布页查看。）", ""]
-    lines += ["## 怎么用", "",
-              "1. 解压 `运行\\` 或发行包到任意目录（避开中文路径更稳）",
-              "2. 双击 `JellyfinToolkit.exe`",
-              "3. 首次运行可选「便携模式」：在程序目录放一个空的 `portable.txt`", ""]
+        lines += ["## 这一版改了什么", "", "（CHANGELOG 里没有找到对应小节，请在发布页查看。）", ""]
+    lines += [
+        "## 怎么用",
+        "",
+        "1. 解压 `运行\\` 或发行包到任意目录（避开中文路径更稳）",
+        "2. 双击 `JellyfinToolkit.exe`",
+        "3. 首次运行可选「便携模式」：在程序目录放一个空的 `portable.txt`",
+        "",
+    ]
     (dest / "本版说明.md").write_text("\n".join(lines), encoding="utf-8")
 
     # 4) 版本信息（给程序/脚本看）
@@ -247,13 +260,65 @@ def archive_version(version: str, zip_path: Path, root: Path, *,
         # 导入历史版本时要显式给提交号 —— 否则会记成"当前 HEAD"，
         # 那是错的（v3.7.0 归档时就踩过这个）。
         # 未发布的本地快照更是根本没有对应提交，留空才对。
-        "git_commit": commit or (git("rev-parse", "HEAD") if published else ""),
+        "git_commit": commit
+        or (git("rev-parse", "--verify", f"v{version}^{{commit}}") if published else ""),
         "git_dirty": bool(git("status", "--porcelain")),
         "release_url": f"{REPO_URL}/releases/tag/v{version}",
         "source": source or "local-dist",
     }
     (dest / "版本信息.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return dest
+
+
+def archive_version(version: str, zip_path: Path, root: Path, **kwargs) -> Path:
+    """Publish a complete staged archive once; repeat calls never alter it."""
+    version = version.strip().lstrip("vV")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ValueError("归档版本号无效")
+    zip_path, root = Path(zip_path), Path(root).resolve()
+    digest = sha256_of(zip_path)
+    dest = root / f"v{version}"
+    if dest.exists():
+        meta_path = dest / "版本信息.json"
+        if not meta_path.is_file():
+            raise ValueError("已有归档不完整，拒绝自动覆盖")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        old_zip = dest / meta["zip"]
+        if (
+            not old_zip.is_file()
+            or sha256_of(old_zip) != meta["zip_sha256"]
+            or digest != meta["zip_sha256"]
+        ):
+            raise ValueError("同版本归档内容不同或校验失败，拒绝覆盖")
+        return dest
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.infolist():
+            name = member.filename.replace("\\", "/")
+            if (
+                name.startswith("/")
+                or ":" in name
+                or ".." in Path(name).parts
+                or (member.external_attr >> 16) & 0o170000 == 0o120000
+            ):
+                raise ValueError("归档包包含不安全路径")
+        if archive.testzip() is not None:
+            raise ValueError("归档包损坏")
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".archive-stage-", dir=str(root)) as staging:
+        staged = _archive_version_staged(version, zip_path, Path(staging), **kwargs)
+        for attempt in range(30):
+            if dest.exists():
+                raise FileExistsError(f"归档目标已存在，拒绝覆盖：{dest}")
+            try:
+                staged.rename(dest)
+                break
+            except PermissionError as exc:
+                # Windows scanners may briefly hold a freshly extracted exe.
+                if getattr(exc, "winerror", None) not in (5, 32) or attempt == 29:
+                    raise
+                time.sleep(0.1)
     return dest
 
 
@@ -294,6 +359,7 @@ def find_exe_rel(run_dir: Path) -> str:
 
 # ── 索引 ──────────────────────────────────────────────────
 
+
 def rebuild_index(root: Path) -> Path:
     """扫描归档目录，重建 INDEX.md（一表看清哪个最新、哪个能直接跑）。"""
     rows = []
@@ -309,20 +375,22 @@ def rebuild_index(root: Path) -> Path:
                 meta = {}
         zips = [z for z in d.glob("*.zip")]
         size = meta.get("zip_size") or (zips[0].stat().st_size if zips else 0)
-        rows.append({
-            "version": meta.get("version") or d.name[1:],
-            "dir": d.name,
-            "size": size,
-            "sha": (meta.get("zip_sha256") or "")[:16],
-            "archived": meta.get("archived_at", ""),
-            "exe": meta.get("exe_relative", ""),
-            "url": meta.get("release_url", f"{REPO_URL}/releases/tag/{d.name}"),
-            "commit": (meta.get("git_commit") or "")[:7],
-            "source": meta.get("source", ""),
-            # 没有元数据的老归档按"已发布"处理（那时还没有这个概念）
-            "published": meta.get("published", True),
-            "note": meta.get("note", ""),
-        })
+        rows.append(
+            {
+                "version": meta.get("version") or d.name[1:],
+                "dir": d.name,
+                "size": size,
+                "sha": (meta.get("zip_sha256") or "")[:16],
+                "archived": meta.get("archived_at", ""),
+                "exe": str(Path(d.name) / meta["exe_relative"]) if meta.get("exe_relative") else "",
+                "url": meta.get("release_url", f"{REPO_URL}/releases/tag/{d.name}"),
+                "commit": (meta.get("git_commit") or "")[:7],
+                "source": meta.get("source", ""),
+                # 没有元数据的老归档按"已发布"处理（那时还没有这个概念）
+                "published": meta.get("published", True),
+                "note": meta.get("note", ""),
+            }
+        )
 
     # 「最新」只在**已发布**里选 —— 否则一个从未发布的内部快照
     # （版本号可能更高）会长期霸占榜首，正是要避免的那种混乱。
@@ -348,8 +416,11 @@ def rebuild_index(root: Path) -> Path:
         "| --- | --- |",
         # 这里必须用**实际的**相对路径（onedir 的 zip 可能带一层顶层目录），
         # 写死一个路径就会出现"照着索引找却找不到文件"
-        (f"| 直接打开用最新版 | `{pub[0]['exe']}`（双击） |" if pub and pub[0]["exe"]
-         else "| 直接打开用最新版 | （还没有归档版本） |"),
+        (
+            f"| 直接打开用最新版 | `{pub[0]['exe']}`（双击） |"
+            if pub and pub[0]["exe"]
+            else "| 直接打开用最新版 | （还没有归档版本） |"
+        ),
         "| 拿发行包（拷给别人/留档） | `vX.Y.Z\\JellyfinToolkit-vX.Y.Z-win64.zip` |",
         "| 看某一版改了什么 | `vX.Y.Z\\本版说明.md` |",
         "| 核对文件有没有坏 | `vX.Y.Z\\*.sha256` 或下面的校验值 |",
@@ -368,7 +439,8 @@ def rebuild_index(root: Path) -> Path:
         out.append(
             f"| **v{r['version']}**{star} | {r['archived'] or '—'} | "
             f"{r['size'] / 1048576:.1f} MB | `{r['sha']}…` | `{r['commit'] or '—'}` | "
-            f"{exe} | [Release]({r['url']}) |")
+            f"{exe} | [Release]({r['url']}) |"
+        )
 
     if unpub:
         out += [
@@ -383,8 +455,10 @@ def rebuild_index(root: Path) -> Path:
             "| --- | --- | --- | --- |",
         ]
         for r in unpub:
-            out.append(f"| v{r['version']} | {r['note'] or '内部快照'} | "
-                       f"{r['archived'] or '—'} | {r['size'] / 1048576:.1f} MB |")
+            out.append(
+                f"| v{r['version']} | {r['note'] or '内部快照'} | "
+                f"{r['archived'] or '—'} | {r['size'] / 1048576:.1f} MB |"
+            )
 
     out += [
         "",
@@ -420,11 +494,11 @@ def rebuild_index(root: Path) -> Path:
 
 # ── 从线上拉回归档 ────────────────────────────────────────
 
+
 def _gh_token() -> str:
     """取 gh 已保存的 token（**不打印、不落盘**）。取不到返回空串。"""
     try:
-        r = subprocess.run(["gh", "auth", "token"], capture_output=True,
-                           text=True, timeout=30)
+        r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return ""
     return (r.stdout or "").strip() if r.returncode == 0 else ""
@@ -448,7 +522,8 @@ def _download_with_proxy(version: str, tmp: Path, proxy: str) -> bool:
     repo = "coldeve2022/JellyfinToolkit"
     token = _gh_token()
     opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+    )
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "release_flow"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -461,8 +536,7 @@ def _download_with_proxy(version: str, tmp: Path, proxy: str) -> bool:
         print(f"  ❌ 读取 Release 信息失败：{e}")
         return False
 
-    assets = [a for a in meta.get("assets", [])
-              if a.get("name", "").endswith((".zip", ".sha256"))]
+    assets = [a for a in meta.get("assets", []) if a.get("name", "").endswith((".zip", ".sha256"))]
     if not any(a["name"].endswith(".zip") for a in assets):
         print("  ❌ 该 Release 没有 zip 附件")
         return False
@@ -476,8 +550,10 @@ def _download_with_proxy(version: str, tmp: Path, proxy: str) -> bool:
             req_headers["Range"] = f"bytes={already}-"
         try:
             req = urllib.request.Request(asset["url"], headers=req_headers)
-            with opener.open(req, timeout=120) as resp, open(
-                    target, "ab" if already and resp.status == 206 else "wb") as fh:
+            with (
+                opener.open(req, timeout=120) as resp,
+                open(target, "ab" if already and resp.status == 206 else "wb") as fh,
+            ):
                 while True:
                     chunk = resp.read(1 << 20)
                     if not chunk:
@@ -500,29 +576,43 @@ def _download_with_proxy(version: str, tmp: Path, proxy: str) -> bool:
     return True
 
 
-def archive_from_github(tag: str, root: Path, extract: bool = True,
-                        proxy: str = "") -> bool:
+def archive_from_github(tag: str, root: Path, extract: bool = True, proxy: str = "") -> bool:
     """把线上某个 Release 的附件下载到归档（用于补回早期版本）。
 
     ``proxy`` 留空时：若设了 ``HTTPS_PROXY`` / ``JELLYFIN_TOOLKIT_PROXY`` 就用它，
     否则退回 ``gh release download``。本机实测前者快两个数量级，所以**推荐给**。
     """
     version = tag.strip().lstrip("vV")
-    dest = root / f"v{version}"
-    tmp = dest / "_download"
+    tmp = root / "_download" / f"v{version}"
     tmp.mkdir(parents=True, exist_ok=True)
 
-    proxy = (proxy or os.environ.get("JELLYFIN_TOOLKIT_PROXY", "")
-             or os.environ.get("HTTPS_PROXY", "")).strip()
-    print(f"  下载 v{version} 的发行物"
-          + (f"（走代理 {proxy}）" if proxy else "（gh 直连，慢网络可能很慢）") + "…")
+    proxy = (
+        proxy or os.environ.get("JELLYFIN_TOOLKIT_PROXY", "") or os.environ.get("HTTPS_PROXY", "")
+    ).strip()
+    print(
+        f"  下载 v{version} 的发行物"
+        + (f"（走代理 {proxy}）" if proxy else "（gh 直连，慢网络可能很慢）")
+        + "…"
+    )
 
     if proxy:
         ok = _download_with_proxy(version, tmp, proxy)
     else:
-        cmd = ["gh", "release", "download", f"v{version}", "--repo",
-               "coldeve2022/JellyfinToolkit", "--dir", str(tmp), "--clobber",
-               "--pattern", "*.zip", "--pattern", "*.sha256"]
+        cmd = [
+            "gh",
+            "release",
+            "download",
+            f"v{version}",
+            "--repo",
+            "coldeve2022/JellyfinToolkit",
+            "--dir",
+            str(tmp),
+            "--clobber",
+            "--pattern",
+            "*.zip",
+            "--pattern",
+            "*.sha256",
+        ]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
         ok = r.returncode == 0
         if not ok:
@@ -534,12 +624,22 @@ def archive_from_github(tag: str, root: Path, extract: bool = True,
     if not zips:
         print("  ❌ 该 Release 没有 zip 附件")
         return False
-    archive_version(version, zips[0], root, source=f"github:{tag}", extract=extract)
+    if len(zips) != 1:
+        print("  ❌ 发行包不唯一，拒绝自动选择")
+        return False
+    checksum = tmp / f"{zips[0].name}.sha256"
+    tokens = checksum.read_text(encoding="utf-8").split() if checksum.is_file() else []
+    if not tokens or tokens[0].lower() != sha256_of(zips[0]):
+        print("  ❌ 缺少 SHA256 或下载校验失败")
+        return False
+    commit = git("rev-parse", "--verify", f"v{version}^{{commit}}")
+    archive_version(version, zips[0], root, source=f"github:{tag}", extract=extract, commit=commit)
     shutil.rmtree(tmp, ignore_errors=True)
     return True
 
 
 # ── 发版前检查 ────────────────────────────────────────────
+
 
 def cmd_check(extra_expected: str = "") -> int:
     """发版前检查：版本号一致 / CHANGELOG 有本版 / 工作区干净。"""
@@ -574,8 +674,11 @@ def cmd_check(extra_expected: str = "") -> int:
 
 
 def cmd_status(root: Path) -> int:
-    rows = sorted([d for d in root.glob("v*") if d.is_dir()],
-                  key=lambda p: version_key(p.name[1:]), reverse=True)
+    rows = sorted(
+        [d for d in root.glob("v*") if d.is_dir()],
+        key=lambda p: version_key(p.name[1:]),
+        reverse=True,
+    )
     print(f"归档目录：{root}")
     if not root.is_dir():
         print("  （目录还不存在 —— 第一次归档时会自动创建）")
@@ -594,13 +697,16 @@ def cmd_status(root: Path) -> int:
                 meta = {}
         size = meta.get("zip_size", 0) / 1048576
         has_exe = "✅" if (d / "运行").is_dir() else "—"
-        print(f"    v{meta.get('version', d.name[1:]):<8s} {size:5.1f} MB  "
-              f"归档于 {meta.get('archived_at', '—')}  可直接运行 {has_exe}")
+        print(
+            f"    v{meta.get('version', d.name[1:]):<8s} {size:5.1f} MB  "
+            f"归档于 {meta.get('archived_at', '—')}  可直接运行 {has_exe}"
+        )
     print(f"\n  索引：{root / INDEX_NAME}")
     return 0
 
 
 # ── 命令行 ────────────────────────────────────────────────
+
 
 def main() -> int:
     force_utf8_stdout()
@@ -618,13 +724,19 @@ def main() -> int:
     p.add_argument("--zip", default="", help="发行包路径；留空自动在 dist 下找")
     p.add_argument("--from-github", default="", help="改为从线上 Release 拉回（给 tag，如 v3.7.0）")
     p.add_argument("--no-extract", action="store_true", help="不解压出「运行」目录")
-    p.add_argument("--unpublished", action="store_true",
-                   help="标记为「从未公开发布的内部快照」——不会出现在「最新」")
+    p.add_argument(
+        "--unpublished",
+        action="store_true",
+        help="标记为「从未公开发布的内部快照」——不会出现在「最新」",
+    )
     p.add_argument("--note", default="", help="配合 --unpublished 的说明文字")
     p.add_argument("--commit", default="", help="该版本对应的提交号；导入历史版本时填")
-    p.add_argument("--proxy", default="",
-                   help="从线上拉取时使用的代理，如 http://127.0.0.1:7897；"
-                        "留空则读 HTTPS_PROXY / JELLYFIN_TOOLKIT_PROXY")
+    p.add_argument(
+        "--proxy",
+        default="",
+        help="从线上拉取时使用的代理，如 http://127.0.0.1:7897；"
+        "留空则读 HTTPS_PROXY / JELLYFIN_TOOLKIT_PROXY",
+    )
 
     args = ap.parse_args()
     root = archive_root(args.archive)
@@ -649,9 +761,11 @@ def main() -> int:
         if args.zip:
             zp = Path(args.zip)
         else:
-            cands = sorted((ROOT / "dist").glob(f"*{version}*.zip")) or \
-                sorted((ROOT / "dist").glob("*.zip")) or \
-                sorted(ROOT.glob(f"*{version}*.zip"))
+            cands = (
+                sorted((ROOT / "dist").glob(f"*{version}*.zip"))
+                or sorted((ROOT / "dist").glob("*.zip"))
+                or sorted(ROOT.glob(f"*{version}*.zip"))
+            )
             if not cands:
                 print("找不到发行包。先构建：python scripts/build_release.py（或 build.bat）")
                 return 1
@@ -659,11 +773,16 @@ def main() -> int:
         if not zp.is_file():
             print(f"发行包不存在：{zp}")
             return 1
-        print(f"归档 v{version}：{zp.name}"
-              + ("（标记为未发布快照）" if args.unpublished else ""))
-        d = archive_version(version, zp, root, extract=not args.no_extract,
-                            published=not args.unpublished, note=args.note,
-                            commit=args.commit)
+        print(f"归档 v{version}：{zp.name}" + ("（标记为未发布快照）" if args.unpublished else ""))
+        d = archive_version(
+            version,
+            zp,
+            root,
+            extract=not args.no_extract,
+            published=not args.unpublished,
+            note=args.note,
+            commit=args.commit,
+        )
         rebuild_index(root)
         print(f"✅ 已归档到 {d}")
         print(f"   直接运行：{d / '运行' / (APP_ID + '.exe')}")

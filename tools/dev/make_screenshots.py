@@ -14,8 +14,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
-import shutil
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -36,22 +37,17 @@ force_utf8_stdout()
 # 中性演示路径：不带用户名、不带构建目录
 DEMO_DIR = Path(r"C:\MediaDemo")
 
-SLUGS = [
-    "onboarding", "insight", "profile", "review", "delete", "dedup",
-    "censorship", "subtitle", "replace", "repair", "nfo_fix", "db_tools",
-    "merge", "automation", "settings",
-]
 
-
-def _prepare_demo() -> Path:
+def _prepare_demo(demo=DEMO_DIR) -> Path:
     """生成一份虚构演示库到中性路径（每次重建，保证截图内容一致）。"""
     sys.path.insert(0, str(ROOT / "tools" / "dev"))
     from seed_demo import seed  # noqa: PLC0415
 
-    if DEMO_DIR.exists():
-        shutil.rmtree(DEMO_DIR, ignore_errors=True)
-    seed(DEMO_DIR, 90)
-    return DEMO_DIR
+    demo = Path(demo).expanduser().resolve()
+    if demo.exists() and any(demo.iterdir()):
+        demo = Path(tempfile.mkdtemp(prefix=demo.name + "-", dir=demo.parent))
+    seed(demo, 90)
+    return demo
 
 
 def main() -> int:
@@ -59,12 +55,15 @@ def main() -> int:
     parser.add_argument("--out", default=str(ROOT / "docs" / "images"))
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=820)
+    parser.add_argument(
+        "--demo", default=str(DEMO_DIR), help="虚构数据目录；已有内容会保留并使用新目录"
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    demo = _prepare_demo()
+    demo = _prepare_demo(args.demo)
     # 数据目录指向演示库，绝不碰用户真实配置
     os.environ["JELLYFIN_TOOLKIT_DATA_DIR"] = str(demo)
 
@@ -74,21 +73,11 @@ def main() -> int:
     from config import ToolkitConfig
     from utils.fonts import ui_font
     from ui.main_window import MainWindow, NAV_LABELS
-    from ui.pages.automation import AutomationPage
-    from ui.pages.censorship import CensorshipPage
-    from ui.pages.db_tools import DBToolsPage
     from ui.pages.dedup import DedupPage
     from ui.pages.delete import DeletePage
     from ui.pages.insight import InsightPage
-    from ui.pages.merge import MergePage
-    from ui.pages.nfo_fix import NFOPage
-    from ui.pages.onboarding import OnboardingPage
-    from ui.pages.profile import ProfilePage
-    from ui.pages.repair import RepairPage
-    from ui.pages.replace import ReplacePage
     from ui.pages.review import ReviewPage
-    from ui.pages.settings import SettingsPage
-    from ui.pages.subtitle import SubtitlePage
+    from main import PAGE_SPECS
     from workers.ingest import IngestWorker
     from workers.scorer import AnalyzeWorker
 
@@ -123,7 +112,8 @@ def main() -> int:
 
     for page, slot in ((rev, rev._on_analyzed), (dele, dele._on_loaded), (ded, ded._on_loaded)):
         worker = AnalyzeWorker(
-            db_path, {},
+            db_path,
+            {},
             exclude_keywords=cfg.exclude_path_keywords,
             th_keep=cfg.score_th_keep / 100,
             th_delete=cfg.score_th_delete / 100,
@@ -133,11 +123,10 @@ def main() -> int:
         wait_worker(worker)
 
     window = MainWindow(cfg)
+    ready = {"InsightPage": ins, "ReviewPage": rev, "DeletePage": dele, "DedupPage": ded}
     pages = [
-        OnboardingPage(cfg), ins, ProfilePage(cfg), rev, dele, ded,
-        CensorshipPage(cfg), SubtitlePage(cfg), ReplacePage(cfg), RepairPage(cfg),
-        NFOPage(cfg), DBToolsPage(cfg), MergePage(cfg), AutomationPage(cfg),
-        SettingsPage(cfg),
+        ready[name] if name in ready else getattr(importlib.import_module(module), name)(cfg)
+        for module, name in PAGE_SPECS
     ]
     for page in pages:
         window.register_page(page)
@@ -153,7 +142,7 @@ def main() -> int:
     for idx, _label in enumerate(NAV_LABELS):
         window._navigate(idx)
         spin(260)
-        slug = SLUGS[idx] if idx < len(SLUGS) else f"page_{idx:02d}"
+        slug = PAGE_SPECS[idx][0].rsplit(".", 1)[-1]
         path = out_dir / f"{idx:02d}_{slug}.png"
         window.grab().save(str(path))
         print("saved", path.name)

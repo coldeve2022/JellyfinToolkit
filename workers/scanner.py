@@ -5,8 +5,6 @@ from typing import List, Set, Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from utils.library import is_junk_attachment_path
-
 
 class FileScannerWorker(QThread):
     """遍历目录，收集符合条件的文件路径。
@@ -14,15 +12,19 @@ class FileScannerWorker(QThread):
     支持暂停/停止；支持传入已检查集合实现断点续传。
     """
 
-    progress = Signal(str, int)            # 当前文件名, 进度百分比
-    file_found = Signal(str, str)          # 文件名, 绝对路径
-    skipped = Signal(int)                  # 跳过的附属文件数（预告片/主题视频等）
-    finished = Signal(list, list)          # 找到的文件路径列表, 已检查路径列表
+    progress = Signal(str, int)  # 当前文件名, 进度百分比
+    file_found = Signal(str, str)  # 文件名, 绝对路径
+    skipped = Signal(int)  # 跳过的附属文件数（预告片/主题视频等）
+    finished = Signal(list, list)  # 找到的文件路径列表, 已检查路径列表
 
-    def __init__(self, directories: List[str], extensions: Set[str],
-                 min_size_bytes: int = 0,
-                 checked_files: Optional[Set[str]] = None,
-                 parent=None):
+    def __init__(
+        self,
+        directories: List[str],
+        extensions: Set[str],
+        min_size_bytes: int = 0,
+        checked_files: Optional[Set[str]] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self._dirs = directories
         self._exts = {e.lower() for e in extensions}
@@ -47,62 +49,38 @@ class FileScannerWorker(QThread):
         self._stopped = True
         self._paused = False
 
+    @property
+    def cancelled(self) -> bool:
+        return self._stopped
+
     def run(self) -> None:
-        # 第一遍：收集所有候选文件（仅统计，不做 IO 过滤）
-        all_files: List[Path] = []
-        for d in self._dirs:
-            p = Path(d)
-            try:
-                if p.is_file():
-                    if p.suffix.lower() in self._exts and len(str(p)) <= 240:
-                        all_files.append(p)
-                elif p.is_dir():
-                    for f in p.rglob("*"):
-                        # rglob 对超长路径可能抛 OSError，跳过而非崩溃
-                        if not f.is_file() or len(str(f)) > 240:
-                            continue
-                        if f.suffix.lower() in self._exts:
-                            all_files.append(f)
-            except OSError:
-                continue  # 无权限/超长路径目录跳过，不中断整体扫描
+        from utils.file_scan import iter_media_files
 
-        total = len(all_files)
-        results: List[str] = []
+        results = []
 
-        for i, fp in enumerate(all_files):
+        def cancelled():
             while self._paused and not self._stopped:
                 self.msleep(100)
-            if self._stopped:
-                return
+            return self._stopped
 
-            path_str = str(fp)
-            if path_str in self._checked:
-                # 已检查过，但仍计入进度
-                self.progress.emit(fp.name, int((i + 1) / total * 100))
-                continue
-
-            # 预告片 / 主题视频（trailers\、theme_video 等）是 Jellyfin 生成给界面用的，
-            # 不是正片 —— 给它们生成字幕既没意义又会把列表淹掉。
-            if is_junk_attachment_path(path_str):
-                self._skipped += 1
-                self._checked.add(path_str)
-                self.progress.emit(fp.name, int((i + 1) / total * 100))
-                continue
-
-            try:
-                if self._min_size > 0 and fp.stat().st_size < self._min_size:
-                    self._checked.add(path_str)
-                    self.progress.emit(fp.name, int((i + 1) / total * 100))
-                    continue
-                results.append(path_str)
-                self.file_found.emit(fp.name, path_str)
-            except OSError:
-                pass
-
-            self._checked.add(path_str)
-            pct = int((i + 1) / total * 100)
-            self.progress.emit(fp.name, pct)
-
-        if self._skipped:
-            self.skipped.emit(self._skipped)
-        self.finished.emit(results, list(self._checked))
+        try:
+            candidates = []
+            for path in iter_media_files(self._dirs, video_exts=self._exts, should_stop=cancelled):
+                candidates.append(Path(path))
+                self.progress.emit(Path(path).name, 0)
+            total = len(candidates)
+            for i, fp in enumerate(candidates):
+                if cancelled():
+                    break
+                key = str(fp)
+                if key not in self._checked:
+                    try:
+                        if not self._min_size or fp.stat().st_size >= self._min_size:
+                            results.append(key)
+                            self.file_found.emit(fp.name, key)
+                        self._checked.add(key)
+                    except OSError:
+                        pass  # Transient read failure is not a completed checkpoint.
+                self.progress.emit(fp.name, int((i + 1) / total * 100) if total else 100)
+        finally:
+            self.finished.emit(results, list(self._checked))

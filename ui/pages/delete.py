@@ -1,20 +1,34 @@
-"""删除暂存页 - 建议删除清单 → 一键移入回收站(可恢复) + 删除日志。
+"""删除暂存页 - 建议删除清单 → 一键移入可恢复隔离区(可恢复) + 删除日志。
 
 删除红线：
-- 只移入回收站，绝不物理删除（失败保留原文件并提示）
+- 只移入可恢复隔离区，绝不物理删除（失败保留原文件并提示）
 - 破坏性操作二次确认
 - 全程日志留痕 + 落库记录
 """
+
 from __future__ import annotations
+
+from ui.services import busy, start_task, stop_page, events, state_context, import_media
 
 import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QMessageBox, QGroupBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QTabWidget, QFileDialog,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QProgressBar,
+    QMessageBox,
+    QGroupBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QAbstractItemView,
+    QTabWidget,
+    QFileDialog,
 )
 
 from config import DATA_DIR, ToolkitConfig
@@ -23,6 +37,7 @@ from ui.widgets import LogPanel, DragDropListWidget, CoverThumbDelegate
 from utils import scoring
 from utils.labels import LabelStore
 from utils.trash import DeleteJournal
+from ui.services import analysis_worker, accept_snapshot
 from workers.scorer import AnalyzeWorker
 from workers.trash import TrashWorker
 
@@ -39,17 +54,23 @@ class DeletePage(QWidget):
     def __init__(self, cfg: ToolkitConfig, parent=None):
         super().__init__(parent)
         self.cfg = cfg
-        self.store = LabelStore(DATA_DIR / "smart.db")
+        self._state_context = state_context(cfg)
+        self.store = LabelStore(DATA_DIR / "smart.db", context=state_context(self.cfg))
         self.journal = DeleteJournal(DATA_DIR / "trash_journal.db")
         self.analyzer: AnalyzeWorker | None = None
         self.trash_worker: TrashWorker | None = None
         self.ai_worker = None
         self.labels: dict = self.store.all()
-        self._delete_rows: list[dict] = []      # 建议删除(自动+人工标DELETE)
-        self._manual_paths: set[str] = set()    # 手动添加的文件
+        events.labels_changed.connect(self._refresh_labels)
+        self._delete_rows: list[dict] = []  # 建议删除(自动+人工标DELETE)
+        self._manual_paths: set[str] = set()  # 手动添加的文件
         self._setup_ui()
 
     # ── UI ──
+    def _refresh_labels(self):
+        self.store = LabelStore(DATA_DIR / "smart.db", context=state_context(self.cfg))
+        self.labels = self.store.all()
+
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)
@@ -61,7 +82,7 @@ class DeletePage(QWidget):
 
         hint = QLabel(
             "这里是「建议删除」清单（自动零命中 + 垃圾附属文件 + 你在打标页标了删除的）。\n"
-            "删除只移入回收站（可恢复），不会物理删除；操作前会二次确认并留痕。"
+            "删除只移入可恢复隔离区（可恢复），不会物理删除；操作前会二次确认并留痕。"
         )
         hint.setProperty("cssClass", "subtitle")
         root.addWidget(hint)
@@ -71,10 +92,10 @@ class DeletePage(QWidget):
         self.btn_load.setProperty("cssClass", "accent")
         self.btn_load.clicked.connect(self._load)
         act.addWidget(self.btn_load)
-        self.btn_del_sel = QPushButton("🗑️ 移入回收站(选中)")
+        self.btn_del_sel = QPushButton("🗑️ 归档当前列表选中项")
         self.btn_del_sel.clicked.connect(lambda: self._trash(selected_only=True))
         act.addWidget(self.btn_del_sel)
-        self.btn_del_all = QPushButton("🗑️ 移入回收站(全部)")
+        self.btn_del_all = QPushButton("🗑️ 归档当前列表全部项")
         self.btn_del_all.clicked.connect(lambda: self._trash(selected_only=False))
         act.addWidget(self.btn_del_all)
         self.btn_sel_all = QPushButton("✅ 全选")
@@ -86,6 +107,9 @@ class DeletePage(QWidget):
         self.btn_ai = QPushButton("🤖 AI 复核(前25条)")
         self.btn_ai.clicked.connect(self._ai_recheck)
         act.addWidget(self.btn_ai)
+        override = QPushButton("覆盖AI保留的选中项…")
+        override.clicked.connect(self._override_ai_keep)
+        act.addWidget(override)
         act.addStretch()
         self.progress = QProgressBar()
         self.progress.setFixedWidth(240)
@@ -97,7 +121,7 @@ class DeletePage(QWidget):
         self.summary.setWordWrap(True)
         root.addWidget(self.summary)
 
-        tabs = QTabWidget()
+        tabs = self.tabs = QTabWidget()
         # 清单表（含封面列：删除前可放大缩略图肉眼确认，防误删）
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["封面", "番号", "名称", "命中度", "理由", "大小"])
@@ -133,6 +157,7 @@ class DeletePage(QWidget):
         row.addStretch()
         ml.addLayout(row)
         self.manual_list = DragDropListWidget()
+        self.manual_list.paths_changed.connect(self._sync_manual_paths)
         self.manual_list.files_dropped.connect(self._add_paths)
         ml.addWidget(self.manual_list)
         tabs.addTab(manual, "手动添加")
@@ -162,21 +187,28 @@ class DeletePage(QWidget):
 
     # ── 加载清单 ──
     def _load(self) -> None:
+        if busy(self):
+            return
         if self.analyzer and self.analyzer.isRunning():
             return
+        self._refresh_labels()
         self.btn_load.setEnabled(False)
         self.log.clear()
         self.progress.setValue(0)
-        self.analyzer = AnalyzeWorker(
-            self.cfg, self.labels,
+        self.analyzer = analysis_worker(
+            self.cfg,
+            self.labels,
             exclude_keywords=self.cfg.exclude_path_keywords,
-            th_keep=self.cfg.score_th_keep / 100, th_delete=self.cfg.score_th_delete / 100)
+            th_keep=self.cfg.score_th_keep / 100,
+            th_delete=self.cfg.score_th_delete / 100,
+        )
         self.analyzer.log.connect(self.log.log)
         self.analyzer.progress.connect(self.progress.setValue)
         self.analyzer.finished.connect(self._on_loaded)
-        self.analyzer.start()
+        start_task(self, self.analyzer)
 
     def _on_loaded(self, data: dict) -> None:
+        accept_snapshot(self, data)
         self.btn_load.setEnabled(True)
         self.progress.setValue(100 if "results" in data else 0)
         if "error" in data:
@@ -192,29 +224,49 @@ class DeletePage(QWidget):
             if r.is_junk:
                 skipped += 1
                 continue
-            self._delete_rows.append({
-                "num": it.num or "", "name": it.name,
-                "hit": f"{r.s_content:.0%}", "reason": r.reason,
-                "size": it.size, "path": it.path, "cover": it.cover,
-                "actors": list(it.actors), "studios": list(it.studios),
-                "genres": list(it.genres),
-            })
+            self._delete_rows.append(
+                {
+                    "num": it.num or "",
+                    "name": it.name,
+                    "hit": f"{r.s_content:.0%}",
+                    "reason": r.reason,
+                    "size": it.size,
+                    "path": it.path,
+                    "cover": it.cover,
+                    "actors": list(it.actors),
+                    "studios": list(it.studios),
+                    "genres": list(it.genres),
+                    "item_id": it.id,
+                }
+            )
         self._render_table()
         self.log.log_success(f"建议删除 {len(self._delete_rows)} 条（排除附属文件 {skipped} 条）")
 
     # ── 手动添加 ──
+    def _sync_manual_paths(self, paths: list) -> None:
+        self._manual_paths = set(paths)
+
     def _add_files(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
-            self, "选择要删除(移入回收站)的文件",
-            "", "视频 (*.mp4 *.mkv *.avi *.ts *.mov *.wmv *.flv *.rmvb);;所有文件 (*.*)")
+            self,
+            "选择要删除(移入可恢复隔离区)的文件",
+            "",
+            "视频 (*.mp4 *.mkv *.avi *.ts *.mov *.wmv *.flv *.rmvb);;所有文件 (*.*)",
+        )
         self._add_paths(files)
 
     def _add_dir(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "选择要删除(移入回收站)的文件夹")
+        d = QFileDialog.getExistingDirectory(self, "选择要删除(移入可恢复隔离区)的文件夹")
         if d:
             self._add_paths([d])
 
     def _add_paths(self, paths: list) -> None:
+        if busy(self):
+            return
+        if import_media(self, paths, self._add_paths):
+            return
+        if paths:
+            self.tabs.setCurrentIndex(1)
         for p in paths:
             p = os.path.normpath(p)
             if os.path.exists(p):
@@ -224,25 +276,75 @@ class DeletePage(QWidget):
 
     # ── 删除执行 ──
     def _trash(self, selected_only: bool) -> None:
+        if busy(self, mutating=True):
+            return
+        targets = self._planned_targets(selected_only)
+        if not targets:
+            QMessageBox.information(
+                self, "没有待执行项", "当前范围没有可删除文件；AI建议保留项已排除。"
+            )
+            return
+        total = sum(size or 0 for _, size in targets)
+        preview = "\n".join(path for path, _ in targets)
+        if (
+            QMessageBox.question(
+                self,
+                "审核删除计划",
+                f"将可恢复归档 {len(targets)} 项（{_size_str(total)}）：\n\n{preview}\n\n确认执行以上同一清单？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        self.btn_del_sel.setEnabled(False)
+        self.btn_del_all.setEnabled(False)
+        self.progress.setValue(0)
+        self.trash_worker = TrashWorker(targets, journal=self.journal, reason="删除暂存")
+        self.trash_worker.log.connect(self.log.log)
+        self.trash_worker.progress.connect(self.progress.setValue)
+        self.trash_worker.finished.connect(self._on_trashed)
+        start_task(self, self.trash_worker)
+
+    def _planned_targets(self, selected_only: bool) -> list:
         targets: list = []
-        if selected_only:
-            # 关键修复：排序后 selectedItems().row() 与 _delete_rows 索引不再对应，
-            # 必须从单元格 Qt.UserRole 里取文件路径，而不是用行号去映射。
-            seen_rows: set[int] = set()
-            for it in self.table.selectedItems():
-                r = it.row()
-                if r in seen_rows:
-                    continue
-                seen_rows.add(r)
-                path = it.data(Qt.UserRole)
+        scope = self.tabs.currentIndex()
+        if scope == 2:
+            return []
+        if scope == 1:
+            paths = (
+                [item.data(Qt.UserRole) for item in self.manual_list.selectedItems()]
+                if selected_only
+                else self.manual_list.get_all_paths()
+            )
+            targets = [(path, None) for path in paths]
+        elif selected_only:
+            for row in {item.row() for item in self.table.selectedItems()}:
+                item = self.table.item(row, 0)
+                path = item.data(Qt.UserRole) if item else None
                 if path:
-                    # 从 _delete_rows 里按路径找回 size（用 path 兜底）
-                    size = next((d["size"] for d in self._delete_rows
-                                 if d["path"] == path), None)
+                    size = next(
+                        (entry["size"] for entry in self._delete_rows if entry["path"] == path),
+                        None,
+                    )
                     targets.append((path, size))
         else:
-            targets = [(d["path"], d["size"]) for d in self._delete_rows]
-            targets += [(p, None) for p in self._manual_paths]
+            targets = [(entry["path"], entry["size"]) for entry in self._delete_rows]
+        protected = {
+            row["path"]
+            for row in self._delete_rows
+            if row.get("num") in getattr(self, "_ai_keep_nums", set())
+        }
+        protected -= getattr(self, "_ai_override_paths", set())
+        from utils import scoring
+
+        fresh_labels = self.store.all()
+        protected |= {
+            row["path"]
+            for row in self._delete_rows
+            if fresh_labels.get(row.get("item_id")) in scoring.POSITIVE_LABELS
+        }
+        targets = [(path, size) for path, size in targets if path and path not in protected]
         # 去重
         seen = set()
         uniq = []
@@ -250,78 +352,126 @@ class DeletePage(QWidget):
             if p not in seen:
                 seen.add(p)
                 uniq.append((p, s))
-        if not uniq:
-            QMessageBox.information(self, "提示", "没有可删除的项")
-            return
+        return uniq
 
-        total = sum((s or 0) for _, s in uniq)
-        warn = (
-            f"⚠️ 此操作非常危险，可能导致不可逆的数据丢失！\n\n"
-            f"将把 {len(uniq)} 个文件/文件夹移入【回收站】\n"
-            f"预计释放约 {_size_str(total) or '未知'} 空间\n\n"
-            f"回收站中可恢复；本工具不会物理删除。\n确定继续？"
-        )
-        if QMessageBox.question(self, "确认移入回收站", warn) != QMessageBox.Yes:
+    def _override_ai_keep(self):
+        if busy(self):
             return
-
-        self.btn_del_sel.setEnabled(False)
-        self.btn_del_all.setEnabled(False)
-        self.progress.setValue(0)
-        self.trash_worker = TrashWorker(uniq, journal=self.journal, reason="删除暂存")
-        self.trash_worker.log.connect(self.log.log)
-        self.trash_worker.progress.connect(self.progress.setValue)
-        self.trash_worker.finished.connect(self._on_trashed)
-        self.trash_worker.start()
+        paths = {
+            item.data(Qt.UserRole) for item in self.table.selectedItems() if item.data(Qt.UserRole)
+        }
+        paths &= {
+            row["path"]
+            for row in self._delete_rows
+            if row.get("num") in getattr(self, "_ai_keep_nums", set())
+        }
+        if not paths:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "明确覆盖AI保留建议",
+                "\n".join(sorted(paths))
+                + "\n\n这些项将重新允许进入删除计划；之后仍需审核执行。确认覆盖？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            == QMessageBox.Yes
+        ):
+            self._ai_override_paths = getattr(self, "_ai_override_paths", set()) | paths
 
     def _on_trashed(self, stats: dict) -> None:
+        events.media_changed.emit([])
         self.btn_del_sel.setEnabled(True)
         self.btn_del_all.setEnabled(True)
-        self.progress.setValue(100)
-        # 从清单移除已移入回收站的（按存在性过滤）
+        self.progress.setValue(
+            0 if stats.get("error") or stats.get("fail") or stats.get("cancelled") else 100
+        )
+        if stats.get("error") or stats.get("fail"):
+            QMessageBox.warning(
+                self,
+                "归档部分失败",
+                str(stats.get("error") or stats.get("fails") or "部分文件归档失败，原文件已保留。"),
+            )
+        # 从清单移除已移入可恢复隔离区的（按存在性过滤）
         self._delete_rows = [d for d in self._delete_rows if os.path.exists(d["path"])]
         self._manual_paths = {p for p in self._manual_paths if os.path.exists(p)}
+        for idx in range(self.manual_list.count() - 1, -1, -1):
+            if not os.path.exists(self.manual_list.item(idx).data(Qt.UserRole)):
+                self.manual_list.takeItem(idx)
         self._render_table()
         self._refresh_journal()
 
     # ── AI 二次复核 ──
     def _select_all(self) -> None:
-        if self.table.rowCount():
+        if self.tabs.currentIndex() == 1:
+            self.manual_list.selectAll()
+        elif self.tabs.currentIndex() == 0:
             self.table.selectAll()
 
     def _ai_recheck(self) -> None:
+        if busy(self):
+            return
         from workers.ai import AIRecheckWorker
+
         if not self._delete_rows:
             QMessageBox.information(self, "提示", "请先加载建议删除清单")
             return
         if not self.cfg.ai_enabled:
-            QMessageBox.information(self, "未启用 AI",
-                                    "请在「设置」→「本地 AI 二次校验」启用并配置本地 LLM（如 Ollama）。")
+            QMessageBox.information(
+                self,
+                "未启用 AI",
+                "请在「设置」→「本地 AI 二次校验」启用并配置本地 LLM（如 Ollama）。",
+            )
             return
-        candidates = [{
-            "num": d["num"], "name": d["name"], "hit": d["hit"], "reason": d["reason"],
-            "actors": d.get("actors", []) or [], "studios": d.get("studios", []) or [],
-            "genres": d.get("genres", []) or [],
-        } for d in self._delete_rows]
+        candidates = [
+            {
+                "item_id": d.get("item_id") or d["path"],
+                "num": d["num"],
+                "name": d["name"],
+                "hit": d["hit"],
+                "reason": d["reason"],
+                "actors": d.get("actors", []) or [],
+                "studios": d.get("studios", []) or [],
+                "genres": d.get("genres", []) or [],
+            }
+            for d in self._delete_rows
+        ]
         self.btn_ai.setEnabled(False)
         self._ai_keep_nums = set()
+        self._ai_override_paths = set()
         self.log.log_info(f"🤖 正在请求本地 LLM 复核前 {min(len(candidates), 25)} 条（防误删）…")
-        self.ai_worker = AIRecheckWorker(candidates, self.cfg.ai_base_url,
-                                         self.cfg.ai_key, self.cfg.ai_model)
+        self.ai_worker = AIRecheckWorker(
+            candidates, self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model
+        )
         self.ai_worker.log.connect(self.log.log)
         self.ai_worker.result.connect(self._collect_keep)
+        self.ai_worker.verdict.connect(self._collect_keep_verdict)
         self.ai_worker.finished.connect(self._on_ai_recheck_done)
-        self.ai_worker.start()
+        start_task(self, self.ai_worker)
 
     def _collect_keep(self, text: str) -> None:
         import re as _re
-        for line in (_re.split(r"[\r\n]+", str(text)) if text else []):
+
+        for line in _re.split(r"[\r\n]+", str(text)) if text else []:
             m = _re.match(r"\s*([A-Za-z0-9\-]+)\s*[:：]\s*KEEP\b", line.strip().upper())
             if m:
                 num = line.strip().split(":")[0].strip().split("：")[0].strip()
                 self._ai_keep_nums.add(num)
 
-    def _on_ai_recheck_done(self) -> None:
+    def _collect_keep_verdict(self, data):
+        if data.get("verdict") == "KEEP":
+            item_id = data.get("item_id")
+            for row in self._delete_rows:
+                if (row.get("item_id") or row["path"]) == item_id:
+                    self._ai_keep_nums.add(row.get("num", ""))
+
+    def _on_ai_recheck_done(self, data=None) -> None:
         self.btn_ai.setEnabled(True)
+        if isinstance(data, dict) and data.get("error"):
+            self.log.log_error("AI 复核失败：" + str(data["error"]))
+            self._ai_keep_nums = set()
+            return
         keeps = [num for num in self._ai_keep_nums]
         if keeps:
             warning = QColor(theme.color("warning"))
@@ -337,11 +487,14 @@ class DeletePage(QWidget):
                                 it.setText((it.text() or "") + " ⚠AI建议保留")
             self.log.log_warning(
                 f"AI 误删过滤：{len(keeps)} 条被判为「可能有用/别删」已标黄——"
-                "删除前请在「删除选中」时避开这些行，或取消它们的勾选。")
+                "删除前请在「删除选中」时避开这些行，或取消它们的勾选。"
+            )
             QMessageBox.warning(
-                self, "AI 误删过滤提醒",
+                self,
+                "AI 误删过滤提醒",
                 f"AI 判定以下 {len(keeps)} 条建议删除作品可能其实有用(已标黄)：\n"
-                f"{', '.join(keeps[:20])}\n\n删除时请避开这些行，避免误删。")
+                f"{', '.join(keeps[:20])}\n\n删除时请避开这些行，避免误删。",
+            )
         else:
             self.log.log_success("AI 复核完成：未发现明显误删。")
 
@@ -381,7 +534,4 @@ class DeletePage(QWidget):
                 self.journal_tab.setItem(r, c, QTableWidgetItem(str(v)))
 
     def shutdown(self) -> None:
-        for w in (self.analyzer, self.trash_worker, getattr(self, "ai_worker", None)):
-            if w and w.isRunning():
-                w.stop() if hasattr(w, "stop") else None
-                w.wait(3000)
+        stop_page(self)

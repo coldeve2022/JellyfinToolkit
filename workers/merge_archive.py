@@ -1,4 +1,5 @@
 """合并替换回滚后台线程。"""
+
 from __future__ import annotations
 
 from PySide6.QtCore import QThread, Signal
@@ -53,8 +54,7 @@ class LegacyMergeRenameWorker(QThread):
     item_done = Signal(str, bool, str)  # path, ok, final_path/detail
     finished = Signal(dict)
 
-    def __init__(self, items: list, server: str = "", api_key: str = "",
-                 parent=None):
+    def __init__(self, items: list, server: str = "", api_key: str = "", parent=None):
         super().__init__(parent)
         self._items = list(items)
         self._server = server or ""
@@ -66,6 +66,7 @@ class LegacyMergeRenameWorker(QThread):
 
     def run(self) -> None:
         from utils import jellyfin_api
+
         ok = fail = 0
         fails = []
         total = len(self._items)
@@ -89,13 +90,14 @@ class LegacyMergeRenameWorker(QThread):
             if self._server and self._api_key:
                 self.log.emit("⏳ 请求 Jellyfin 全库元数据刷新…")
                 try:
-                    jf_ok, jf_msg = jellyfin_api.refresh_library(
-                        self._server, self._api_key)
+                    jf_ok, jf_msg = jellyfin_api.refresh_library(self._server, self._api_key)
                     self.log.emit(("✅ " if jf_ok else "⚠️ ") + jf_msg)
                 except Exception as e:  # noqa: BLE001
                     self.log.emit(f"⚠️ Jellyfin 刷新失败: {e}")
             elif self._server and not self._api_key:
-                self.log.emit("⚠️ 未配置 Jellyfin API Key，跳过自动同步，请在软件设置中填写后手动刷新。")
+                self.log.emit(
+                    "⚠️ 未配置 Jellyfin API Key，跳过自动同步，请在软件设置中填写后手动刷新。"
+                )
         finally:
             self.log.emit(f"旧合并整理完成：成功 {ok} / 失败 {fail}")
             self.finished.emit({"ok": ok, "fail": fail, "fails": fails})
@@ -117,6 +119,7 @@ class JellyfinRefreshWorker(QThread):
 
     def run(self) -> None:
         from utils import jellyfin_api
+
         if not self._server or not self._api_key:
             self.finished.emit({"ok": False, "message": "未配置 Jellyfin API Key"})
             return

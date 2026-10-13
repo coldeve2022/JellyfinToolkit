@@ -52,10 +52,7 @@ def update_nfo_censor_tags(path: str) -> tuple[bool, str]:
                 el.text = new
                 changed = True
 
-    existing = {
-        (el.text or "").strip()
-        for el in root.findall(".//tag") + root.findall(".//genre")
-    }
+    existing = {(el.text or "").strip() for el in root.findall(".//tag") + root.findall(".//genre")}
     if TARGET_TAG not in existing:
         el = ET.SubElement(root, "tag")
         el.text = TARGET_TAG
@@ -70,10 +67,14 @@ def update_nfo_censor_tags(path: str) -> tuple[bool, str]:
     try:
         os.close(fd)
         body = ET.tostring(root, encoding="unicode")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n')
-            f.write(body)
-        os.replace(str(tmp), str(p))
+        from utils.file_ops import safe_write_text
+
+        result = safe_write_text(
+            p, '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + body
+        )
+        if not result["ok"]:
+            raise OSError(result["error"])
+        tmp.unlink(missing_ok=True)
         return True, f"已更新 NFO: {p.name}"
     except Exception as e:  # noqa: BLE001
         try:
@@ -115,18 +116,129 @@ def nfo_new_filename(filename: str) -> Optional[str]:
 
 
 def safe_rename(old_path: str, new_path: str) -> None:
-    """跨平台安全重命名：目标存在时先删除（Windows os.rename 无法覆盖）。
+    """Recoverable rename; existing targets are conflicts, never silently replaced."""
+    from utils.file_ops import path_key, safe_replace
 
-    Args:
-        old_path: 源路径
-        new_path: 目标路径
+    if not Path(old_path).is_file():
+        raise FileNotFoundError(old_path)
+    if path_key(old_path) == path_key(new_path):
+        return
+    if Path(new_path).exists():
+        raise FileExistsError(new_path)
+    result = safe_replace(
+        old_path, new_path, move_source=True, allow_overwrite=False, kind="rename"
+    )
+    if not result["ok"]:
+        raise OSError(result["error"])
 
-    Raises:
-        OSError: 重命名失败
-    """
-    if os.path.exists(new_path) and new_path != old_path:
+
+def preview_nfo_fixes(directories, should_stop=None):
+    from utils.file_ops import file_hash
+
+    plan = []
+    seen = set()
+    for directory in directories:
+        for root, dirs, files in os.walk(directory):
+            dirs[:] = [
+                d
+                for d in dirs
+                if d not in {"quarantine", "media-backups", "_merged_originals"}
+                and not d.startswith(".toolkit-")
+            ]
+            for name in files:
+                if should_stop and should_stop():
+                    return plan
+                source = Path(root) / name
+                if source.is_symlink() or str(source) in seen:
+                    continue
+                seen.add(str(source))
+                target = source.with_name(nfo_new_filename(name) or name)
+                content = (
+                    read_text_any_encoding(str(source)) if source.suffix.lower() == ".nfo" else None
+                )
+                new_content = fix_nfo_content(content) if content is not None else None
+                if target == source and new_content is None:
+                    continue
+                plan.append(
+                    dict(
+                        source=str(source),
+                        target=str(target),
+                        old_hash=file_hash(source),
+                        new_content=new_content,
+                        status="conflict" if target != source and target.exists() else "ready",
+                    )
+                )
+    return plan
+
+
+def execute_nfo_fixes(plan, should_stop=None, log=print):
+    from utils.file_ops import OperationJournal, file_hash, safe_write_text
+
+    journal = OperationJournal()
+    stats = dict(fixed=0, renamed=0, fail=0, cancelled=False, fails=[], operations=[])
+    for row in plan:
+        if should_stop and should_stop():
+            stats["cancelled"] = True
+            break
+        completed = []
         try:
-            os.remove(new_path)
-        except OSError:
-            pass
-    os.replace(old_path, new_path)
+            if row["status"] != "ready":
+                raise FileExistsError("目标已存在，需要审阅冲突")
+            if file_hash(row["source"]) != row["old_hash"]:
+                raise OSError("文件已改变，请重新创建计划")
+            current = row["source"]
+            if current != row["target"]:
+                from utils.file_ops import safe_replace
+
+                result = safe_replace(
+                    current,
+                    row["target"],
+                    journal=journal,
+                    move_source=True,
+                    should_stop=should_stop,
+                    allow_overwrite=False,
+                    kind="nfo_rename",
+                    expected_source_hash=row["old_hash"],
+                )
+                stats["operations"].append(result)
+                if not result["ok"]:
+                    if result["state"] == "cancelled":
+                        stats["cancelled"] = True
+                    raise OSError(result["error"])
+                completed.append(result)
+                current = row["target"]
+                stats["renamed"] += 1
+            if row["new_content"] is not None:
+                result = safe_write_text(
+                    current,
+                    row["new_content"],
+                    journal=journal,
+                    should_stop=should_stop,
+                    expected_target_hash=row["old_hash"],
+                )
+                stats["operations"].append(result)
+                if not result["ok"]:
+                    if result["state"] == "cancelled":
+                        stats["cancelled"] = True
+                    raise OSError(result["error"])
+                completed.append(result)
+                stats["fixed"] += 1
+            log(f"已修复（可恢复）：{current}")
+        except (OSError, KeyError) as exc:
+            for operation in reversed(completed):
+                restored = journal.restore(operation["operation_id"])
+                if not restored["ok"]:
+                    log("恢复记录保留：" + restored["error"])
+            if completed and row["source"] != row["target"]:
+                stats["renamed"] -= 1
+            stats["fail"] += 1
+            stats["fails"].append((row.get("source", ""), str(exc)))
+            log(f"修复失败：{exc}")
+            if stats["cancelled"]:
+                break
+    return stats
+
+
+def fix_nfo_directory(directory, log=print, should_stop=None):
+    result = execute_nfo_fixes(preview_nfo_fixes([directory], should_stop), should_stop, log)
+    return result["fixed"], result["renamed"]

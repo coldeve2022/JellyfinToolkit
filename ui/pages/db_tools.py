@@ -1,13 +1,24 @@
 """数据库工具页面 — 跨库播放记录转移 + 数据库结构检查。"""
+
 from __future__ import annotations
+
+from ui.services import busy, start_task, stop_page
 
 import os
 import sqlite3
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QLineEdit, QTextEdit, QMessageBox, QGroupBox,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QProgressBar,
+    QLineEdit,
+    QTextEdit,
+    QMessageBox,
+    QGroupBox,
     QFileDialog,
 )
 from PySide6.QtCore import QThread, Signal
@@ -26,12 +37,15 @@ class DBInspectWorker(QThread):
         super().__init__(parent)
         self._db_path = db_path
         self._stopped = False
+        self._conn = None
 
     def stop(self) -> None:
         """请求中止：真实库表多、行数大，逐个 COUNT(*) 可能很慢，
         没有中止手段的话，关窗时线程停不下来会触发
         "QThread: Destroyed while thread is still running" 直接崩掉进程。"""
         self._stopped = True
+        if self._conn is not None:
+            self._conn.interrupt()
 
     def run(self) -> None:
         if not os.path.exists(self._db_path):
@@ -40,7 +54,8 @@ class DBInspectWorker(QThread):
 
         conn = None
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = sqlite3.connect(Path(self._db_path).resolve().as_uri() + "?mode=ro", uri=True)
+            self._conn = conn
             c = conn.cursor()
 
             lines = []
@@ -59,7 +74,7 @@ class DBInspectWorker(QThread):
                 cols = [(col[1], col[2]) for col in c.fetchall()]
                 col_str = ", ".join(f"{n}({t})" for n, t in cols[:10])
                 if len(cols) > 10:
-                    col_str += f" ... (+{len(cols)-10})"
+                    col_str += f" ... (+{len(cols) - 10})"
                 lines.append(f"  {table}: {count} 行 | {col_str}")
 
             # 检查 .ts 残留
@@ -106,6 +121,7 @@ class DBInspectWorker(QThread):
             if not self._stopped:
                 self.result.emit(f"❌ 检查异常: {e}")
         finally:
+            self._conn = None
             if conn is not None:
                 try:
                     conn.close()
@@ -128,6 +144,7 @@ class DBToolsPage(QWidget):
         if getattr(self.cfg, "jellyfin_db_path", ""):
             return self.cfg.jellyfin_db_path
         from utils import library_source
+
         try:
             kind, opts = library_source.resolve(self.cfg)
         except library_source.SourceUnavailable:
@@ -150,7 +167,8 @@ class DBToolsPage(QWidget):
         path_lay = QHBoxLayout(path_group)
         self.db_path_input = QLineEdit(self._initial_db_path())
         self.db_path_input.setPlaceholderText(
-            "跨库转移需要本地库文件；Emby 或服务器在别的机器时此功能不可用")
+            "迁移目标仅支持本地 jellyfin.db；其它schema可结构检查。远程API没有本地写权限。"
+        )
         path_lay.addWidget(self.db_path_input)
         browse_btn = QPushButton("浏览")
         browse_btn.clicked.connect(self._browse_db)
@@ -209,7 +227,9 @@ class DBToolsPage(QWidget):
 
     def _browse_db(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择 Jellyfin 数据库", "",
+            self,
+            "选择 Jellyfin 数据库",
+            "",
             "SQLite 数据库 (*.db);;所有文件 (*.*)",
         )
         if path:
@@ -221,9 +241,30 @@ class DBToolsPage(QWidget):
 
     # ── 跨库转移 ──
     def _start_transfer(self) -> None:
+        if busy(self, mutating=True):
+            return
+        selected = Path(self.db_path_input.text())
+        if selected.name.lower() != "jellyfin.db":
+            QMessageBox.warning(
+                self,
+                "不支持该迁移目标",
+                "此迁移器仅支持明确选择的本地 jellyfin.db；不会改为同目录其它库。",
+            )
+            return
         data_dir = self._get_data_dir()
         if not os.path.exists(os.path.join(data_dir, "jellyfin.db")):
             QMessageBox.warning(self, "错误", "所选路径下找不到 jellyfin.db！")
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "确认数据库迁移目标",
+                f"目标库：{selected}\n旧库备份从同目录选择匹配版本。请先停止服务器；迁移会保留快照。确认？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
             return
 
         self.btn_transfer.setEnabled(False)
@@ -235,12 +276,12 @@ class DBToolsPage(QWidget):
         self._transfer_worker.log.connect(self.trans_log.log)
         self._transfer_worker.progress.connect(self.trans_progress.setValue)
         self._transfer_worker.finished.connect(self._on_transfer_done)
-        self._transfer_worker.start()
+        start_task(self, self._transfer_worker)
 
     def _stop_transfer(self) -> None:
         if self._transfer_worker and self._transfer_worker.isRunning():
             self._transfer_worker.stop()
-            self.btn_transfer.setEnabled(True)
+            self.btn_transfer.setEnabled(False)
             self.btn_trans_stop.setEnabled(False)
 
     def _on_transfer_done(self, stats: dict) -> None:
@@ -250,20 +291,14 @@ class DBToolsPage(QWidget):
 
     # ── 数据库检查 ──
     def _inspect_db(self) -> None:
+        if busy(self):
+            return
         if self._inspector and self._inspector.isRunning():
             return  # 防重复点击启动多个线程
         db_path = self.db_path_input.text()
         self._inspector = DBInspectWorker(db_path)
         self._inspector.result.connect(self.inspect_output.setPlainText)
-        self._inspector.start()
+        start_task(self, self._inspector)
 
     def shutdown(self) -> None:
-        """应用退出时调用：停止所有后台线程。"""
-        if self._transfer_worker and self._transfer_worker.isRunning():
-            self._transfer_worker.stop()
-            self._transfer_worker.wait(3000)
-        if self._inspector and self._inspector.isRunning():
-            self._inspector.stop()
-            if not self._inspector.wait(5000):
-                # 还没停就再等一轮；绝不让线程活着离开，否则退出即崩
-                self._inspector.wait()
+        stop_page(self)

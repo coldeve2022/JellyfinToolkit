@@ -15,9 +15,9 @@
    ``Authorization: Bearer`` 只有 Jellyfin 10.9+ 认 —— 都不如前者通用。
 
 3. **数据库文件**
-   Jellyfin 10.9+ 用 ``jellyfin.db``（EF Core 架构：BaseItems / Peoples /
+   Jellyfin 10.11+ 用 ``jellyfin.db``（EF Core 架构：BaseItems / Peoples /
    BaseItemImageInfos / UserData）；
-   Jellyfin 10.8 及更早、以及 Emby 用 ``library.db``（TypedBaseItems 架构，
+   Jellyfin 10.10 及更早、以及 Emby 用 ``library.db``（TypedBaseItems 架构，
    元数据塞在 ``data`` 列的 JSON 里）。
    两者 SQL 不通用，必须按架构分派（见 ``utils/library.py``）。
 
@@ -33,6 +33,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -119,6 +120,19 @@ def normalize_server_url(server: str) -> str:
     if "://" not in s:
         s = "http://" + s
     return s
+
+
+def server_identity(server: str) -> str:
+    """Canonical scheme/host with a case-sensitive service path; omit user credentials."""
+    base = normalize_server_url(server)
+    if not base:
+        return ""
+    parts = urllib.parse.urlsplit(base)
+    host = parts.hostname or ""
+    host = f"[{host}]" if ":" in host else host
+    if parts.port is not None:
+        host += f":{parts.port}"
+    return urllib.parse.urlunsplit((parts.scheme.lower(), host, parts.path, parts.query, ""))
 
 
 def _request(url: str, api_key: str = "", timeout: int = 6) -> tuple[int, object]:

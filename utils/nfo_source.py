@@ -4,6 +4,7 @@
 - 仅用于"DB 无标签"的补全，防止刮削同步问题导致信息缺失。
 - 标准库 ElementTree，零依赖；容错解析失败。
 """
+
 from __future__ import annotations
 
 import os
@@ -34,8 +35,9 @@ def read_nfo_features(video_path: str):
     if not nfo:
         return [], [], []
     try:
-        with open(nfo, "r", encoding="utf-8", errors="ignore") as f:
-            txt = f.read()
+        txt = read_text_any_encoding(nfo)
+        if txt is None:
+            return [], [], []
         root = ET.fromstring(txt)
     except Exception:  # noqa: BLE001 - 解析失败不致命，返回空
         return [], [], []

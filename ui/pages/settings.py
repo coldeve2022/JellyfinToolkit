@@ -1,14 +1,34 @@
 """设置页面 — 配置管理。"""
 
+from __future__ import annotations
+from ui.services import busy, start_task, events
+
 import sys
+import json
+from ui.services import CallWorker
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QSpinBox, QTextEdit, QGroupBox, QMessageBox,
-    QFileDialog, QScrollArea, QComboBox, QCheckBox, QDoubleSpinBox,
-    QApplication,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QLineEdit,
+    QSpinBox,
+    QTextEdit,
+    QGroupBox,
+    QMessageBox,
+    QFileDialog,
+    QScrollArea,
+    QComboBox,
+    QCheckBox,
+    QDoubleSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
 )
+from PySide6.QtWidgets import QApplication as QApplication
 
 from config import ToolkitConfig
 from ui import theme
@@ -18,11 +38,13 @@ from utils import library_source, media_server
 class SettingsPage(QWidget):
     """全局配置页面。"""
 
-    theme_changed = Signal(str)   # 用户切换主题时发射
+    theme_changed = Signal(str)  # 用户切换主题时发射
+    config_changed = Signal()
 
     def __init__(self, cfg: ToolkitConfig, parent=None):
         super().__init__(parent)
         self.cfg = cfg
+        self._jf_plan = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -71,8 +93,7 @@ class SettingsPage(QWidget):
         self.combo_source = QComboBox()
         for value, label, tip in library_source.SOURCE_CHOICES:
             self.combo_source.addItem(label, value)
-            self.combo_source.setItemData(
-                self.combo_source.count() - 1, tip, Qt.ToolTipRole)
+            self.combo_source.setItemData(self.combo_source.count() - 1, tip, Qt.ToolTipRole)
         idx = self.combo_source.findData(library_source.normalize_source(self.cfg.library_source))
         if idx >= 0:
             self.combo_source.setCurrentIndex(idx)
@@ -96,8 +117,11 @@ class SettingsPage(QWidget):
         self.input_db.setPlaceholderText("留空 = 自动检测（Jellyfin / Emby 的常见安装位置都会扫）")
         r1.addWidget(self.input_db)
         b1 = QPushButton("浏览")
-        b1.clicked.connect(lambda: self._browse(
-            self.input_db, "选择 jellyfin.db / library.db", "SQLite (*.db);;*.*"))
+        b1.clicked.connect(
+            lambda: self._browse(
+                self.input_db, "选择 jellyfin.db / library.db", "SQLite (*.db);;*.*"
+            )
+        )
         r1.addWidget(b1)
         self.btn_detect_db = QPushButton("自动检测")
         self.btn_detect_db.clicked.connect(self._detect_library)
@@ -117,6 +141,53 @@ class SettingsPage(QWidget):
         self.lbl_source_now.setProperty("cssClass", "subtitle")
         self.lbl_source_now.setWordWrap(True)
         pg.addWidget(self.lbl_source_now)
+        user_row = QHBoxLayout()
+        user_row.addWidget(QLabel("观看用户："))
+        self.combo_user = QComboBox()
+        self.combo_user.addItem("未选择（多用户必须选择）", "")
+        if self.cfg.jellyfin_user_id:
+            self.combo_user.addItem(self.cfg.jellyfin_user_id, self.cfg.jellyfin_user_id)
+            self.combo_user.setCurrentIndex(1)
+        user_row.addWidget(self.combo_user, 1)
+        self.btn_users = QPushButton("读取服务器用户")
+        self.btn_users.clicked.connect(self._load_users)
+        user_row.addWidget(self.btn_users)
+        pg.addLayout(user_row)
+        mapping_label = QLabel("媒体路径映射：把服务器路径对应到本机目录，远程库才能处理本地文件。")
+        mapping_label.setWordWrap(True)
+        pg.addWidget(mapping_label)
+        self.mapping_table = QTableWidget(0, 2)
+        self.mapping_table.setHorizontalHeaderLabels(["服务器目录", "本机目录"])
+        self.mapping_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.mapping_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.mapping_table.setMaximumHeight(155)
+        self.mapping_table.verticalHeader().hide()
+        pg.addWidget(self.mapping_table)
+        mapping_actions = QHBoxLayout()
+        for text, callback in [
+            ("添加映射", self._add_mapping),
+            ("删除选中", self._remove_mappings),
+            ("选择本机目录…", self._choose_mapping_local),
+        ]:
+            button = QPushButton(text)
+            button.clicked.connect(callback)
+            mapping_actions.addWidget(button)
+        pg.addLayout(mapping_actions)
+        advanced = QPushButton("高级：JSON 导入 / 导出")
+        advanced.setCheckable(True)
+        pg.addWidget(advanced)
+        self.input_mappings = QTextEdit()
+        self.input_mappings.setMaximumHeight(100)
+        self.input_mappings.setPlaceholderText('[{"remote":"/media/movies","local":"D:/Media"}]')
+        self.input_mappings.setPlainText(
+            json.dumps(self.cfg.library_path_mappings, ensure_ascii=False, indent=2)
+        )
+        self.input_mappings.hide()
+        advanced.toggled.connect(self.input_mappings.setVisible)
+        pg.addWidget(self.input_mappings)
+        self.input_mappings.textChanged.connect(self._import_mapping_json)
+        self.mapping_table.itemChanged.connect(self._export_mapping_json)
+        self._import_mapping_json()
 
         r2b = QHBoxLayout()
         r2b.addWidget(QLabel("清理排除目录关键词(逗号分隔):"))
@@ -143,7 +214,9 @@ class SettingsPage(QWidget):
         th_row.addWidget(self.spin_th_delete)
         th_row.addStretch()
         th_box.addLayout(th_row)
-        th_hint = QLabel('命中度 = 作品内容特征命中你"喜欢史"的比例。阈值越激进，建议删除越多、待复核越少。')
+        th_hint = QLabel(
+            '命中度 = 作品内容特征命中你"喜欢史"的比例。阈值越激进，建议删除越多、待复核越少。'
+        )
         th_hint.setProperty("cssClass", "subtitle")
         th_box.addWidget(th_hint)
         layout.addWidget(th_group)
@@ -171,7 +244,8 @@ class SettingsPage(QWidget):
             "开着时：评分额外叠加「与你喜欢作品的整体相似(锚点) + 你常用题材组合的共现」，"
             "并自动用 AI 提炼的语义标签参与命中；你打标后的反馈立即重排融入画像。\n"
             "关掉后：评分退回仅基于基础命中度（不含上述增强）。\n"
-            "方便你开/关各跑一次对比优化前后的准确度。")
+            "方便你开/关各跑一次对比优化前后的准确度。"
+        )
         enh_hint.setProperty("cssClass", "subtitle")
         enh_hint.setWordWrap(True)
         enh_box.addWidget(enh_hint)
@@ -197,7 +271,8 @@ class SettingsPage(QWidget):
         self.btn_ai_detect = QPushButton("🔎 检测可用模型")
         self.btn_ai_detect.setToolTip(
             "读取 Ollama /api/tags，列出本机已拉取的模型；"
-            "优先选中默认模型（若已拉取），避免填了不存在的模型名导致 404。")
+            "优先选中默认模型（若已拉取），避免填了不存在的模型名导致 404。"
+        )
         self.btn_ai_detect.clicked.connect(self._detect_models)
         ar2.addWidget(self.btn_ai_detect)
         aib.addLayout(ar2)
@@ -206,7 +281,9 @@ class SettingsPage(QWidget):
         self.input_ai_key = QLineEdit(self.cfg.ai_key)
         ar3.addWidget(self.input_ai_key, 1)
         aib.addLayout(ar3)
-        ai_hint = QLabel('使用 OpenAI 兼容接口调用本地模型（如 Ollama: http://localhost:11434/v1）。未启用或连不上时，规则结果照常可用。')
+        ai_hint = QLabel(
+            "使用 OpenAI 兼容接口调用本地模型（如 Ollama: http://localhost:11434/v1）。未启用或连不上时，规则结果照常可用。"
+        )
         ai_hint.setProperty("cssClass", "subtitle")
         ai_hint.setWordWrap(True)
         aib.addWidget(ai_hint)
@@ -256,7 +333,8 @@ class SettingsPage(QWidget):
         r5b.addWidget(QLabel("ffmpeg 路径:"))
         self.input_ffmpeg_path = QLineEdit(self.cfg.merge_ffmpeg_path)
         self.input_ffmpeg_path.setPlaceholderText(
-            "留空 = 自动查找（程序目录 / PATH / 常见安装位置）")
+            "留空 = 自动查找（程序目录 / PATH / 常见安装位置）"
+        )
         r5b.addWidget(self.input_ffmpeg_path, 1)
         b_ff = QPushButton("浏览")
         b_ff.clicked.connect(self._browse_ffmpeg)
@@ -285,15 +363,18 @@ class SettingsPage(QWidget):
         self._fill_hw_combo(self.cfg.ffmpeg_hardware_accel)
         r6.addWidget(self.input_hw, 1)
         b_probe = QPushButton("检测本机能力")
-        b_probe.setToolTip("真跑一次编码/解码来确认本机确实支持，"
-                           "而不是看 ffmpeg 的编译期列表（那会把没有的显卡也列成支持）")
+        b_probe.setToolTip(
+            "真跑一次编码/解码来确认本机确实支持，"
+            "而不是看 ffmpeg 的编译期列表（那会把没有的显卡也列成支持）"
+        )
         b_probe.clicked.connect(self._probe_hardware)
         r6.addWidget(b_probe)
         ff_lay.addLayout(r6)
 
         hw_hint = QLabel(
             "「自动」= 启动时实测本机能力后再选用；也可手动指定。\n"
-            "手工填的编码器若在本机不可用，执行时会自动回退 libx264 并提示，不会直接失败。")
+            "手工填的编码器若在本机不可用，执行时会自动回退 libx264 并提示，不会直接失败。"
+        )
         hw_hint.setProperty("cssClass", "subtitle")
         hw_hint.setWordWrap(True)
         ff_lay.addWidget(hw_hint)
@@ -324,8 +405,14 @@ class SettingsPage(QWidget):
         mr1 = QHBoxLayout()
         mr1.addWidget(QLabel("输出容器:"))
         self.combo_merge_container = QComboBox()
-        for label, value in [("MP4（推荐）", "mp4"), ("MKV", "mkv"), ("TS", "ts"),
-                             ("MOV", "mov"), ("AVI", "avi"), ("WebM", "webm")]:
+        for label, value in [
+            ("MP4（推荐）", "mp4"),
+            ("MKV", "mkv"),
+            ("TS", "ts"),
+            ("MOV", "mov"),
+            ("AVI", "avi"),
+            ("WebM", "webm"),
+        ]:
             self.combo_merge_container.addItem(label, value)
         idx = self.combo_merge_container.findData(self.cfg.merge_output_container)
         if idx >= 0:
@@ -417,7 +504,8 @@ class SettingsPage(QWidget):
         ext_hint = QLabel(
             "这两项功能依赖你自己安装的第三方程序，本程序不附带也不下载它们。\n"
             "路径留空 = 自动查找常见位置；填 exe 的完整路径或它所在的文件夹都可以。\n"
-            "拿不准去哪儿下载，就去对应功能页点「怎么获取？」看指引。")
+            "拿不准去哪儿下载，就去对应功能页点「怎么获取？」看指引。"
+        )
         ext_hint.setWordWrap(True)
         ext_lay.addWidget(ext_hint)
 
@@ -427,8 +515,9 @@ class SettingsPage(QWidget):
         self.input_whisper_tool.setPlaceholderText("留空 = 自动查找")
         w1.addWidget(self.input_whisper_tool, 1)
         b1 = QPushButton("浏览")
-        b1.clicked.connect(lambda: self._browse(self.input_whisper_tool,
-                                                "选择 infer.exe", "可执行文件 (*.exe)"))
+        b1.clicked.connect(
+            lambda: self._browse(self.input_whisper_tool, "选择 infer.exe", "可执行文件 (*.exe)")
+        )
         w1.addWidget(b1)
         ext_lay.addLayout(w1)
 
@@ -438,8 +527,9 @@ class SettingsPage(QWidget):
         self.input_lada_cli.setPlaceholderText("留空 = 自动查找")
         w2.addWidget(self.input_lada_cli, 1)
         b2 = QPushButton("浏览")
-        b2.clicked.connect(lambda: self._browse(self.input_lada_cli,
-                                                "选择 lada-cli.exe", "可执行文件 (*.exe)"))
+        b2.clicked.connect(
+            lambda: self._browse(self.input_lada_cli, "选择 lada-cli.exe", "可执行文件 (*.exe)")
+        )
         w2.addWidget(b2)
         ext_lay.addLayout(w2)
 
@@ -449,7 +539,7 @@ class SettingsPage(QWidget):
         layout.addWidget(ext_group)
 
         # 服务器同步（Jellyfin / Emby 通用：清洗脏前缀标签 + 全库刷新）
-        jf_group = QGroupBox("服务器同步 · Jellyfin / Emby（清洗脏前缀标签 + 全库刷新）")
+        jf_group = QGroupBox("服务器同步与标签清洗（Jellyfin / Emby）")
         jf_lay = QVBoxLayout(jf_group)
         j1 = QHBoxLayout()
         j1.addWidget(QLabel("服务器地址:"))
@@ -460,7 +550,8 @@ class SettingsPage(QWidget):
         self.input_jf_key = QLineEdit(self.cfg.jellyfin_api_key)
         self.input_jf_key.setEchoMode(QLineEdit.Password)
         self.input_jf_key.setPlaceholderText(
-            "Jellyfin→控制台→高级→API 密钥；Emby→设置→高级→API 密钥")
+            "Jellyfin→控制台→高级→API 密钥；Emby→设置→高级→API 密钥"
+        )
         j1.addWidget(self.input_jf_key, 1)
         jf_lay.addLayout(j1)
         j2 = QHBoxLayout()
@@ -468,6 +559,10 @@ class SettingsPage(QWidget):
         self.btn_jf_test.clicked.connect(self._test_jellyfin)
         j2.addWidget(self.btn_jf_test)
         self.btn_jf_clean = QPushButton("🧹 清洗脏标签 + 全库刷新")
+        self.btn_jf_preview = QPushButton("只读扫描清洗计划")
+        self.btn_jf_preview.clicked.connect(self._scan_jellyfin)
+        j2.addWidget(self.btn_jf_preview)
+        self.btn_jf_clean.setEnabled(False)
         self.btn_jf_clean.setProperty("cssClass", "accent")
         self.btn_jf_clean.clicked.connect(self._clean_jellyfin)
         j2.addWidget(self.btn_jf_clean)
@@ -476,12 +571,18 @@ class SettingsPage(QWidget):
         j2.addWidget(self.btn_jf_restore)
         j2.addStretch()
         jf_lay.addLayout(j2)
+        self.jf_plan_box = QTextEdit()
+        self.jf_plan_box.setReadOnly(True)
+        self.jf_plan_box.setMaximumHeight(120)
+        self.jf_plan_box.setPlaceholderText("先扫描，再审阅将移除的标签/类型；确认后执行同一计划。")
+        jf_lay.addWidget(self.jf_plan_box)
         jf_hint = QLabel(
             "「发行:/片商:/系列:」等是刮削源写进 genres/tags 的脏 token，会以可筛选项出现在服务器侧栏。\n"
             "清洗前会自动把受影响条目的原始标签备份到 data/（jellyfin_clean_backup_*.json），"
             "后悔可点「恢复上次清洗备份」一键回滚。请先填地址/Key 并「保存设置」。\n"
             "Jellyfin 与 Emby 用同一套接口与同一个认证头，填好即可；"
-            "「数据来源」选「服务器 API」时，上面的库数据也从这里取。")
+            "「数据来源」选「服务器 API」时，上面的库数据也从这里取。"
+        )
         jf_hint.setWordWrap(True)
         jf_lay.addWidget(jf_hint)
         layout.addWidget(jf_group)
@@ -489,7 +590,7 @@ class SettingsPage(QWidget):
         # 保存按钮
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        save_btn = QPushButton("💾 保存设置")
+        save_btn = self.btn_save = QPushButton("💾 保存设置")
         save_btn.setProperty("cssClass", "accent")
         save_btn.clicked.connect(self._save)
         btn_row.addWidget(save_btn)
@@ -509,6 +610,12 @@ class SettingsPage(QWidget):
 
         self._refresh_source_hint()
         self._refresh_ext_tools()
+        for control in (self.input_db, self.input_jf_server, self.input_jf_key):
+            control.textChanged.connect(self._refresh_source_hint)
+        self.input_jf_server.textChanged.connect(self._invalidate_jf_plan)
+        self.input_jf_key.textChanged.connect(self._invalidate_jf_plan)
+        self.combo_server_kind.currentIndexChanged.connect(self._refresh_source_hint)
+        self.combo_user.currentIndexChanged.connect(self._refresh_source_hint)
 
     # ── 第三方工具 ──
     def _refresh_ext_tools(self) -> None:
@@ -520,7 +627,8 @@ class SettingsPage(QWidget):
         self.lbl_ext_tools.setText(
             "实际状态：\n"
             f"· 字幕识别：{'✅ ' + str(whisper) if whisper else '❌ 未找到（该页会给出下载指引）'}\n"
-            f"· 马赛克破解：{'✅ ' + str(lada) if lada else '❌ 未找到（该页会给出下载指引）'}")
+            f"· 马赛克破解：{'✅ ' + str(lada) if lada else '❌ 未找到（该页会给出下载指引）'}"
+        )
 
     def _refresh_ext_tools_safe(self) -> None:
         try:
@@ -551,7 +659,10 @@ class SettingsPage(QWidget):
             cfg.library_source = self.combo_source.currentData() or "auto"
             cfg.server_type = self.combo_server_kind.currentData() or "auto"
             cfg.jellyfin_db_path = self.input_db.text().strip()
-        except AttributeError:      # 界面尚未建完（构造早期）时直接用原配置
+            cfg.jellyfin_server = self.input_jf_server.text().strip()
+            cfg.jellyfin_api_key = self.input_jf_key.text().strip()
+            cfg.jellyfin_user_id = self.combo_user.currentData() or ""
+        except AttributeError:  # 界面尚未建完（构造早期）时直接用原配置
             pass
         return cfg
 
@@ -560,12 +671,14 @@ class SettingsPage(QWidget):
         found = media_server.find_local_databases()
         if not found:
             QMessageBox.information(
-                self, "未检测到库文件",
+                self,
+                "未检测到库文件",
                 "在本机的常见安装位置没有找到 jellyfin.db / library.db。\n\n"
                 "两种解决办法：\n"
                 "· 手动「浏览」到你的库文件所在目录；\n"
                 "· 或者把「数据来源」改成「服务器 API」，在下方「服务器同步」里填"
-                "服务器地址与 API Key——Emby 建议用这种方式。")
+                "服务器地址与 API Key——Emby 建议用这种方式。",
+            )
             return
         best = found[0]
         self.input_db.setText(str(best["path"]))
@@ -577,6 +690,33 @@ class SettingsPage(QWidget):
             lines += [f"· {r['path']}" for r in found[1:6]]
         lines.append("\n点「保存设置」后生效。")
         QMessageBox.information(self, "自动检测完成", "\n".join(lines))
+
+    def _load_users(self):
+        if busy(self):
+            return
+        from utils.library_api import list_users
+
+        server = self.input_jf_server.text().strip()
+        key = self.input_jf_key.text().strip()
+        if not server or not key:
+            QMessageBox.information(self, "填写连接", "请先填写服务器地址和API Key。")
+            return
+        self._users_worker = CallWorker(lambda cancel: list_users(server, key))
+        self._users_worker.result.connect(self._show_users)
+        self._users_worker.error.connect(
+            lambda message: QMessageBox.warning(self, "读取用户失败", message)
+        )
+        start_task(self, self._users_worker, "读取观看用户")
+
+    def _show_users(self, users):
+        selected = self.combo_user.currentData() or self.cfg.jellyfin_user_id
+        self.combo_user.clear()
+        self.combo_user.addItem("未选择（请选择观看账号）", "")
+        for user in users:
+            self.combo_user.addItem(
+                user["name"] + ("（管理员）" if user.get("is_admin") else ""), user["id"]
+            )
+        self.combo_user.setCurrentIndex(max(0, self.combo_user.findData(selected)))
 
     def _browse(self, target: QLineEdit, title: str, pattern: str = "") -> None:
         if pattern:
@@ -592,8 +732,7 @@ class SettingsPage(QWidget):
             target.setText(path)
 
     def _browse_ffmpeg(self) -> None:
-        pattern = ("可执行文件 (*.exe);;所有文件 (*)" if sys.platform == "win32"
-                   else "所有文件 (*)")
+        pattern = "可执行文件 (*.exe);;所有文件 (*)" if sys.platform == "win32" else "所有文件 (*)"
         path, _ = QFileDialog.getOpenFileName(self, "选择 ffmpeg 可执行文件", "", pattern)
         if path:
             self.input_ffmpeg_path.setText(path)
@@ -603,12 +742,14 @@ class SettingsPage(QWidget):
     def _apply_tool_config(self) -> None:
         """把界面上的 ffmpeg 路径注入探测层，让缓存失效并立即生效。"""
         from utils import tools
+
         tools.configure_tools(self.input_ffmpeg_path.text().strip(), force=True)
 
     # ── 工具状态 / 环境自检 ──
     def _refresh_tool_status(self) -> None:
         """显示**实际生效**的路径，而不是配置里写了什么。"""
         from utils import tools
+
         ffmpeg = tools.resolve_tool("ffmpeg", force=True)
         ffprobe = tools.resolve_tool("ffprobe", force=True)
         if ffmpeg:
@@ -618,24 +759,34 @@ class SettingsPage(QWidget):
             else:
                 text += "  |  ⚠️ 未找到 ffprobe（扫描分集参数/损坏检测会不可用）"
         else:
-            text = ("⚠️ 未找到 ffmpeg：视频修复 / 转码 / 分集合并的扫描将不可用。\n"
-                    "请点「浏览」指定 ffmpeg 可执行文件，或把 ffmpeg 放进程序目录/bin。")
+            text = (
+                "⚠️ 未找到 ffmpeg：视频修复 / 转码 / 分集合并的扫描将不可用。\n"
+                "请点「浏览」指定 ffmpeg 可执行文件，或把 ffmpeg 放进程序目录/bin。"
+            )
         self.lbl_tool_status.setText(text)
 
     def _fill_codec_combo(self, current: str) -> None:
         self.input_codec.clear()
         self.input_codec.addItem("自动（推荐：实测本机可用后再用）", "")
-        for name in ("h264_nvenc", "hevc_nvenc", "h264_qsv", "hevc_qsv",
-                     "h264_amf", "hevc_amf", "h264_videotoolbox", "h264_vaapi",
-                     "libx264", "libx265"):
+        for name in (
+            "h264_nvenc",
+            "hevc_nvenc",
+            "h264_qsv",
+            "hevc_qsv",
+            "h264_amf",
+            "hevc_amf",
+            "h264_videotoolbox",
+            "h264_vaapi",
+            "libx264",
+            "libx265",
+        ):
             self.input_codec.addItem(name, name)
         self._set_combo_value(self.input_codec, current or "")
 
     def _fill_hw_combo(self, current: str) -> None:
         self.input_hw.clear()
         self.input_hw.addItem("自动（推荐）", "")
-        for name in ("cuda", "d3d11va", "dxva2", "qsv", "amf", "vaapi",
-                     "videotoolbox", "none"):
+        for name in ("cuda", "d3d11va", "dxva2", "qsv", "amf", "vaapi", "videotoolbox", "none"):
             self.input_hw.addItem(name, name)
         self._set_combo_value(self.input_hw, current or "")
 
@@ -656,12 +807,15 @@ class SettingsPage(QWidget):
 
     def _autodetect_ffmpeg(self) -> None:
         from utils import tools
+
         found = tools.find_binary("ffmpeg")
         if not found:
             QMessageBox.warning(
-                self, "未找到 ffmpeg",
+                self,
+                "未找到 ffmpeg",
                 "程序目录、PATH 和常见安装位置里都没有找到 ffmpeg。\n"
-                "请点「浏览」手动指定，或先安装 FFmpeg。")
+                "请点「浏览」手动指定，或先安装 FFmpeg。",
+            )
             return
         self.input_ffmpeg_path.setText(found)
         self._apply_tool_config()
@@ -670,51 +824,34 @@ class SettingsPage(QWidget):
 
     def _probe_hardware(self) -> None:
         from utils import tools
+
         self._apply_tool_config()
         ffmpeg = tools.resolve_tool("ffmpeg", force=True)
         if not ffmpeg:
-            QMessageBox.warning(self, "未找到 ffmpeg", "无法探测硬件能力，请先指定 ffmpeg 路径。")
+            QMessageBox.warning(self, "未找到FFmpeg", "先指定FFmpeg路径。")
             return
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            tools.clear_probe_cache()
-            info = tools.probe_hardware(ffmpeg)
-        finally:
-            QApplication.restoreOverrideCursor()
-        encoders = info.get("encoders") or []
-        hwaccels = info.get("hwaccels") or []
-        self._fill_codec_combo(info.get("recommended_encoder", ""))
-        self._fill_hw_combo(info.get("recommended_hwaccel", ""))
-        QMessageBox.information(
-            self, "本机实测结果",
-            "以下结果由**真实编码/解码一次**得出，不是 ffmpeg 的编译期列表。\n\n"
-            f"可用编码器：{', '.join(encoders) if encoders else '仅 libx264'}\n"
-            f"可用硬解：{', '.join(a for a in hwaccels if a != 'none') or '无'}\n\n"
-            f"已为你选中：{info.get('recommended_encoder', '')} / "
-            f"{info.get('recommended_hwaccel', 'none')}\n（点「保存设置」生效）")
+        self._background(
+            "检测本机编码/解码能力",
+            lambda cancel: tools.probe_hardware(ffmpeg),
+            self._show_hardware,
+        )
 
     def _run_doctor(self) -> None:
         from config import doctor
-        info = doctor()
-        lines = [
-            f"数据目录: {info['data_dir']}",
-            f"配置文件: {info['config_file']}",
-            f"运行模式: {'打包(exe)' if info['frozen'] else '源码'}"
-            f"{' · 便携模式' if info['portable'] else ''}",
-            f"Python: {info['python']}",
-            f"ffmpeg: {info['ffmpeg'] or '未找到'}",
-            f"ffprobe: {info['ffprobe'] or '未找到'}",
-        ]
-        if info.get("encoders") is not None:
-            lines.append(f"实测可用编码器: {', '.join(info['encoders']) or '仅 libx264'}")
-            lines.append("实测可用硬解: "
-                         + (", ".join(a for a in info["hwaccels"] if a != "none") or "无"))
-        QMessageBox.information(self, "环境自检", "\n".join(lines))
+
+        self._background(
+            "环境自检",
+            lambda cancel: doctor(),
+            lambda info: QMessageBox.information(
+                self, "环境自检", "\n".join(f"{key}: {value}" for key, value in info.items())
+            ),
+        )
 
     def _refresh_backup_hint(self) -> None:
         """提示备份文件**实际**会落到哪里（不再写死"H 盘"）。"""
         from utils.merge_archive import resolve_backup_root
         from types import SimpleNamespace
+
         probe = SimpleNamespace(
             merge_backup_root=self.input_merge_backup.text().strip(),
             merge_original_subfolder=self.input_merge_subfolder.text().strip()
@@ -728,7 +865,8 @@ class SettingsPage(QWidget):
         typed = self.input_merge_backup.text().strip()
         if not typed:
             self.lbl_backup_hint.setText(
-                f"实际备份位置：{actual}（未指定备份盘时自动落在数据目录下，任何机器都能用）")
+                f"实际备份位置：{actual}（未指定备份盘时自动落在数据目录下，任何机器都能用）"
+            )
         else:
             self.lbl_backup_hint.setText(f"实际备份位置：{actual}")
 
@@ -740,45 +878,84 @@ class SettingsPage(QWidget):
 
     # ── AI 模型检测 ──
     def _detect_models(self) -> None:
-        """读取 Ollama /api/tags，列出本机已拉取的模型并选中一个可用的。"""
-        import json
         import urllib.request
-        from config import DEFAULT_CONFIG
 
-        fallback = str(DEFAULT_CONFIG.get("ai_model") or "")
-        url = self.input_ai_url.text().strip().rstrip("/")
-        base = url[:-3] if url.endswith("/v1") else url
-        try:
-            with urllib.request.urlopen(f"{base}/api/tags", timeout=8) as r:
-                data = json.loads(r.read().decode("utf-8", errors="ignore"))
-            names = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
-            if not names:
-                QMessageBox.information(
-                    self, "检测结果",
-                    "服务在线，但本机还没有拉取任何模型。\n"
-                    f"请先执行: ollama pull {fallback or '<模型名>'}")
-                return
-            # 优先沿用默认模型（若本机已拉取），否则用列表里第一个可用的
-            pick = fallback if fallback in names else names[0]
-            self.input_ai_model.setText(pick)
-            QMessageBox.information(
-                self, "检测到模型",
-                f"本机已拉取模型({len(names)})：{', '.join(names)}\n\n"
-                f"已为您选中: {pick}\n（点「保存设置」生效）")
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "检测失败",
-                                f"无法访问 {base}/api/tags：{str(e)[:80]}")
+        base = self.input_ai_url.text().strip().rstrip("/")
+        base = base[:-3] if base.endswith("/v1") else base
+
+        def detect(cancel):
+            with urllib.request.urlopen(base + "/api/tags", timeout=8) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            return [row["name"] for row in data.get("models", []) if row.get("name")]
+
+        self._background("读取本地AI模型", detect, self._show_models)
 
     # ── Jellyfin 同步 ──
+    def _invalidate_jf_plan(self, *args):
+        self._jf_plan = None
+        self.btn_jf_clean.setEnabled(False)
+
+    def _scan_jellyfin(self):
+        if busy(self):
+            return
+        from workers.jellyfin_sync import JellyfinScanWorker
+
+        server, key = self.input_jf_server.text().strip(), self.input_jf_key.text().strip()
+        if not server or not key:
+            QMessageBox.information(self, "填写连接", "先填写服务器地址和API Key。")
+            return
+        self._jf_scan = JellyfinScanWorker(server, key)
+        self._jf_scan.finished.connect(self._show_jf_plan)
+        start_task(self, self._jf_scan, "扫描服务器标签清洗计划")
+
+    def _show_jf_plan(self, data):
+        if data.get("error") or data.get("cancelled"):
+            self._invalidate_jf_plan()
+            self.jf_plan_box.setPlainText(str(data.get("error") or "已取消"))
+            return
+        self._jf_plan = data.get("plan") or []
+        self.jf_plan_box.setPlainText(
+            "\n".join(
+                str(row.get("name") or row.get("item_id"))
+                + " | "
+                + str(row.get("path", ""))
+                + "\n移除："
+                + ", ".join(str(token) for token in row.get("removed", []))
+                for row in self._jf_plan
+            )
+            or "未发现需要清洗的标签。"
+        )
+        self.btn_jf_clean.setEnabled(bool(self._jf_plan))
+
     def _test_jellyfin(self) -> None:
         from utils import jellyfin_api
-        ok, msg = jellyfin_api.ping(
-            self.input_jf_server.text().strip(), self.input_jf_key.text().strip())
-        QMessageBox.information(
-            self, "Jellyfin 测试",
-            (f"✅ 连接成功：{msg}" if ok else f"❌ 连接失败：{msg}"))
+
+        server, key = self.input_jf_server.text().strip(), self.input_jf_key.text().strip()
+        self._background(
+            "测试媒体服务器连接",
+            lambda cancel: jellyfin_api.ping(server, key),
+            lambda result: QMessageBox.information(
+                self, "连接测试", ("连接成功：" if result[0] else "连接失败：") + str(result[1])
+            ),
+        )
 
     def _clean_jellyfin(self) -> None:
+        if busy(self, mutating=True):
+            return
+        if not self._jf_plan:
+            QMessageBox.information(self, "先审阅清洗计划", "先执行只读扫描，确认具体移除项。")
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "确认服务器清洗计划",
+                self.jf_plan_box.toPlainText() + "\n\n确认执行以上计划？原始标签会备份。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
         server = self.input_jf_server.text().strip()
         key = self.input_jf_key.text().strip()
         if not server or not key:
@@ -789,14 +966,17 @@ class SettingsPage(QWidget):
         self.btn_jf_clean.setEnabled(False)
         self._jf_msgs = []
         from workers.jellyfin_sync import JellyfinCleanWorker
-        self._jf_worker = JellyfinCleanWorker(server, key)
+
+        self._jf_worker = JellyfinCleanWorker(server, key, dirty_plan=list(self._jf_plan))
         self._jf_worker.log.connect(self._jf_msgs.append)
         self._jf_worker.finished.connect(self._on_jf_done)
-        self._jf_worker.start()
-        QMessageBox.information(self, "开始清洗", "正在后台清洗脏标签并触发全库刷新，完成后会提示。")
+        start_task(self, self._jf_worker)
+        QMessageBox.information(
+            self, "开始清洗", "正在后台清洗脏标签并触发全库刷新，完成后会提示。"
+        )
 
     def _on_jf_done(self, data: dict) -> None:
-        self.btn_jf_clean.setEnabled(True)
+        self._invalidate_jf_plan()
         if data.get("error"):
             QMessageBox.warning(self, "同步失败", data["error"])
             return
@@ -806,26 +986,33 @@ class SettingsPage(QWidget):
         msgs = "\n".join(getattr(self, "_jf_msgs", []))
         backup = data.get("backup") or ""
         QMessageBox.information(
-            self, "同步完成",
+            self,
+            "同步完成",
             f"扫描 {data['scanned']} 条，清洗 {data['cleaned']} 条。\n"
-            f"原始标签已备份：\n{backup}\n\n可用「恢复上次清洗备份」回滚。\n\n{msgs}")
+            f"原始标签已备份：\n{backup}\n\n可用「恢复上次清洗备份」回滚。\n\n{msgs}",
+        )
 
     def _restore_jellyfin(self) -> None:
+        if busy(self, mutating=True):
+            return
         server = self.input_jf_server.text().strip()
         key = self.input_jf_key.text().strip()
         if not server or not key:
             QMessageBox.warning(self, "未配置", "请先填写服务器地址与 API Key。")
             return
         from workers.jellyfin_sync import JellyfinRestoreWorker, latest_backup_path
-        backup = latest_backup_path()
+
+        backup = latest_backup_path(server)
         if not backup:
-            QMessageBox.warning(self, "无备份", "data/ 下没有找到清洗备份（jellyfin_clean_backup_*.json）。")
+            QMessageBox.warning(
+                self, "无备份", "data/ 下没有找到清洗备份（jellyfin_clean_backup_*.json）。"
+            )
             return
         if getattr(self, "_jf_restore", None) and self._jf_restore.isRunning():
             return
         ans = QMessageBox.question(
-            self, "确认恢复",
-            f"将从备份恢复以下文件里的原始标签：\n{backup}\n\n确定恢复吗？")
+            self, "确认恢复", f"将从备份恢复以下文件里的原始标签：\n{backup}\n\n确定恢复吗？"
+        )
         if ans != QMessageBox.Yes:
             return
         self.btn_jf_restore.setEnabled(False)
@@ -833,7 +1020,7 @@ class SettingsPage(QWidget):
         self._jf_restore = JellyfinRestoreWorker(server, key, backup)
         self._jf_restore.log.connect(self._jf_msgs.append)
         self._jf_restore.finished.connect(self._on_jf_restore_done)
-        self._jf_restore.start()
+        start_task(self, self._jf_restore)
 
     def _on_jf_restore_done(self, data: dict) -> None:
         self.btn_jf_restore.setEnabled(True)
@@ -842,9 +1029,30 @@ class SettingsPage(QWidget):
             return
         msgs = "\n".join(getattr(self, "_jf_msgs", []))
         QMessageBox.information(
-            self, "恢复完成", f"已恢复 {data['restored']} 条原始标签。\n\n{msgs}")
+            self, "恢复完成", f"已恢复 {data['restored']} 条原始标签。\n\n{msgs}"
+        )
 
     def _save(self) -> None:
+        if busy(self):
+            return
+        try:
+            mappings = json.loads(self.input_mappings.toPlainText() or "[]")
+            if not isinstance(mappings, list) or any(
+                not isinstance(row, dict) or not row.get("remote") or not row.get("local")
+                for row in mappings
+            ):
+                raise ValueError("映射必须为remote/local非空的数组")
+            if self.spin_th_delete.value() >= self.spin_th_keep.value():
+                raise ValueError("建议删除阈值必须低于可能喜欢阈值")
+        except (ValueError, TypeError) as exc:
+            QMessageBox.warning(self, "设置未保存", str(exc))
+            return
+        import copy
+
+        previous_config = copy.deepcopy(vars(self.cfg))
+        self.cfg.jellyfin_user_id = self.combo_user.currentData() or ""
+        self.cfg.library_path_mappings = mappings
+        self.cfg.merge_ffmpeg_path = self.input_ffmpeg_path.text().strip()
         self.cfg.library_source = self.combo_source.currentData() or "auto"
         self.cfg.server_type = self.combo_server_kind.currentData() or "auto"
         self.cfg.jellyfin_db_path = self.input_db.text()
@@ -876,7 +1084,9 @@ class SettingsPage(QWidget):
         self.cfg.merge_backup_root = self.input_merge_backup.text().strip()
         self.cfg.whisper_tool_path = self.input_whisper_tool.text().strip()
         self.cfg.lada_cli_path = self.input_lada_cli.text().strip()
-        self.cfg.merge_original_subfolder = self.input_merge_subfolder.text().strip() or "_merged_originals"
+        self.cfg.merge_original_subfolder = (
+            self.input_merge_subfolder.text().strip() or "_merged_originals"
+        )
         self.cfg.merge_rename_to_number = self.check_merge_rename.isChecked()
         self.cfg.merge_max_parts = self.spin_merge_max_parts.value()
         self.cfg.merge_min_part_seconds = self.spin_merge_min_part.value()
@@ -900,15 +1110,28 @@ class SettingsPage(QWidget):
         if selected_theme:
             self.cfg.theme = selected_theme
 
-        self.cfg.save()
+        try:
+            self.cfg.save()
+        except (OSError, ValueError) as exc:
+            vars(self.cfg).clear()
+            vars(self.cfg).update(previous_config)
+            QMessageBox.warning(self, "设置未保存", str(exc))
+            return
         # 保存后立刻让新的 ffmpeg 路径生效（不必重启）
         self._apply_tool_config()
         self._refresh_tool_status()
         self._refresh_backup_hint()
+        self.config_changed.emit()
+        events.config_changed.emit()
         QMessageBox.information(self, "成功", "设置已保存！")
 
     def _reset(self) -> None:
+        if busy(self):
+            return
         from config import DEFAULT_CONFIG
+
+        self.combo_user.setCurrentIndex(0)
+        self.input_mappings.setPlainText("[]")
         theme_idx = self.combo_theme.findData(DEFAULT_CONFIG["theme"])
         if theme_idx >= 0:
             self.combo_theme.setCurrentIndex(theme_idx)
@@ -935,12 +1158,14 @@ class SettingsPage(QWidget):
         self.input_subs.setText(", ".join(DEFAULT_CONFIG["subtitle_extensions"]))
         self.input_vids.setText(", ".join(DEFAULT_CONFIG["video_extensions"]))
         self.spin_min.setValue(DEFAULT_CONFIG["min_video_size_mb"])
-        self.input_codec.setText(DEFAULT_CONFIG["ffmpeg_gpu_codec"])
-        self.input_hw.setText(DEFAULT_CONFIG["ffmpeg_hardware_accel"])
+        self._set_combo_value(self.input_codec, DEFAULT_CONFIG["ffmpeg_gpu_codec"])
+        self._set_combo_value(self.input_hw, DEFAULT_CONFIG["ffmpeg_hardware_accel"])
+        self.input_ffmpeg_path.setText(DEFAULT_CONFIG["merge_ffmpeg_path"])
         self.spin_crf.setValue(DEFAULT_CONFIG["transcode_crf"])
         self.input_marker.setText(DEFAULT_CONFIG["restored_suffix_marker"])
         self.combo_merge_container.setCurrentIndex(
-            self.combo_merge_container.findData(DEFAULT_CONFIG["merge_output_container"]))
+            self.combo_merge_container.findData(DEFAULT_CONFIG["merge_output_container"])
+        )
         self.input_merge_backup.setText(DEFAULT_CONFIG["merge_backup_root"])
         self.input_whisper_tool.setText(DEFAULT_CONFIG["whisper_tool_path"])
         self.input_lada_cli.setText(DEFAULT_CONFIG["lada_cli_path"])
@@ -954,4 +1179,102 @@ class SettingsPage(QWidget):
         self.spin_merge_dup_sim.setValue(DEFAULT_CONFIG["merge_dup_sim_threshold"])
         self.input_jf_server.setText(DEFAULT_CONFIG["jellyfin_server"])
         self.input_jf_key.setText(DEFAULT_CONFIG["jellyfin_api_key"])
-        QMessageBox.information(self, "提示", '已恢复默认设置，点击「保存」生效。')
+        QMessageBox.information(self, "提示", "已恢复默认设置，点击「保存」生效。")
+
+    def _background(self, title, function, result):
+        if busy(self):
+            return
+        self._service_worker = CallWorker(function)
+        self._service_worker.result.connect(result)
+        self._service_worker.error.connect(
+            lambda message: QMessageBox.warning(self, title + "失败", message)
+        )
+        start_task(self, self._service_worker, title)
+
+    def _show_hardware(self, info):
+        self._fill_codec_combo(info.get("recommended_encoder", ""))
+        self._fill_hw_combo(info.get("recommended_hwaccel", ""))
+        QMessageBox.information(
+            self,
+            "本机实测结果",
+            "可用编码器："
+            + ", ".join(info.get("encoders", []))
+            + "\n可用硬解："
+            + ", ".join(info.get("hwaccels", []))
+            + "\n点击保存设置后生效。",
+        )
+
+    def _show_models(self, names):
+        if not names:
+            QMessageBox.information(self, "没有模型", "服务在线，但尚未安装模型。")
+            return
+        current = self.input_ai_model.text()
+        self.input_ai_model.setText(current if current in names else names[0])
+        QMessageBox.information(self, "可用模型", ", ".join(names))
+
+    def shutdown(self):
+        from ui.services import stop_page
+
+        stop_page(self)
+
+    def _mapping_rows(self):
+        return [
+            {
+                "remote": self.mapping_table.item(row, 0).text().strip(),
+                "local": self.mapping_table.item(row, 1).text().strip(),
+            }
+            for row in range(self.mapping_table.rowCount())
+        ]
+
+    def _add_mapping(self):
+        row = self.mapping_table.rowCount()
+        self.mapping_table.blockSignals(True)
+        self.mapping_table.insertRow(row)
+        for col in (0, 1):
+            self.mapping_table.setItem(row, col, QTableWidgetItem(""))
+        self.mapping_table.blockSignals(False)
+        self.mapping_table.selectRow(row)
+        self._export_mapping_json()
+
+    def _remove_mappings(self):
+        for row in sorted(
+            {item.row() for item in self.mapping_table.selectedItems()}, reverse=True
+        ):
+            self.mapping_table.removeRow(row)
+        self._export_mapping_json()
+
+    def _choose_mapping_local(self):
+        row = self.mapping_table.currentRow()
+        if row < 0:
+            self._add_mapping()
+            row = self.mapping_table.currentRow()
+        current = self.mapping_table.item(row, 1).text()
+        path = QFileDialog.getExistingDirectory(self, "选择本机挂载目录", current)
+        if path:
+            self.mapping_table.item(row, 1).setText(path)
+
+    def _export_mapping_json(self, *args):
+        self.input_mappings.blockSignals(True)
+        self.input_mappings.setPlainText(
+            json.dumps(self._mapping_rows(), ensure_ascii=False, indent=2)
+        )
+        self.input_mappings.blockSignals(False)
+
+    def _import_mapping_json(self):
+        try:
+            rows = json.loads(self.input_mappings.toPlainText() or "[]")
+            if not isinstance(rows, list) or any(
+                not isinstance(row, dict)
+                or not isinstance(row.get("remote"), str)
+                or not isinstance(row.get("local"), str)
+                for row in rows
+            ):
+                return
+        except ValueError:
+            return
+        self.mapping_table.blockSignals(True)
+        self.mapping_table.setRowCount(len(rows))
+        for row, mapping in enumerate(rows):
+            for col, key in enumerate(("remote", "local")):
+                self.mapping_table.setItem(row, col, QTableWidgetItem(mapping[key]))
+        self.mapping_table.blockSignals(False)

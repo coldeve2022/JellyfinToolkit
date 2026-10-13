@@ -17,6 +17,10 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+import os
+from pathlib import Path
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,7 +61,8 @@ def _req(method: str, url: str, api_key: str, body=None,
 
 
 def _base(server: str) -> str:
-    return server.rstrip("/")
+    from utils.media_server import normalize_server_url
+    return normalize_server_url(server)
 
 
 def _get_user_id(server: str, api_key: str) -> Optional[str]:
@@ -100,11 +105,14 @@ def ping(server: str, api_key: str) -> tuple[bool, str]:
     return False, probe.error
 
 
-def _iter_items(server: str, api_key: str, log: Optional[Callable[[str], None]] = None):
+def _iter_items(server: str, api_key: str, log: Optional[Callable[[str], None]] = None,
+                should_stop=None):
     """分页遍历全部 Movie/Video 条目，产出 item dict（带 Path/Tags/Genres）。"""
     start = 0
     step = 500
     while True:
+        if should_stop and should_stop():
+            return
         params = urllib.parse.urlencode({
             "recursive": "true", "includeItemTypes": "Movie,Video",
             "startIndex": str(start), "limit": str(step),
@@ -147,8 +155,12 @@ def get_clean_tags_genres(item: dict) -> tuple[list[str], list[str], list[str]]:
 
 
 def update_tags_genres(server: str, api_key: str, item_id: str,
-                       tags: list[str], genres: list[str]) -> bool:
+                       tags: list[str], genres: list[str], *, mode="replace",
+                       removed_tags=None, removed_genres=None, before_write=None,
+                       should_stop=None) -> bool:
     """更新条目 Tags/Genres（POST /Items/{id}，剔除复杂只读字段）。"""
+    if should_stop and should_stop():
+        return False
     uid = _get_user_id(server, api_key)
     if not uid:
         return False
@@ -161,25 +173,39 @@ def update_tags_genres(server: str, api_key: str, item_id: str,
         path = item.get("Path") or ""
         name = path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] or "Item"
     item["Name"] = name
-    item["Tags"] = list(tags)
-    item["Genres"] = list(genres)
+    old_tags, old_genres = list(item.get("Tags") or []), list(item.get("Genres") or [])
+    if mode == "clean":
+        item["Tags"] = [v for v in old_tags if str(v).strip() not in set(removed_tags or [])]
+        item["Genres"] = [v for v in old_genres if str(v).strip() not in set(removed_genres or [])]
+    elif mode == "restore":
+        item["Tags"] = old_tags + [v for v in (removed_tags or []) if v not in old_tags]
+        item["Genres"] = old_genres + [v for v in (removed_genres or []) if v not in old_genres]
+    else:
+        item["Tags"] = list(tags)
+        item["Genres"] = list(genres)
+    if before_write:
+        before_write(old_tags, old_genres, item["Tags"], item["Genres"])
     for k in DROP_FIELDS:
         item.pop(k, None)
+    if should_stop and should_stop():
+        return False
     code2, _ = _req("POST", f"{_base(server)}/Items/{item_id}", api_key,
                     body=item, timeout=25)
     return code2 in (200, 204)
 
 
 def scan_dirty(server: str, api_key: str,
-               log: Optional[Callable[[str], None]] = None) -> list[dict]:
+               log: Optional[Callable[[str], None]] = None, should_stop=None) -> list[dict]:
     """只读扫描全库：找出含脏前缀标签的条目，计算清洗方案。不修改任何数据。
 
     Returns: [{item_id, name, path, before_tags, before_genres,
                after_tags, after_genres, removed}]
     """
     dirty: list[dict] = []
-    for items in _iter_items(server, api_key, log):
+    for items in _iter_items(server, api_key, log, should_stop=should_stop):
         for it in items:
+            if should_stop and should_stop():
+                return dirty
             tags, genres, removed = get_clean_tags_genres(it)
             if not removed:
                 continue
@@ -197,52 +223,158 @@ def scan_dirty(server: str, api_key: str,
 
 
 def apply_clean(server: str, api_key: str, dirty: list[dict],
-                log: Optional[Callable[[str], None]] = None) -> int:
+                log: Optional[Callable[[str], None]] = None, should_stop=None,
+                backup_path=None) -> int:
     """应用清洗方案（逐条 POST 更新 Tags/Genres）。返回成功条数。"""
     ok = 0
     for it in dirty:
+        if should_stop and should_stop():
+            break
+        removed_tags = [str(v).strip() for v in it["before_tags"]
+                        if any(str(v).strip().startswith(p) for p in DIRTY_PREFIXES)]
+        removed_genres = [str(v).strip() for v in it["before_genres"]
+                          if any(str(v).strip().startswith(p) for p in DIRTY_PREFIXES)]
+        def checkpoint(before_tags, before_genres, after_tags, after_genres, current=it):
+            current.update(before_tags=before_tags, before_genres=before_genres,
+                           after_tags=after_tags, after_genres=after_genres, status="prepared")
+            if backup_path:
+                save_dirty_backup(dirty, backup_path, server=server)
         if update_tags_genres(server, api_key, it["item_id"],
-                              it["after_tags"], it["after_genres"]):
+                               it["after_tags"], it["after_genres"], mode="clean",
+                               removed_tags=removed_tags, removed_genres=removed_genres,
+                               before_write=checkpoint, should_stop=should_stop):
+            it["status"] = "applied"
             ok += 1
             if log:
                 log(f"  已清洗 {it['name'][:30] or it['path'][:30]}  <- 移除 "
                     f"{'、'.join(it['removed'][:3])}")
-        elif log:
-            log(f"  ⚠️ 更新失败: {(it['name'] or it['path'])[:30]}")
+        else:
+            it["status"] = "uncertain" if it.get("status") == "prepared" else "failed"
+            if log:
+                log(f"  ⚠️ 更新失败: {(it['name'] or it['path'])[:30]}")
+        if backup_path:
+            save_dirty_backup(dirty, backup_path, server=server)
     return ok
 
 
-def save_dirty_backup(dirty: list[dict], backup_path: str) -> int:
+def save_dirty_backup(dirty: list[dict], backup_path: str, server: str = "") -> int:
     """把将要清洗的原始数据落盘为备份 JSON（供回滚）。返回条数。"""
+    from utils.media_server import server_identity
     payload = {
         "created_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
         "count": len(dirty),
         "items": dirty,
+        "server": server_identity(server),
     }
-    with open(backup_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    target = Path(backup_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     return len(dirty)
 
 
-def load_dirty_backup(backup_path: str) -> list[dict]:
+def load_dirty_backup(backup_path: str, server: str = "") -> list[dict]:
     """读取清洗备份 JSON，返回条目列表。"""
+    from utils.media_server import server_identity
     with open(backup_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return data.get("items", [])
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        raise JellyfinError("清洗备份结构无效")
+    if server and (not data.get("server") or server_identity(data["server"]) != server_identity(server)):
+        raise JellyfinError("备份所属服务器不匹配或未知，已拒绝回滚到当前服务器")
+    return data["items"]
 
 
 def restore_backup(server: str, api_key: str, dirty: list[dict],
-                   log: Optional[Callable[[str], None]] = None) -> int:
+                   log: Optional[Callable[[str], None]] = None, should_stop=None) -> int:
     """把备份里的 before_tags/before_genres 恢复回 Jellyfin。返回成功条数。"""
     ok = 0
     for it in dirty:
+        if should_stop and should_stop():
+            break
+        if it.get("status") and it["status"] not in ("applied", "prepared", "uncertain"):
+            continue
+        removed_tags = [v for v in it.get("before_tags", []) if v not in it.get("after_tags", [])]
+        removed_genres = [v for v in it.get("before_genres", []) if v not in it.get("after_genres", [])]
         if update_tags_genres(server, api_key, it["item_id"],
                               list(it.get("before_tags") or []),
-                              list(it.get("before_genres") or [])):
+                               list(it.get("before_genres") or []), mode="restore",
+                               removed_tags=removed_tags, removed_genres=removed_genres,
+                               should_stop=should_stop):
+            it["restore_status"] = "restored"
             ok += 1
             if log:
                 log(f"  已恢复 {it['name'][:30] or it['path'][:30]}")
     return ok
+
+
+def execute_clean_plan(server, api_key, plan, backup_path, *, refresh=True, should_stop=None, log=None):
+    """Shared GUI/CLI transaction. Reserve one backup and checkpoint actual fresh values."""
+    dirty, cleaned, backup, error = deepcopy(plan), 0, None, None
+    def cancelled():
+        return bool(should_stop and should_stop())
+    try:
+        if not cancelled() and dirty:
+            for row in dirty:
+                if not row.get("item_id") or not all(isinstance(row.get(k), list)
+                    for k in ("before_tags", "before_genres", "after_tags", "after_genres")):
+                    raise JellyfinError("清洗计划结构无效，未修改服务器")
+                row["status"] = "planned"
+            target = Path(backup_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("x", encoding="utf-8"):
+                pass
+            backup = str(target)
+            save_dirty_backup(dirty, backup, server=server)
+            cleaned = apply_clean(server, api_key, dirty, log=log, should_stop=should_stop, backup_path=backup)
+            if not cancelled() and cleaned != len(dirty):
+                error = f"部分清洗未完成：成功{cleaned}/{len(dirty)}；备份已保留"
+            if refresh and not cancelled() and cleaned:
+                ok, message = refresh_library(server, api_key)
+                if log:
+                    log(message)
+                if not ok:
+                    error = (error + "；" if error else "") + "刷新失败：" + message
+    except Exception as exc:
+        cleaned = sum(row.get("status") == "applied" for row in dirty)
+        error = str(exc)
+    return {"scanned": len(dirty), "cleaned": cleaned, "backup": backup, "error": error,
+            "empty": not dirty and not cancelled(), "cancelled": cancelled(),
+            "status": "cancelled" if cancelled() else ("failed" if error else "succeeded")}
+
+
+def execute_restore_plan(server, api_key, backup_path, *, refresh=True, should_stop=None, log=None):
+    """Reverse only removed tokens in the matching-server backup; preserve later additions."""
+    targets, restored, error = [], 0, None
+    def cancelled():
+        return bool(should_stop and should_stop())
+    try:
+        if not cancelled():
+            dirty = load_dirty_backup(backup_path, server=server)
+            targets = [row for row in dirty if not row.get("status")
+                       or row["status"] in ("applied", "prepared", "uncertain")]
+            restored = restore_backup(server, api_key, targets, log=log, should_stop=should_stop)
+            if not cancelled() and restored != len(targets):
+                error = f"部分回滚未完成：成功{restored}/{len(targets)}；备份已保留"
+            if refresh and not cancelled() and restored:
+                ok, message = refresh_library(server, api_key)
+                if log:
+                    log(message)
+                if not ok:
+                    error = (error + "；" if error else "") + "刷新失败：" + message
+    except Exception as exc:
+        restored = sum(row.get("restore_status") == "restored" for row in targets)
+        error = str(exc)
+    return {"restored": restored, "backup": backup_path, "error": error, "cancelled": cancelled(),
+            "status": "cancelled" if cancelled() else ("failed" if error else "succeeded")}
 
 
 def refresh_library(server: str, api_key: str) -> tuple[bool, str]:

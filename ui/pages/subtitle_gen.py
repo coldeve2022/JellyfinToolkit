@@ -11,13 +11,27 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from ui.services import busy, start_task, stop_page, import_media, CallWorker, after_stopped
+from ui.services import events
 
-from PySide6.QtCore import Qt, QThread, Signal
+from pathlib import Path
+import copy
+
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QSpinBox,
-    QVBoxLayout, QWidget,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
 
 from config import ToolkitConfig
@@ -32,20 +46,30 @@ class _MissingSubtitleScan(QThread):
 
     log = Signal(str)
     done = Signal(list)
+    error = Signal(str)
 
     def __init__(self, cfg, formats, parent=None):
         super().__init__(parent)
         self.cfg = cfg
         self.formats = formats or ["srt"]
+        self._stopped = False
+
+    def stop(self):
+        self._stopped = True
 
     def run(self) -> None:
         from utils import library_source
 
         try:
-            items = library_source.collect(self.cfg, log=self.log.emit)
+            items = library_source.collect(
+                self.cfg,
+                log=self.log.emit,
+                exclude_keywords=self.cfg.exclude_path_keywords,
+                should_stop=lambda: self._stopped,
+            )
         except Exception as e:  # noqa: BLE001  采集失败只该提示，不该崩页面
             self.log.emit(f"读取媒体库失败：{e}")
-            self.done.emit([])
+            self.error.emit(str(e))
             return
         self.log.emit(f"库里共 {len(items)} 个条目，正在检查字幕…")
         missing = []
@@ -55,6 +79,8 @@ class _MissingSubtitleScan(QThread):
         video_exts = {str(e).lower() for e in (self.cfg.video_extensions or [])}
         skipped_audio = 0
         for it in items:
+            if self._stopped:
+                return
             if not it.path or not Path(it.path).is_file():
                 continue
             # 预告片 / 主题视频不是正片，本来就不需要字幕 —— 直接不算进来
@@ -67,20 +93,30 @@ class _MissingSubtitleScan(QThread):
                 continue
             # 兜底：配置为空时至少排除明显的音频扩展名
             if not video_exts and Path(it.path).suffix.lower().lstrip(".") in (
-                    "mp3", "wav", "flac", "m4a", "aac", "ogg", "wma"):
+                "mp3",
+                "wav",
+                "flac",
+                "m4a",
+                "aac",
+                "ogg",
+                "wma",
+            ):
                 skipped_audio += 1
                 continue
             found = subtitle_clean.find_subtitles(
-                it.path, want, self.cfg.whisper_output_dir or None)
+                it.path, want, self.cfg.whisper_output_dir or None
+            )
             if not found:
                 missing.append(it.path)
         if aux:
             self.log.emit(f"已忽略 {aux} 个预告片 / 主题视频（它们不需要字幕）")
         if skipped_audio:
             self.log.emit(f"已忽略 {skipped_audio} 个音频文件（只对视频生成字幕）")
-        self.log.emit(f"其中 {len(missing)} 个没有同名字幕文件"
-                      f"（按扩展名 {'/'.join(want)} 判断；设置里的"
-                      f"「字幕扩展名」共 {len(checker)} 项）")
+        self.log.emit(
+            f"其中 {len(missing)} 个没有同名字幕文件"
+            f"（按扩展名 {'/'.join(want)} 判断；设置里的"
+            f"「字幕扩展名」共 {len(checker)} 项）"
+        )
         self.done.emit(missing)
 
 
@@ -107,12 +143,15 @@ class SubtitleGenPage(QWidget):
         title.setProperty("cssClass", "page-title")
         layout.addWidget(title)
 
-        layout.addWidget(InfoCard(
-            "给库里没字幕的视频批量生成字幕（识别 + 可选翻译由第三方引擎完成）。\n"
-            "本程序**不包含**识别引擎：请先自行准备「Faster-Whisper / TransWithAI」"
-            "打包版（下面有下载指引），然后用这里的「自动检测」或「浏览」告诉我在哪。\n"
-            "联动用法：点「挑出库里缺字幕的视频」→ 确认清单 → 直接开始，"
-            "比手工一个个拖进来快得多。"))
+        layout.addWidget(
+            InfoCard(
+                "给库里没字幕的视频批量生成字幕（识别 + 可选翻译由第三方引擎完成）。\n"
+                "本程序**不包含**识别引擎：请先自行准备「Faster-Whisper / TransWithAI」"
+                "打包版（下面有下载指引），然后用这里的「自动检测」或「浏览」告诉我在哪。\n"
+                "联动用法：点「挑出库里缺字幕的视频」→ 确认清单 → 直接开始，"
+                "比手工一个个拖进来快得多。"
+            )
+        )
 
         layout.addWidget(self._build_tool_group())
         layout.addWidget(self._build_param_group())
@@ -130,7 +169,8 @@ class SubtitleGenPage(QWidget):
         row.addWidget(QLabel("infer.exe："))
         self.input_tool = QLineEdit(self.cfg.whisper_tool_path)
         self.input_tool.setPlaceholderText(
-            "填 infer.exe 的完整路径，或它所在的文件夹；留空则自动查找")
+            "填 infer.exe 的完整路径，或它所在的文件夹；留空则自动查找"
+        )
         row.addWidget(self.input_tool, 1)
         btn_browse = QPushButton("浏览…")
         btn_browse.clicked.connect(self._browse_tool)
@@ -159,7 +199,8 @@ class SubtitleGenPage(QWidget):
         self.btn_patch.setToolTip(
             "这个第三方工具在中文 Windows 上有个已知 bug：它在开工前打印带 emoji 的\n"
             "声明，而冻结后的 stdout 编码是 GBK → 一跑就报 UnicodeEncodeError、\n"
-            "实际什么活都没干。这个按钮会给它打一个最小补丁（自动备份原文件）。")
+            "实际什么活都没干。这个按钮会给它打一个最小补丁（自动备份原文件）。"
+        )
         self.btn_patch.clicked.connect(self._apply_encoding_patch)
         row2.addWidget(self.btn_patch)
         btn_help = QPushButton("怎么获取？")
@@ -179,8 +220,11 @@ class SubtitleGenPage(QWidget):
         r1 = QHBoxLayout()
         r1.addWidget(QLabel("设备："))
         self.combo_device = QComboBox()
-        for val, text in (("cuda", "GPU（cuda，快）"), ("cpu", "CPU（慢但不挑显卡）"),
-                          ("auto", "自动")):
+        for val, text in (
+            ("cuda", "GPU（cuda，快）"),
+            ("cpu", "CPU（慢但不挑显卡）"),
+            ("auto", "自动"),
+        ):
             self.combo_device.addItem(text, val)
         self._select(self.combo_device, self.cfg.whisper_device)
         r1.addWidget(self.combo_device)
@@ -257,6 +301,7 @@ class SubtitleGenPage(QWidget):
         lay.addLayout(row)
 
         self.list_files = DragDropListWidget()
+        self.list_files.paths_changed.connect(lambda _: self._update_count())
         self.list_files.files_dropped.connect(self._add_paths)
         lay.addWidget(self.list_files, 1)
 
@@ -265,7 +310,8 @@ class SubtitleGenPage(QWidget):
         self.chk_only_missing.setChecked(True)
         self.chk_only_missing.setToolTip(
             "勾选时：添加目录/文件会跳过已经有同名字幕的，也会跳过预告片与主题视频。\n"
-            "想重新生成已有字幕（配合「覆盖已有字幕」）时，取消勾选。")
+            "想重新生成已有字幕（配合「覆盖已有字幕」）时，取消勾选。"
+        )
         row2.addWidget(self.chk_only_missing)
         row2.addStretch()
         lay.addLayout(row2)
@@ -317,8 +363,11 @@ class SubtitleGenPage(QWidget):
 
     def _browse_tool(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择 infer.exe（或它所在的文件夹里的任意文件）",
-            "", "可执行文件 (*.exe);;所有文件 (*)")
+            self,
+            "选择 infer.exe（或它所在的文件夹里的任意文件）",
+            "",
+            "可执行文件 (*.exe);;所有文件 (*)",
+        )
         if path:
             self.input_tool.setText(path)
             self.tool_options = None
@@ -336,53 +385,25 @@ class SubtitleGenPage(QWidget):
                 self.log_panel.log_warning(f"路径已生效，但写入配置失败：{e}")
 
     def _autodetect(self) -> None:
-        """按「设置指定 → 常见位置 → 按名称搜索」三档查找，并把过程写进日志。
-
-        原来只认几个固定目录名（lada、faster-whisper…），而真实目录往往带
-        版本号与平台后缀（``faster_whisper_transwithai_windows_cu122-chickenrice``），
-        于是必然找不到 —— 用户看到的就是"点了只弹一个窗口"。
-        """
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        self.log_panel.log_info("正在查找 infer.exe（会扫一遍各盘的浅层目录，通常几秒）…")
-        QApplication.processEvents()
-        try:
-            info = whisper_tool.search_infer_exe(self.input_tool.text().strip(),
-                                                 log=self.log_panel.log)
-        finally:
-            QApplication.restoreOverrideCursor()
-
-        found = info.get("path")
-        if not found:
-            self.log_panel.log_warning(
-                f"没有找到 infer.exe（扫过 {info.get('scanned', 0)} 个目录，"
-                f"用时 {info.get('elapsed', 0):.1f} 秒）。下面告诉你手动怎么指定。")
-            self._show_hint()
+        if busy(self):
             return
-        self.input_tool.setText(str(found))
-        self.tool_options = None
-        self._save_tool_path()
-        self._refresh_tool_status()
-        self.log_panel.log_success(f"已定位：{found}（{info.get('source', '')}）")
+        value = self.input_tool.text().strip()
+        self._search_worker = CallWorker(lambda cancel: whisper_tool.search_infer_exe(value))
+        self._search_worker.result.connect(self._on_tool_search)
+        self._search_worker.error.connect(self.log_panel.log_error)
+        start_task(self, self._search_worker, "查找第三方工具")
 
     def _probe(self) -> None:
+        if busy(self):
+            return
         exe = whisper_tool.find_infer_exe(self.input_tool.text().strip())
         if not exe:
             self._show_hint()
             return
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            info = whisper_tool.probe(exe)
-        finally:
-            QApplication.restoreOverrideCursor()
-        if not info["ok"]:
-            self.log_panel.log_error(f"探测失败：{info['error']}")
-            return
-        self.tool_options = info["options"]
-        self.log_panel.log_success(
-            f"探测成功：这个版本支持 {len(info['options'])} 个参数")
-        for name in sorted(info["options"]):
-            self.log_panel.log("    " + name)
-        self._refresh_tool_status()
+        self._probe_worker = CallWorker(lambda cancel: whisper_tool.probe(exe))
+        self._probe_worker.result.connect(self._on_tool_probe)
+        self._probe_worker.error.connect(self.log_panel.log_error)
+        start_task(self, self._probe_worker, "读取字幕工具能力")
 
     def _refresh_tool_status(self) -> None:
         exe = whisper_tool.find_infer_exe(self.input_tool.text().strip())
@@ -400,17 +421,21 @@ class SubtitleGenPage(QWidget):
         if not src:
             self.lbl_patch.setText(
                 "⚠️ 没找到该工具的可修补源码（_internal/…/infer.py）。"
-                "如果运行时报 UnicodeEncodeError，说明需要修补但找不到目标。")
+                "如果运行时报 UnicodeEncodeError，说明需要修补但找不到目标。"
+            )
             self.btn_patch.setEnabled(False)
             return
         patched = whisper_tool.is_encoding_patched(src)
         self.btn_patch.setEnabled(not patched)
         self.lbl_patch.setText(
-            ("✅ 编码补丁：已打（这个工具在中文系统上能正常跑）"
-             if patched else
-             "❌ 编码补丁：未打 —— 这个工具在中文 Windows 上会一跑就报 "
-             "UnicodeEncodeError，实际什么活都不干。点左边「修补编码问题」修一下。")
-            + "\n　　（第三方工具重新解压/升级后需要再打一次）")
+            (
+                "✅ 编码补丁：已打（这个工具在中文系统上能正常跑）"
+                if patched
+                else "❌ 编码补丁：未打 —— 这个工具在中文 Windows 上会一跑就报 "
+                "UnicodeEncodeError，实际什么活都不干。点左边「修补编码问题」修一下。"
+            )
+            + "\n　　（第三方工具重新解压/升级后需要再打一次）"
+        )
 
     def _apply_encoding_patch(self) -> None:
         exe = whisper_tool.find_infer_exe(self.input_tool.text().strip())
@@ -428,8 +453,7 @@ class SubtitleGenPage(QWidget):
         self._refresh_tool_status()
 
     def _show_hint(self) -> None:
-        QMessageBox.information(self, "怎么获取识别工具",
-                                whisper_tool.prerequisites_hint())
+        QMessageBox.information(self, "怎么获取识别工具", whisper_tool.prerequisites_hint())
 
     def _goto_settings(self) -> None:
         window = self.window()
@@ -437,14 +461,18 @@ class SubtitleGenPage(QWidget):
         if not callable(navigate):
             return
         from ui.main_window import NAV_LABELS
+
         if "设置" in NAV_LABELS:
             navigate(NAV_LABELS.index("设置"))
 
     # ── 文件清单 ──
     def _add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "选择媒体文件", "",
-            "视频文件 (*.mp4 *.mkv *.avi *.mov *.ts *.wmv *.flv *.webm *.rmvb);;所有文件 (*)")
+            self,
+            "选择媒体文件",
+            "",
+            "视频文件 (*.mp4 *.mkv *.avi *.mov *.ts *.wmv *.flv *.webm *.rmvb);;所有文件 (*)",
+        )
         self._add_paths(paths)
 
     def _add_dir(self) -> None:
@@ -453,8 +481,11 @@ class SubtitleGenPage(QWidget):
             self._add_paths([path])
 
     def _wanted_formats(self) -> list:
-        return [f.strip() for f in
-                (self.combo_formats.currentData() or "srt").split(",") if f.strip()]
+        return [
+            f.strip()
+            for f in (self._combo_value(self.combo_formats) or "srt").split(",")
+            if f.strip()
+        ]
 
     def _add_paths(self, paths, quiet: bool = False) -> dict:
         """把路径加进清单，返回 ``{"added","aux","has_sub"}`` 三个计数。
@@ -463,17 +494,21 @@ class SubtitleGenPage(QWidget):
         （仅当「只加入缺字幕的」勾选时才会发生）。两个数都汇报给用户，
         否则"我明明加了一个目录，怎么少了几百个"会变成新的困惑。
         """
+        if busy(self):
+            return {"added": 0, "aux": 0, "has_sub": 0}
+        if import_media(self, paths, self._add_paths):
+            return {"added": 0, "aux": 0, "has_sub": 0}
         # 只收**视频**：这是"给视频生成字幕"的功能，音频文件（.wav/.mp3 等）
         # 混进来只会让人困惑"为什么音频也要字幕"。扩展名以配置为准。
         exts = {it.lower() for it in (self.cfg.video_extensions or [])}
         if not exts:
             exts = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".wmv", ".flv"}
         formats = self._wanted_formats() or ["srt"]
-        out_dir = self.cfg.whisper_output_dir or None
-        only_missing = bool(getattr(self, "chk_only_missing", None)
-                            and self.chk_only_missing.isChecked())
-        existing = {self.list_files.item(i).text()
-                    for i in range(self.list_files.count())}
+        out_dir = self.input_out.text().strip() or None
+        only_missing = bool(
+            getattr(self, "chk_only_missing", None) and self.chk_only_missing.isChecked()
+        )
+        existing = {self.list_files.item(i).text() for i in range(self.list_files.count())}
         stats = {"added": 0, "aux": 0, "has_sub": 0}
 
         def consider(f: Path) -> None:
@@ -486,7 +521,7 @@ class SubtitleGenPage(QWidget):
             if only_missing and subtitle_clean.find_subtitles(f, formats, out_dir):
                 stats["has_sub"] += 1
                 return
-            self.list_files.addItem(s)
+            self.list_files.add_item(s, s)
             existing.add(s)
             stats["added"] += 1
 
@@ -497,7 +532,8 @@ class SubtitleGenPage(QWidget):
                     if f.is_file() and f.suffix.lower() in exts:
                         consider(f)
             elif p.is_file():
-                consider(p)
+                if p.suffix.lower() in exts:
+                    consider(p)
 
         if not quiet:
             parts = [f"已添加 {stats['added']} 个文件"]
@@ -507,6 +543,7 @@ class SubtitleGenPage(QWidget):
                 parts.append(f"跳过 {stats['has_sub']} 个已有字幕的")
             self.log_panel.log_success("；".join(parts))
         self._update_count()
+        self._last_import_stats = stats
         return stats
 
     def _remove_selected(self) -> None:
@@ -515,6 +552,8 @@ class SubtitleGenPage(QWidget):
         self._update_count()
 
     def _clear(self) -> None:
+        if busy(self):
+            return
         self.list_files.clear()
         self._update_count()
 
@@ -522,17 +561,23 @@ class SubtitleGenPage(QWidget):
         self.lbl_count.setText(f"共 {self.list_files.count()} 个文件")
 
     def _scan_missing(self) -> None:
+        if busy(self):
+            return
         if self.scanner and self.scanner.isRunning():
             return
         self.btn_scan.setEnabled(False)
         self.log_panel.log_info("正在从媒体库挑出缺字幕的视频…")
-        formats = [f.strip() for f in
-                   (self.combo_formats.currentData() or "srt").split(",") if f.strip()]
-        self.scanner = _MissingSubtitleScan(self.cfg, formats)
+        formats = self._wanted_formats()
+        cfg = copy.deepcopy(self.cfg)
+        cfg.whisper_output_dir = self.input_out.text().strip()
+        self.scanner = _MissingSubtitleScan(cfg, formats)
         self.scanner.log.connect(self.log_panel.log)
-        self.scanner.done.connect(self._on_scan_done)
+        self.scanner.done.connect(
+            lambda paths: after_stopped(self, lambda: self._on_scan_done(paths))
+        )
+        self.scanner.error.connect(self.log_panel.log_error)
         self.scanner.finished.connect(lambda: self.btn_scan.setEnabled(True))
-        self.scanner.start()
+        start_task(self, self.scanner)
 
     def _on_scan_done(self, paths: list) -> None:
         """把清单**梳理成「库里缺字幕的那些」**，而不是往清单上继续堆。
@@ -542,7 +587,7 @@ class SubtitleGenPage(QWidget):
         现在的语义是：**先移走清单里已有字幕的，再补上缺字幕但不在清单里的**。
         """
         formats = self._wanted_formats() or ["srt"]
-        out_dir = self.cfg.whisper_output_dir or None
+        out_dir = self.input_out.text().strip() or None
 
         removed = 0
         for i in range(self.list_files.count() - 1, -1, -1):
@@ -553,21 +598,26 @@ class SubtitleGenPage(QWidget):
                 self.list_files.takeItem(i)
                 removed += 1
 
-        stats = self._add_paths(paths, quiet=True) if paths else {
-            "added": 0, "aux": 0, "has_sub": 0}
+        stats = (
+            self._add_paths(paths, quiet=True) if paths else {"added": 0, "aux": 0, "has_sub": 0}
+        )
         total = self.list_files.count()
         if not paths and not removed:
-            self.log_panel.log_warning("媒体库里没有缺字幕的视频（或媒体库读取失败）。")
+            self.log_panel.log_info("本次范围没有缺字幕的视频。")
             return
-        parts = [f"清单已梳理：移除 {removed} 个已有字幕的",
-                 f"新增 {stats['added']} 个缺字幕的",
-                 f"当前共 {total} 个"]
+        parts = [
+            f"清单已梳理：移除 {removed} 个已有字幕的",
+            f"新增 {stats['added']} 个缺字幕的",
+            f"当前共 {total} 个",
+        ]
         if stats["aux"]:
             parts.append(f"（另忽略 {stats['aux']} 个预告片/主题视频）")
         self.log_panel.log_success("；".join(parts))
 
     # ── 运行 ──
     def _start(self) -> None:
+        if busy(self, mutating=True):
+            return
         if self.worker and self.worker.isRunning():
             return
         exe = whisper_tool.find_infer_exe(self.input_tool.text().strip())
@@ -576,25 +626,25 @@ class SubtitleGenPage(QWidget):
             return
         files = [self.list_files.item(i).text() for i in range(self.list_files.count())]
         if not files:
-            QMessageBox.warning(self, "没有任务", "请先添加要处理的文件，"
-                                             "或用「挑出库里缺字幕的视频」自动填充。")
+            QMessageBox.warning(
+                self, "没有任务", "请先添加要处理的文件，或用「挑出库里缺字幕的视频」自动填充。"
+            )
             return
         self._apply_params()
+        self._save_tool_path()
         self.progress.setValue(0)
         self.worker = WhisperGenWorker(self.cfg, files, exe, self.tool_options)
         self.worker.log.connect(self.log_panel.log)
         self.worker.progress.connect(self.progress.setValue)
         self.worker.file_done.connect(self._on_file_done)
         self.worker.finished.connect(self._on_finished)
-        self.worker.start()
+        start_task(self, self.worker)
         self._set_running(True)
 
     def _apply_params(self) -> None:
         self.cfg.whisper_device = self.combo_device.currentData() or "cuda"
-        self.cfg.whisper_model = self.combo_model.currentData() or \
-            self.combo_model.currentText().strip()
-        self.cfg.whisper_sub_formats = self.combo_formats.currentData() or \
-            self.combo_formats.currentText().strip()
+        self.cfg.whisper_model = self._combo_value(self.combo_model)
+        self.cfg.whisper_sub_formats = self._combo_value(self.combo_formats)
         self.cfg.whisper_output_dir = self.input_out.text().strip()
         self.cfg.whisper_overwrite = self.chk_overwrite.isChecked()
         self.cfg.whisper_batching = self.chk_batch.isChecked()
@@ -615,6 +665,13 @@ class SubtitleGenPage(QWidget):
             self.worker.resume()
             self.btn_pause.setText("⏸ 暂停")
 
+    @staticmethod
+    def _combo_value(combo) -> str:
+        if combo.currentText() == combo.itemText(combo.currentIndex()):
+            value = combo.currentData()
+            return str(value) if value is not None else ""
+        return combo.currentText().strip()
+
     def _stop(self) -> None:
         if self.worker:
             self.worker.stop()
@@ -623,6 +680,7 @@ class SubtitleGenPage(QWidget):
     def _on_file_done(self, path: str, ok: bool, note: str) -> None:
         if ok:
             self.lbl_status.setText(f"完成：{Path(path).name}")
+            events.media_changed.emit([path])
         else:
             self.lbl_status.setText(f"失败：{Path(path).name}")
 
@@ -633,10 +691,10 @@ class SubtitleGenPage(QWidget):
         else:
             self.lbl_status.setText(f"全部完成：成功 {stats['ok']} / 失败 {stats['fail']}")
             if stats.get("fails"):
-                detail = "\n".join(f"· {Path(p).name}：{why}"
-                                  for p, why in stats["fails"][:10])
-                QMessageBox.warning(self, "部分文件失败",
-                                    f"共 {len(stats['fails'])} 个失败：\n\n{detail}")
+                detail = "\n".join(f"· {Path(p).name}：{why}" for p, why in stats["fails"][:10])
+                QMessageBox.warning(
+                    self, "部分文件失败", f"共 {len(stats['fails'])} 个失败：\n\n{detail}"
+                )
 
     def _set_running(self, running: bool) -> None:
         self.btn_start.setEnabled(not running)
@@ -651,11 +709,23 @@ class SubtitleGenPage(QWidget):
 
     # ── 退出时收尾 ──
     def shutdown(self) -> None:
-        """主窗口关闭时调用：停掉正在跑的队列，避免留下后台进程。"""
-        for w in (self.worker, self.scanner):
-            if w and w.isRunning():
-                stop = getattr(w, "stop", None)
-                if callable(stop):
-                    stop()
-                w.wait(8000)
+        stop_page(self)
 
+    def _on_tool_search(self, info):
+        if not info.get("path"):
+            self.log_panel.log_warning("没有找到工具，请手动指定路径。")
+            self._show_hint()
+            return
+        self.input_tool.setText(str(info["path"]))
+        self.tool_options = None
+        self._save_tool_path()
+        self._refresh_tool_status()
+        self.log_panel.log_success("已找到：" + str(info["path"]))
+
+    def _on_tool_probe(self, info):
+        if not info.get("ok"):
+            self.log_panel.log_error(info.get("error") or "能力探测失败")
+            return
+        self.tool_options = info["options"]
+        self._refresh_tool_status()
+        self.log_panel.log_success("已读取工具真实支持的参数。")

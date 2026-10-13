@@ -13,13 +13,26 @@
 
 from __future__ import annotations
 
+from ui.services import busy, start_task, stop_page, events, import_media, CallWorker, after_stopped
+
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QSpinBox,
-    QVBoxLayout, QWidget,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
 
 from config import ToolkitConfig
@@ -33,29 +46,42 @@ class _CensoredScan(QThread):
 
     log = Signal(str)
     done = Signal(list)
+    error = Signal(str)
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
         self.cfg = cfg
+        self._stopped = False
+
+    def stop(self):
+        self._stopped = True
 
     def run(self) -> None:
         from utils import library_source
 
         try:
-            items = library_source.collect(self.cfg, log=self.log.emit)
+            items = library_source.collect(
+                self.cfg,
+                log=self.log.emit,
+                exclude_keywords=self.cfg.exclude_path_keywords,
+                should_stop=lambda: self._stopped,
+            )
         except Exception as e:  # noqa: BLE001
             self.log.emit(f"读取媒体库失败：{e}")
-            self.done.emit([])
+            self.error.emit(str(e))
             return
         picked = []
         for it in items:
+            if self._stopped:
+                return
             if not it.path or not Path(it.path).is_file():
                 continue
             if getattr(it, "is_uncensored", False):
                 continue
             # 已经破解过的就不再重复排队（默认命名规则）
-            out_dir = Path(self.cfg.lada_output_dir) if self.cfg.lada_output_dir \
-                else Path(it.path).parent
+            out_dir = (
+                Path(self.cfg.lada_output_dir) if self.cfg.lada_output_dir else Path(it.path).parent
+            )
             if lada_tool.expected_output(out_dir, it.path).is_file():
                 continue
             picked.append(it.path)
@@ -74,9 +100,10 @@ class LadaPage(QWidget):
         self.scanner: _CensoredScan | None = None
         self.tool_options = None
         self._ffprobe = "ffprobe"
+        self._outputs = []
+        self._originals = []
         self._setup_ui()
-        self.input_affinity.setEnabled(
-            (self.cfg.lada_cpu_affinity or "auto") == "custom")
+        self.input_affinity.setEnabled((self.cfg.lada_cpu_affinity or "auto") == "custom")
         self._refresh_tool_status()
 
     # ── 界面 ──
@@ -89,13 +116,16 @@ class LadaPage(QWidget):
         title.setProperty("cssClass", "page-title")
         layout.addWidget(title)
 
-        layout.addWidget(InfoCard(
-            "把库里的有码视频批量送去破解，产出 `原文件名.restored.mp4`，"
-            "随后可以用「破解视频替换」页替换回库中对应位置。\n"
-            "本程序**不包含**破解引擎：请先自行准备第三方工具 Lada，"
-            "然后用下面的「自动检测」告诉我在哪。\n"
-            "第一次用建议先点「读取能力」——下拉里会填上你这台机器真正可用的"
-            "编码预设、检测模型与设备。"))
+        layout.addWidget(
+            InfoCard(
+                "把库里的有码视频批量送去破解，产出 `原文件名.restored.mp4`，"
+                "随后可以用「破解视频替换」页替换回库中对应位置。\n"
+                "本程序**不包含**破解引擎：请先自行准备第三方工具 Lada，"
+                "然后用下面的「自动检测」告诉我在哪。\n"
+                "第一次用建议先点「读取能力」——下拉里会填上你这台机器真正可用的"
+                "编码预设、检测模型与设备。"
+            )
+        )
 
         layout.addWidget(self._build_tool_group())
         layout.addWidget(self._build_param_group())
@@ -113,11 +143,14 @@ class LadaPage(QWidget):
         row.addWidget(QLabel("lada-cli.exe："))
         self.input_tool = QLineEdit(self.cfg.lada_cli_path)
         self.input_tool.setPlaceholderText(
-            "填 lada-cli.exe 的完整路径、或 Lada 解压后的文件夹；留空则自动查找")
+            "填 lada-cli.exe 的完整路径、或 Lada 解压后的文件夹；留空则自动查找"
+        )
         row.addWidget(self.input_tool, 1)
-        for text, slot in (("浏览…", self._browse_tool),
-                           ("自动检测", self._autodetect),
-                           ("读取能力", self._probe)):
+        for text, slot in (
+            ("浏览…", self._browse_tool),
+            ("自动检测", self._autodetect),
+            ("读取能力", self._probe),
+        ):
             btn = QPushButton(text)
             btn.clicked.connect(slot)
             row.addWidget(btn)
@@ -151,8 +184,9 @@ class LadaPage(QWidget):
 
         r1.addWidget(QLabel("编码预设："))
         self.combo_preset = QComboBox()
-        self._fill_combo(self.combo_preset, [], self.cfg.lada_encoding_preset,
-                         empty_label="Lada 默认")
+        self._fill_combo(
+            self.combo_preset, [], self.cfg.lada_encoding_preset, empty_label="Lada 默认"
+        )
         r1.addWidget(self.combo_preset)
         r1.addStretch()
         lay.addLayout(r1)
@@ -160,14 +194,16 @@ class LadaPage(QWidget):
         r2 = QHBoxLayout()
         r2.addWidget(QLabel("检测模型："))
         self.combo_detect = QComboBox()
-        self._fill_combo(self.combo_detect, [], self.cfg.lada_detection_model,
-                         empty_label="Lada 默认")
+        self._fill_combo(
+            self.combo_detect, [], self.cfg.lada_detection_model, empty_label="Lada 默认"
+        )
         r2.addWidget(self.combo_detect)
 
         r2.addWidget(QLabel("修复模型："))
         self.combo_restore = QComboBox()
-        self._fill_combo(self.combo_restore, [], self.cfg.lada_restoration_model,
-                         empty_label="Lada 默认")
+        self._fill_combo(
+            self.combo_restore, [], self.cfg.lada_restoration_model, empty_label="Lada 默认"
+        )
         r2.addWidget(self.combo_restore)
 
         r2.addWidget(QLabel("片段长度："))
@@ -183,7 +219,7 @@ class LadaPage(QWidget):
         self.chk_fp16 = QCheckBox("FP16（省显存）")
         self.chk_fp16.setChecked(self.cfg.lada_fp16)
         r3.addWidget(self.chk_fp16)
-        self.chk_face = QCheckBox("跳过面部马赛克")
+        self.chk_face = QCheckBox("检测并处理面部马赛克")
         self.chk_face.setChecked(self.cfg.lada_detect_face_mosaics)
         self.chk_face.setToolTip("v3 及更新的检测模型支持；可能降低对 NSFW 区域的识别率")
         r3.addWidget(self.chk_face)
@@ -203,7 +239,9 @@ class LadaPage(QWidget):
         r4 = QHBoxLayout()
         r4.addWidget(QLabel("输出目录："))
         self.input_out = QLineEdit(self.cfg.lada_output_dir)
-        self.input_out.setPlaceholderText("留空 = 与视频同目录（推荐，便于「破解视频替换」直接接手）")
+        self.input_out.setPlaceholderText(
+            "留空 = 与视频同目录（推荐，便于「破解视频替换」直接接手）"
+        )
         r4.addWidget(self.input_out, 1)
         btn_out = QPushButton("浏览…")
         btn_out.clicked.connect(lambda: self._pick_dir(self.input_out))
@@ -217,7 +255,8 @@ class LadaPage(QWidget):
         self.chk_gate.setToolTip(
             "开着时：显存占用超过「高水位」就暂缓启动新任务，低于「低水位」再继续。\n"
             "适合边玩游戏边挂机，代价是任务会看起来「停住了」。\n"
-            "默认关闭 —— 阈值与显卡容量有关，可点右边的按钮按本机推算。")
+            "默认关闭 —— 阈值与显卡容量有关，可点右边的按钮按本机推算。"
+        )
         r5.addWidget(self.chk_gate)
         r5.addWidget(QLabel("高水位："))
         self.spin_high = QDoubleSpinBox()
@@ -252,7 +291,8 @@ class LadaPage(QWidget):
             "把破解进程绑定到指定 CPU 核心。\n"
             "· 只对 Intel 12 代及以后的混合架构（P 核 + E 核）有明显效果；\n"
             "· 其他 CPU 上会自动退回「全部核心」（等同于不绑）；\n"
-            "· 绑错了可能更慢 —— 拿不准就选「不绑定」。")
+            "· 绑错了可能更慢 —— 拿不准就选「不绑定」。"
+        )
         self.combo_affinity.currentIndexChanged.connect(self._on_affinity_changed)
         r6.addWidget(self.combo_affinity)
 
@@ -296,6 +336,7 @@ class LadaPage(QWidget):
         lay.addLayout(row)
 
         self.list_files = DragDropListWidget()
+        self.list_files.paths_changed.connect(lambda _: self._update_count())
         self.list_files.files_dropped.connect(self._add_paths)
         lay.addWidget(self.list_files, 1)
 
@@ -323,7 +364,7 @@ class LadaPage(QWidget):
         row.addWidget(self.btn_stop)
         self.btn_replace = QPushButton("去「破解视频替换」")
         self.btn_replace.setToolTip("破解完成后用它把产物替换回库中对应位置")
-        self.btn_replace.clicked.connect(lambda: self._goto("破解视频替换"))
+        self.btn_replace.clicked.connect(self._send_outputs)
         row.addWidget(self.btn_replace)
         row.addStretch()
         self.lbl_status = QLabel("就绪")
@@ -336,50 +377,59 @@ class LadaPage(QWidget):
     def _on_affinity_changed(self) -> None:
         mode = self.combo_affinity.currentData()
         self.input_affinity.setEnabled(mode == "custom")
-        if mode == "custom" and not self.input_affinity.text().strip():
-            info = cpu_affinity.detect_affinity("auto")
-            self.input_affinity.setText(cpu_affinity.format_core_spec(info.get("cores")))
+        info = getattr(self, "_affinity_info", {})
+        if mode == "custom" and not self.input_affinity.text().strip() and info.get("cores"):
+            self.input_affinity.setText(cpu_affinity.format_core_spec(info["cores"]))
         self._refresh_perf_hint()
 
     def _detect_affinity(self) -> None:
-        info = cpu_affinity.detect_affinity("auto")
+        if busy(self):
+            return
+        self._hardware_worker = CallWorker(lambda cancel: cpu_affinity.detect_affinity("auto"))
+        self._hardware_worker.result.connect(self._show_affinity)
+        self._hardware_worker.error.connect(self.log_panel.log_error)
+        start_task(self, self._hardware_worker, "检测CPU核心拓扑")
+
+    def _show_affinity(self, info):
+        self._affinity_info = info
         self.log_panel.log_info("CPU 拓扑检测：" + cpu_affinity.describe_affinity(info))
-        self.log_panel.log("    " + info.get("reason", ""))
-        if info.get("cores"):
-            self.log_panel.log(
-                "    如果这个结果不对，把「CPU 绑定」改成「自定义核心」，"
-                "填上你想用的线程号（如 0-11）。")
+        self.log_panel.log(str(info.get("reason", "")))
         self._refresh_perf_hint()
 
     def _recommend_vram(self) -> None:
-        total = gpu.vram_total_gb()
+        if busy(self):
+            return
+        self._hardware_worker = CallWorker(lambda cancel: (gpu.vram_total_gb(), gpu.vram_used_gb()))
+        self._hardware_worker.result.connect(self._show_vram)
+        self._hardware_worker.error.connect(self.log_panel.log_error)
+        start_task(self, self._hardware_worker, "检测GPU显存容量")
+
+    def _show_vram(self, result):
+        total, used = result
+        self._vram_total = total
         if total <= 0:
-            self.log_panel.log_warning(
-                "读不到显卡显存（需要 NVIDIA 驱动自带的 nvidia-smi）。"
-                "请按自己显卡的容量手动填 —— 参考比例：高水位约 87%、低水位约 71%。")
+            self.log_panel.log_warning("无法读取显存；请手动设置，或检查NVIDIA驱动和nvidia-smi。")
             return
         high, low = gpu.recommend_vram_thresholds(total)
         self.spin_high.setValue(high)
         self.spin_low.setValue(low)
-        used = gpu.vram_used_gb()
         self.log_panel.log_success(
-            f"按本机显卡（{total:.0f} GB）推算：高水位 {high:.1f} GB / 低水位 {low:.1f} GB"
-            + (f"；当前已用 {used:.1f} GB" if used >= 0 else ""))
+            f"显存 {total:.0f} GB；建议高水位 {high:.1f} GB / 低水位 {low:.1f} GB，已用 {used:.1f} GB"
+        )
+        self._refresh_perf_hint()
 
     def _refresh_perf_hint(self) -> None:
-        """把这两项"程序实际会怎么做"写在界面上 —— 用户才知道要不要改。"""
-        info = cpu_affinity.detect_affinity(
-            self.combo_affinity.currentData() or "auto", self.input_affinity.text())
-        total = gpu.vram_total_gb()
-        vram = f"显卡 {total:.0f} GB" if total > 0 else "显存读不到"
+        mode = self.combo_affinity.currentText()
+        total = getattr(self, "_vram_total", 0)
+        vram = f"已检测显存 {total:.0f} GB" if total > 0 else "尚未检测显存；可点「按本机显卡推荐」"
         gate = "开启" if self.chk_gate.isChecked() else "关闭"
         self.lbl_perf.setText(
-            "这两项都只对特定硬件有意义，拿不准就用默认值：\n"
-            f"· CPU 绑定 → {cpu_affinity.describe_affinity(info)}\n"
-            f"· 显存门控 → {gate}（{vram}；阈值可点「按本机显卡推荐」自动填）")
+            f"CPU绑定：{mode}，自定义核心：{self.input_affinity.text() or '未指定'}\n显存门控：{gate}；{vram}"
+        )
 
-    def _fill_combo(self, combo: QComboBox, rows: list, current: str,
-                    empty_label: str = "（默认）") -> None:
+    def _fill_combo(
+        self, combo: QComboBox, rows: list, current: str, empty_label: str = "（默认）"
+    ) -> None:
         combo.clear()
         combo.addItem(empty_label, "")
         for row in rows:
@@ -402,7 +452,8 @@ class LadaPage(QWidget):
 
     def _browse_tool(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择 lada-cli.exe", "", "可执行文件 (*.exe);;所有文件 (*)")
+            self, "选择 lada-cli.exe", "", "可执行文件 (*.exe);;所有文件 (*)"
+        )
         if not path:
             return
         self.input_tool.setText(path)
@@ -420,30 +471,17 @@ class LadaPage(QWidget):
                 self.log_panel.log_warning(f"路径已生效，但写入配置失败：{e}")
 
     def _autodetect(self) -> None:
-        """三档查找 + 把过程写进日志（原实现只认固定目录名，实际找不到）。"""
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        self.log_panel.log_info("正在查找 lada-cli.exe（会扫一遍各盘的浅层目录，通常几秒）…")
-        QApplication.processEvents()
-        try:
-            info = lada_tool.search_lada_cli(self.input_tool.text().strip(),
-                                             log=self.log_panel.log)
-        finally:
-            QApplication.restoreOverrideCursor()
-
-        found = info.get("path")
-        if not found:
-            self.log_panel.log_warning(
-                f"没有找到 lada-cli.exe（扫过 {info.get('scanned', 0)} 个目录，"
-                f"用时 {info.get('elapsed', 0):.1f} 秒）。下面告诉你手动怎么指定。")
-            self._show_hint()
+        if busy(self):
             return
-        self.input_tool.setText(str(found))
-        self.tool_options = None
-        self._save_tool_path()
-        self._refresh_tool_status()
-        self.log_panel.log_success(f"已定位：{found}（{info.get('source', '')}）")
+        value = self.input_tool.text().strip()
+        self._search_worker = CallWorker(lambda cancel: lada_tool.search_lada_cli(value))
+        self._search_worker.result.connect(self._on_tool_search)
+        self._search_worker.error.connect(self.log_panel.log_error)
+        start_task(self, self._search_worker, "查找第三方工具")
 
     def _probe(self) -> None:
+        if busy(self):
+            return
         cli = lada_tool.find_lada_cli(self.input_tool.text().strip())
         if not cli:
             self._show_hint()
@@ -456,21 +494,31 @@ class LadaPage(QWidget):
         self.probe_worker.log.connect(self.log_panel.log)
         self.probe_worker.done.connect(self._on_probe_done)
         self.probe_worker.finished.connect(lambda: self.btn_start.setEnabled(True))
-        self.probe_worker.start()
+        start_task(self, self.probe_worker)
 
     def _on_probe_done(self, info: dict) -> None:
         if not info.get("ok") and not info.get("presets"):
             self.log_panel.log_error(info.get("error") or "读取能力失败")
             return
         self.tool_options = info.get("options") or None
-        self._fill_combo(self.combo_preset, info.get("presets", []),
-                         self.cfg.lada_encoding_preset, "Lada 默认")
-        self._fill_combo(self.combo_detect, info.get("detection_models", []),
-                         self.cfg.lada_detection_model, "Lada 默认")
-        self._fill_combo(self.combo_restore, info.get("restoration_models", []),
-                         self.cfg.lada_restoration_model, "Lada 默认")
-        self._fill_combo(self.combo_device, info.get("devices", []),
-                         self.cfg.lada_device, "Lada 默认")
+        self._fill_combo(
+            self.combo_preset, info.get("presets", []), self.cfg.lada_encoding_preset, "Lada 默认"
+        )
+        self._fill_combo(
+            self.combo_detect,
+            info.get("detection_models", []),
+            self.cfg.lada_detection_model,
+            "Lada 默认",
+        )
+        self._fill_combo(
+            self.combo_restore,
+            info.get("restoration_models", []),
+            self.cfg.lada_restoration_model,
+            "Lada 默认",
+        )
+        self._fill_combo(
+            self.combo_device, info.get("devices", []), self.cfg.lada_device, "Lada 默认"
+        )
         for row in info.get("presets", [])[:20]:
             self.log_panel.log(f"    预设 {row['name']}：{row['description'][:70]}")
         for row in info.get("devices", []):
@@ -494,6 +542,7 @@ class LadaPage(QWidget):
         if not callable(navigate):
             return
         from ui.main_window import NAV_LABELS
+
         if label in NAV_LABELS:
             navigate(NAV_LABELS.index(label))
 
@@ -503,8 +552,11 @@ class LadaPage(QWidget):
     # ── 文件清单 ──
     def _add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "选择视频", "",
-            "视频 (*.mp4 *.mkv *.avi *.mov *.ts *.wmv *.flv *.webm);;所有文件 (*)")
+            self,
+            "选择视频",
+            "",
+            "视频 (*.mp4 *.mkv *.avi *.mov *.ts *.wmv *.flv *.webm);;所有文件 (*)",
+        )
         self._add_paths(paths)
 
     def _add_dir(self) -> None:
@@ -513,21 +565,24 @@ class LadaPage(QWidget):
             self._add_paths([path])
 
     def _add_paths(self, paths) -> None:
+        if busy(self):
+            return
+        if import_media(self, paths, self._add_paths):
+            return
         exts = {e.lower() for e in (self.cfg.video_extensions or [])}
         exts |= {".mp4", ".mkv", ".avi", ".mov", ".ts", ".wmv", ".flv", ".webm", ".m4v"}
-        existing = {self.list_files.item(i).text()
-                    for i in range(self.list_files.count())}
+        existing = {self.list_files.item(i).text() for i in range(self.list_files.count())}
         added = 0
         for raw in paths or []:
             p = Path(str(raw))
             if p.is_dir():
                 for f in sorted(p.rglob("*")):
                     if f.is_file() and f.suffix.lower() in exts and str(f) not in existing:
-                        self.list_files.addItem(str(f))
+                        self.list_files.add_item(str(f), str(f))
                         existing.add(str(f))
                         added += 1
             elif p.is_file() and str(p) not in existing:
-                self.list_files.addItem(str(p))
+                self.list_files.add_item(str(p), str(p))
                 existing.add(str(p))
                 added += 1
         if added:
@@ -540,6 +595,8 @@ class LadaPage(QWidget):
         self._update_count()
 
     def _clear(self) -> None:
+        if busy(self):
+            return
         self.list_files.clear()
         self._update_count()
 
@@ -547,24 +604,31 @@ class LadaPage(QWidget):
         self.lbl_count.setText(f"共 {self.list_files.count()} 个文件")
 
     def _scan(self) -> None:
+        if busy(self):
+            return
         if self.scanner and self.scanner.isRunning():
             return
         self.btn_scan.setEnabled(False)
         self.log_panel.log_info("正在从媒体库挑出有码视频…")
         self.scanner = _CensoredScan(self.cfg)
         self.scanner.log.connect(self.log_panel.log)
-        self.scanner.done.connect(self._on_scan_done)
+        self.scanner.done.connect(
+            lambda paths: after_stopped(self, lambda: self._on_scan_done(paths))
+        )
+        self.scanner.error.connect(self.log_panel.log_error)
         self.scanner.finished.connect(lambda: self.btn_scan.setEnabled(True))
-        self.scanner.start()
+        start_task(self, self.scanner)
 
     def _on_scan_done(self, paths: list) -> None:
         if not paths:
-            self.log_panel.log_warning("没有找到待破解的视频（或媒体库读取失败）。")
+            self.log_panel.log_info("本次范围没有待处理的视频。")
             return
         self._add_paths(paths)
 
     # ── 运行 ──
     def _start(self) -> None:
+        if busy(self, mutating=True):
+            return
         if self.worker and self.worker.isRunning():
             return
         cli = lada_tool.find_lada_cli(self.input_tool.text().strip())
@@ -573,27 +637,32 @@ class LadaPage(QWidget):
             return
         files = [self.list_files.item(i).text() for i in range(self.list_files.count())]
         if not files:
-            QMessageBox.warning(self, "没有任务", "请先添加视频，"
-                                             "或用「挑出库里判定为有码的视频」自动填充。")
+            QMessageBox.warning(
+                self, "没有任务", "请先添加视频，或用「挑出库里判定为有码的视频」自动填充。"
+            )
             return
         if int(self.spin_workers.value()) > 1:
             ok = QMessageBox.question(
-                self, "并发提醒",
+                self,
+                "并发提醒",
                 f"你将同时跑 {self.spin_workers.value()} 个破解任务。\n"
                 "每个任务各占一份显存，显存不足时反而会更慢甚至失败。\n\n"
-                "确定继续吗？")
+                "确定继续吗？",
+            )
             if ok != QMessageBox.Yes:
                 return
         self._apply_params()
+        self._save_tool_path()
+        self._outputs = []
+        self._originals = list(files)
         self.progress.setValue(0)
-        self.worker = LadaRestoreWorker(self.cfg, files, cli, self.tool_options,
-                                        self._ffprobe)
+        self.worker = LadaRestoreWorker(self.cfg, files, cli, self.tool_options, self._ffprobe)
         self.worker.log.connect(self.log_panel.log)
         self.worker.progress.connect(self.progress.setValue)
         self.worker.file_progress.connect(self._on_file_progress)
         self.worker.file_done.connect(self._on_file_done)
         self.worker.finished.connect(self._on_finished)
-        self.worker.start()
+        start_task(self, self.worker)
         self._set_running(True)
 
     def _apply_params(self) -> None:
@@ -626,8 +695,25 @@ class LadaPage(QWidget):
         self.lbl_status.setText(f"{Path(path).name} — {pct}%")
 
     def _on_file_done(self, path: str, ok: bool, note: str) -> None:
+        if ok:
+            directory = (
+                Path(self.cfg.lada_output_dir) if self.cfg.lada_output_dir else Path(path).parent
+            )
+            output = lada_tool.expected_output(directory, path)
+            if output.is_file():
+                self._outputs.append(str(output))
         if not ok and note:
             self.log_panel.log_error(f"    {Path(path).name}：{note}")
+
+    def _send_outputs(self):
+        if busy(self):
+            return
+        if self._outputs:
+            events.restored_ready.emit(list(self._outputs), list(self._originals))
+        else:
+            QMessageBox.information(
+                self, "暂无本次产物", "先完成破解并校验产物，再将本次结果发送到配对审核。"
+            )
 
     def _on_finished(self, stats: dict) -> None:
         self._set_running(False)
@@ -636,23 +722,33 @@ class LadaPage(QWidget):
         else:
             self.lbl_status.setText(f"全部完成：成功 {stats['ok']} / 失败 {stats['fail']}")
         if stats.get("fails"):
-            detail = "\n".join(f"· {Path(p).name}：{why}"
-                              for p, why in stats["fails"][:10])
-            QMessageBox.warning(self, "部分文件失败",
-                                f"共 {len(stats['fails'])} 个失败：\n\n{detail}\n\n"
-                                "产物若已生成会保留，可自行确认。")
+            detail = "\n".join(f"· {Path(p).name}：{why}" for p, why in stats["fails"][:10])
+            QMessageBox.warning(
+                self,
+                "部分文件失败",
+                f"共 {len(stats['fails'])} 个失败：\n\n{detail}\n\n"
+                "产物若已生成会保留，可自行确认。",
+            )
 
     def _set_running(self, running: bool) -> None:
         self.btn_start.setEnabled(not running)
         self.btn_stop.setEnabled(running)
         self.btn_scan.setEnabled(not running)
         self.btn_replace.setEnabled(not running)
-        for w in (self.combo_device, self.combo_preset, self.combo_detect,
-                  self.combo_restore, self.spin_clip, self.spin_workers,
-                  self.combo_affinity, self.btn_detect_affinity):
+        for w in (
+            self.combo_device,
+            self.combo_preset,
+            self.combo_detect,
+            self.combo_restore,
+            self.spin_clip,
+            self.spin_workers,
+            self.combo_affinity,
+            self.btn_detect_affinity,
+        ):
             w.setEnabled(not running)
         self.input_affinity.setEnabled(
-            not running and self.combo_affinity.currentData() == "custom")
+            not running and self.combo_affinity.currentData() == "custom"
+        )
         if running:
             self.lbl_status.setText("正在运行…")
 
@@ -661,10 +757,15 @@ class LadaPage(QWidget):
         self._ffprobe = path or "ffprobe"
 
     def shutdown(self) -> None:
-        """主窗口关闭时调用：停掉队列与探测，避免留下后台进程。"""
-        for w in (self.worker, self.probe_worker, self.scanner):
-            if w and w.isRunning():
-                stop = getattr(w, "stop", None)
-                if callable(stop):
-                    stop()
-                w.wait(8000)
+        stop_page(self)
+
+    def _on_tool_search(self, info):
+        if not info.get("path"):
+            self.log_panel.log_warning("没有找到工具，请手动指定路径。")
+            self._show_hint()
+            return
+        self.input_tool.setText(str(info["path"]))
+        self.tool_options = None
+        self._save_tool_path()
+        self._refresh_tool_status()
+        self.log_panel.log_success("已找到：" + str(info["path"]))

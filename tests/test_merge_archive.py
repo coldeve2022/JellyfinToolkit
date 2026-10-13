@@ -1,8 +1,37 @@
 """分集合并替换归档 / NFO 同步 / 单文件回滚测试。"""
+
 from pathlib import Path
 from types import SimpleNamespace
+import json
+import hashlib
+import pytest
 
 from utils.merge_archive import archive_group_for_merge, restore_entry
+
+
+@pytest.fixture(autouse=True)
+def _trusted_synthetic_merge_manifest(monkeypatch):
+    """Archive unit fixtures simulate the verified output identity from merge core.
+
+    Real demux/track/timing validation lives in test_media_remediation_execution.
+    These fixtures deliberately use small arbitrary bytes to test filesystem rollback.
+    """
+    import utils.merge_archive as archive
+
+    actual = archive.archive_group_for_merge
+
+    def with_manifest(cfg, number, originals, output, *args, **kwargs):
+        output = Path(output)
+        manifest = dict(
+            output_hash=hashlib.sha256(output.read_bytes()).hexdigest(),
+            source_hashes={p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in originals},
+        )
+        output.with_name(output.name + ".toolkit-merge.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        return actual(cfg, number, originals, str(output), *args, **kwargs)
+
+    monkeypatch.setitem(globals(), "archive_group_for_merge", with_manifest)
 
 
 def _cfg(backup_root: Path) -> SimpleNamespace:
@@ -19,12 +48,15 @@ def test_archive_renames_output_syncs_nfo_and_moves_originals(tmp_path):
     media.mkdir()
     (media / "MIAA-743-cd1.mp4").write_bytes(b"V1")
     (media / "MIAA-743-cd2.mp4").write_bytes(b"V2")
-    (media / "MIAA-743-cd1.nfo").write_text("<movie><title>Original</title></movie>", encoding="utf-8")
+    (media / "MIAA-743-cd1.nfo").write_text(
+        "<movie><title>Original</title></movie>", encoding="utf-8"
+    )
     (media / "MIAA-743 合并.mp4").write_bytes(b"MERGED")
 
     originals = [str(media / "MIAA-743-cd1.mp4"), str(media / "MIAA-743-cd2.mp4")]
     ok, entries, errors, final = archive_group_for_merge(
-        _cfg(backup), "MIAA-743", originals, str(media / "MIAA-743 合并.mp4"))
+        _cfg(backup), "MIAA-743", originals, str(media / "MIAA-743 合并.mp4")
+    )
 
     assert ok, errors
     assert final == str(media / "MIAA-743.mp4")
@@ -49,16 +81,14 @@ def test_archive_moves_language_subtitles(tmp_path):
 
     originals = [str(media / "MIAA-743-cd1.mp4"), str(media / "MIAA-743-cd2.mp4")]
     ok, entries, errors, _ = archive_group_for_merge(
-        _cfg(backup), "MIAA-743", originals, str(media / "MIAA-743 合并.mp4"))
+        _cfg(backup), "MIAA-743", originals, str(media / "MIAA-743 合并.mp4")
+    )
 
-    assert ok, errors
-    assert not (media / "MIAA-743-cd1.zh.srt").exists()
-    assert not (media / "MIAA-743-cd1.chi.ass").exists()
-    assert not (media / "MIAA-743-cd2.default.srt").exists()
-    backup_dir = backup / "_merged_originals" / "MIAA-743"
-    assert (backup_dir / "MIAA-743-cd1.zh.srt").exists()
-    assert (backup_dir / "MIAA-743-cd1.chi.ass").exists()
-    assert (backup_dir / "MIAA-743-cd2.default.srt").exists()
+    assert not ok, "不能归档掉未生成合并时间轴副本的原字幕"
+    assert (media / "MIAA-743-cd1.zh.srt").exists()
+    assert (media / "MIAA-743-cd1.chi.ass").exists()
+    assert (media / "MIAA-743-cd2.default.srt").exists()
+    assert any("外挂字幕" in error for error in errors)
 
 
 def test_restore_single_media_entry(tmp_path):
@@ -71,11 +101,15 @@ def test_restore_single_media_entry(tmp_path):
 
     originals = [str(media / "ABC-123-cd1.mp4"), str(media / "ABC-123-cd2.mp4")]
     ok, entries, errors, _ = archive_group_for_merge(
-        _cfg(backup), "ABC-123", originals, str(media / "ABC-123 合并.mp4"))
+        _cfg(backup), "ABC-123", originals, str(media / "ABC-123 合并.mp4")
+    )
     assert ok, errors
 
-    media_entry = next(e for e in entries if e["kind"] == "media"
-                       and e["original_path"].endswith("ABC-123-cd1.mp4"))
+    media_entry = next(
+        e
+        for e in entries
+        if e["kind"] == "media" and e["original_path"].endswith("ABC-123-cd1.mp4")
+    )
     ok2, detail = restore_entry(media_entry)
     assert ok2, detail
     assert (media / "ABC-123-cd1.mp4").exists()
@@ -91,8 +125,8 @@ def test_archive_keeps_number_nfo_when_it_is_the_source(tmp_path):
     (media / "MIAA-743 合并.mp4").write_bytes(b"MERGED")
 
     ok, entries, errors, final = archive_group_for_merge(
-        _cfg(backup), "MIAA-743", [str(media / "MIAA-743.mp4")],
-        str(media / "MIAA-743 合并.mp4"))
+        _cfg(backup), "MIAA-743", [str(media / "MIAA-743.mp4")], str(media / "MIAA-743 合并.mp4")
+    )
 
     assert ok, errors
     assert final == str(media / "MIAA-743.mp4")
@@ -114,7 +148,8 @@ def test_archive_records_merged_output_when_rename_disabled(tmp_path):
     )
     originals = [str(media / "MIAA-743-cd1.mp4"), str(media / "MIAA-743-cd2.mp4")]
     ok, entries, errors, final = archive_group_for_merge(
-        cfg, "MIAA-743", originals, str(media / "MIAA-743 合并.mp4"))
+        cfg, "MIAA-743", originals, str(media / "MIAA-743 合并.mp4")
+    )
     assert ok, errors
     assert final == str(media / "MIAA-743 合并.mp4")
     assert any(e["kind"] == "merged_output" and e["final_path"] == final for e in entries)

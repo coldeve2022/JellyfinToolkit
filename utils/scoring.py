@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -217,8 +218,36 @@ def sample_weight(it: Item) -> float:
     return w
 
 
+def positive_weight(it: Item, label=None) -> float:
+    """Trusted training signal: confirmed LIKE learns; KEEP only protects a file."""
+    if label in NEGATIVE_LABELS:
+        return 0.0
+    if label == LABEL_LIKE:
+        return max(2.0, sample_weight(it))
+    return sample_weight(it) if it.behavior_known else 0.0
+
+
+CONTENT_KINDS = {"actor", "studio", "genre", "tag"}
+
+
+def entity_key(path: str) -> str:
+    """Canonical physical identity; aliases/hardlinks never become deletion copies."""
+    if not path:
+        return ""
+    p = os.path.realpath(os.path.abspath(path))
+    try:
+        st = os.stat(p)
+        if st.st_ino:
+            return f"file:{st.st_dev}:{st.st_ino}"
+    except OSError:
+        pass
+    return "path:" + os.path.normcase(os.path.normpath(p))
+
+
 def quality_score(it: Item) -> float:
     base = 0.5
+    if it.height:
+        return 0.6 if it.height >= 1080 else (0.4 if it.height < 720 else 0.5)
     if it.size is not None and it.size > 0:
         mb = it.size / (1024 * 1024)
         if mb < 150:
@@ -229,26 +258,48 @@ def quality_score(it: Item) -> float:
 
 
 # ── 去重（同一番号，真重复时标记较差版本为 loser）──────────
-def group_losers(grp: list[Item]) -> set[str]:
+def group_losers(grp: list[Item], labels: Optional[dict] = None) -> set[str]:
     """组内判定应删的差版本 id。CD 全分卷组 = 同一作品分集，一律不删。"""
     if all(i.is_cd for i in grp):
         return set()
+    for it in grp:
+        if it.width and it.height or not it.path or not os.path.isfile(it.path):
+            continue
+        stat = os.stat(it.path)
+        identity = (stat.st_size, stat.st_mtime_ns)
+        if getattr(it, "_facts_attempted", None) == identity:
+            continue
+        it._facts_attempted = identity
+        from utils.tools import resolve_tool
+        from utils.merge import probe_part
+        probe = probe_part(resolve_tool("ffprobe") or "", it.path, timeout=10)
+        if probe.ok and probe.width > 0 and probe.height > 0:
+            it.width, it.height, it.duration = probe.width, probe.height, probe.duration
 
     def _rank(it: Item) -> tuple:
         return (1 if it.is_uncensored else 0,
                 0 if it.is_cd else 1,
+                 (it.width or 0) * (it.height or 0),
                 it.size or 0,
                 it.year or 0)
 
-    best = max(grp, key=_rank)
-    return {it.id for it in grp if it is not best}
+    protected = [it for it in grp if (labels or {}).get(it.id) in POSITIVE_LABELS]
+    best = max(protected or grp, key=_rank)
+    best_key = entity_key(best.path)
+    return {it.id for it in grp if it is not best
+            and (not best_key or entity_key(it.path) != best_key)
+            and (labels or {}).get(it.id) not in POSITIVE_LABELS
+            and (_rank(it) < _rank(best))}
 
 
-def dedup_loser_ids(items: list[Item]) -> set[str]:
+def dedup_loser_ids(items: list[Item], labels: Optional[dict] = None) -> set[str]:
     losers: set[str] = set()
     for _num, grp in _dedup_groups_raw(items):
-        losers |= group_losers(grp)
-    return losers
+        losers |= group_losers(grp, labels)
+    protected = {entity_key(it.path) for it in items
+                 if (labels or {}).get(it.id) in POSITIVE_LABELS or sample_weight(it) > 0}
+    return {iid for iid in losers
+            if not any(it.id == iid and entity_key(it.path) in protected for it in items)}
 
 
 def _dedup_groups_raw(items: list[Item]):
@@ -259,15 +310,20 @@ def _dedup_groups_raw(items: list[Item]):
     当成某个版本的"重复项"而误删正片）。
     """
     groups: dict[str, list[Item]] = defaultdict(list)
+    seen_entities: set = set()
     for it in items:
         if is_junk_item(it):
             continue
         if it.num and it.bucket not in (BUCKET_TRAILER, BUCKET_OTHER):
+            key = entity_key(it.path) or f"id:{it.id}"
+            if key in seen_entities:
+                continue
+            seen_entities.add(key)
             groups[it.num].append(it)
     return [(num, grp) for num, grp in groups.items() if len(grp) >= 2]
 
 
-def dedup_groups(items: list[Item]) -> list[dict]:
+def dedup_groups(items: list[Item], labels: Optional[dict] = None) -> list[dict]:
     """重复版本分组：供去重页展示。
 
     Returns:
@@ -275,11 +331,14 @@ def dedup_groups(items: list[Item]) -> list[dict]:
           "cd_index": {item_id: cd号}}]
     """
     out = []
+    protected = {entity_key(it.path) for it in items
+                 if (labels or {}).get(it.id) in POSITIVE_LABELS or sample_weight(it) > 0}
     for num, grp in _dedup_groups_raw(items):
         out.append({
             "num": num,
             "items": grp,
-            "losers": group_losers(grp),
+            "losers": {iid for iid in group_losers(grp, labels)
+                       if not any(it.id == iid and entity_key(it.path) in protected for it in grp)},
             "all_cd": all(i.is_cd for i in grp),
         })
     return out
@@ -304,7 +363,7 @@ def _build_feature_sets_from_map(items: list[Item], labels: dict[str, str],
 
     for it in items:
         lab = labels.get(it.id)
-        w = sample_weight(it)
+        w = positive_weight(it, lab)
         feats = feats_map[it.id]
         if lab in NEGATIVE_LABELS:
             for k, fw in feats.items():
@@ -377,7 +436,11 @@ def rank_items(
     liked, disliked = _build_feature_sets_from_map(
         items, labels, feats_map, extra_liked=extra_liked,
         extra_disliked=extra_disliked, idf=idf)
-    losers = dedup_loser_ids(items)
+    losers = dedup_loser_ids(items, labels)
+    profile_ready = any(positive_weight(it, labels.get(it.id)) > 0
+                        and any(k[0] in CONTENT_KINDS for k in feats_map[it.id]) for it in items)
+    trusted_negative = {key for it in items if labels.get(it.id) in NEGATIVE_LABELS
+                        for key in feats_map[it.id] if key[0] in CONTENT_KINDS}
 
     # 增强用：正样本质心（Rocchio 弱化版）、题材共现对、特征→代表正样本
     pos_centroid: dict[tuple, float] = defaultdict(float)
@@ -385,7 +448,7 @@ def rank_items(
     feat_anchor: dict = {}
     if enhance:
         for it in items:
-            if labels.get(it.id) in NEGATIVE_LABELS or sample_weight(it) <= 0:
+            if positive_weight(it, labels.get(it.id)) <= 0:
                 continue
             f = feats_map[it.id]
             for k, w in f.items():
@@ -425,7 +488,7 @@ def rank_items(
         cov = coverage_score(feats, liked, disliked, idf=idf)
         featureless = cov is None
         # 无任何"有判别力"特征（只有年份/分桶等权重0项）→ 信息不足，不可判删
-        has_content = any(FEAT_WEIGHT.get(k[0], 0) > 0 for k in feats)
+        has_content = any(k[0] in CONTENT_KINDS for k in feats)
 
         kv = cov
         anchor_note = ""
@@ -454,6 +517,9 @@ def rank_items(
         elif featureless or not has_content:
             decision, final = DEC_REVIEW, 0.0
             reason = "无可用元数据（演员/类型/标签均缺失），无法预测"
+        elif not it.behavior_known or (not profile_ready and not (set(feats) & trusted_negative)):
+            decision, final = DEC_REVIEW, 0.0
+            reason = "观看用户/喜好样本不足，尚不能据此建议删除"
         elif it.is_cd:
             # CD 分卷 = 同一作品分集，不能凭内容自动删，交给人/去重页整体处理
             decision, final = DEC_REVIEW, wc * cov + wq * sq - wd * sd

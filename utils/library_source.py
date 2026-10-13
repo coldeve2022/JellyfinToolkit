@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import re
 from typing import Callable, Optional
 
 from utils.library import (
@@ -25,6 +27,7 @@ from utils.library import (
     SCHEMA_LEGACY,
     collect_library,
     detect_db_schema,
+    LibraryCollectionCancelled,
 )
 from utils.library_api import LibraryApiError, collect_library_api
 from utils.media_server import (
@@ -49,9 +52,41 @@ SOURCE_CHOICES = (
 )
 
 _SCHEMA_CN = {
-    SCHEMA_JELLYFIN_EF: "Jellyfin 10.9+ 架构",
-    SCHEMA_LEGACY: "传统架构（Emby / Jellyfin ≤10.8）",
+    SCHEMA_JELLYFIN_EF: "Jellyfin 10.11+ 架构",
+    SCHEMA_LEGACY: "传统架构（Emby / Jellyfin ≤10.10）",
 }
+
+
+CollectionCancelled = LibraryCollectionCancelled
+
+
+def map_media_path(path: str, mappings=None) -> str:
+    """Explicit longest segment-prefix mapping; refuse traversal and substring matches."""
+    source = str(path).replace("\\", "/")
+    if ".." in source.split("/"):
+        return path
+    for mapping in sorted((m for m in (mappings or []) if isinstance(m, dict)),
+                          key=lambda m: len(str(m.get("remote", ""))), reverse=True):
+        remote = str(mapping.get("remote") or "").replace("\\", "/").rstrip("/")
+        local = str(mapping.get("local") or "")
+        if not remote or not local:
+            continue
+        windows = bool(re.match(r"^[A-Za-z]:", remote) or remote.startswith("//"))
+        left, right = (source.casefold(), remote.casefold()) if windows else (source, remote)
+        if left == right or left.startswith(right + "/"):
+            tail = source[len(remote):].lstrip("/")
+            return os.path.join(local, *tail.split("/")) if tail else local
+    return path
+
+
+def capabilities(cfg, items=None) -> dict:
+    """Report reachable local media separately from metadata-only remote library access."""
+    rows = list(items or [])
+    local = sum(bool(it.path and os.path.isfile(it.path)) for it in rows)
+    return {"source": normalize_source(_get(cfg, "library_source", "auto")),
+            "items": len(rows), "local_items": local, "remote_items": len(rows) - local,
+            "can_modify_local": bool(local), "has_path_mappings": bool(_get(cfg, "library_path_mappings", [])),
+            "can_sync_server": bool(_get(cfg, "jellyfin_server") and _get(cfg, "jellyfin_api_key"))}
 
 
 class SourceUnavailable(Exception):
@@ -126,7 +161,7 @@ def resolve(value, log: Optional[Callable[[str], None]] = None) -> tuple[str, di
         if schema not in _SCHEMA_CN:
             raise SourceUnavailable(
                 f"无法识别数据库架构：{path}\n"
-                "Jellyfin 请指向 jellyfin.db（10.9+）或 library.db（10.8 及更早）；\n"
+                "Jellyfin 请指向 jellyfin.db（10.11+）或 library.db（10.10 及更早）；\n"
                 "Emby 建议改用「服务器 API」。")
         return SOURCE_DB, {"path": path, "schema": schema}
 
@@ -205,17 +240,32 @@ def collect(
     """
     kind, opts = resolve(value, log=log)
     if kind == SOURCE_DB:
-        return collect_library(
+        items = collect_library(
             str(opts["path"]), log=log, progress=progress,
-            should_stop=should_stop, exclude_keywords=exclude_keywords)
-    try:
-        items, _server_kind = collect_library_api(
+            should_stop=should_stop, exclude_keywords=exclude_keywords,
+            user_id=str(_get(value, "jellyfin_user_id") or ""))
+    else:
+        try:
+            items, _server_kind = collect_library_api(
             opts["server"], opts["key"], log=log, progress=progress,
             should_stop=should_stop, exclude_keywords=exclude_keywords,
-            declared_kind=opts.get("kind", KIND_AUTO))
-        return items
-    except LibraryApiError as e:
-        raise SourceUnavailable(str(e)) from e
+            declared_kind=opts.get("kind", KIND_AUTO),
+            user_id=str(_get(value, "jellyfin_user_id") or ""))
+        except LibraryApiError as e:
+            raise SourceUnavailable(str(e)) from e
+    if should_stop and should_stop():
+        raise CollectionCancelled("采集已取消；部分结果不会用于全库统计或删除建议")
+    mappings = _get(value, "library_path_mappings", [])
+    for it in items:
+        original = it.path
+        mapped = map_media_path(original, mappings)
+        if mapped != original:
+            it.source_path = original
+            it.path = mapped
+            if not it.cover or not os.path.isfile(it.cover):
+                from utils.library import find_cover
+                it.cover = find_cover(mapped, it.num, it.cd_index)
+    return items
 
 
 __all__ = [

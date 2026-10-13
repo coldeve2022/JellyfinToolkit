@@ -6,6 +6,7 @@ build_stylesheet(theme_name) 生成的 QSS。
 字体族按平台**探测**后给出（见 utils.fonts），不能写死 "Microsoft YaHei" ——
 没有该字体的机器上 Qt 会静默回退，中文可能变方块。
 """
+
 from __future__ import annotations
 
 from ui import theme
@@ -66,6 +67,9 @@ def build_stylesheet(theme_name: str | None = None) -> str:
 
     /* ── 侧边栏 ── */
     #sidebar {{ background-color: {bg_darkest}; }}
+    #navigation-scroll, #navigation-scroll QWidget {{ background-color: {bg_darkest}; }}
+    QLabel[cssClass="nav-group"] {{ color: {text_secondary}; padding: 8px 14px 2px; font-size: 11px; }}
+    #fixed-action-footer {{ background-color: {bg_card}; border-top: 1px solid {border}; }}
     #logo {{
         color: {logo_color};
         font-size: 16px;
@@ -85,7 +89,7 @@ def build_stylesheet(theme_name: str | None = None) -> str:
         color: {text_primary};
         font-weight: 500;
     }}
-    QPushButton:hover {{ background-color: #3B4450; border-color: {accent};
+    QPushButton:hover {{ background-color: {bg_hover}; border-color: {accent};
                         color: {text_primary}; }}
     QPushButton:pressed {{ background-color: {bg_card}; }}
     QPushButton:disabled {{

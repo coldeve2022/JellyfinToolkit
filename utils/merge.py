@@ -3,6 +3,7 @@
 依赖：标准库 + utils.library.extract_number（复用现有番号提取）。
 与 Qt 完全解耦，可单元测试。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -23,7 +24,8 @@ from utils.nfo_source import read_nfo_title
 # 视频扩展名的**唯一事实来源**是 utils.media_types（兜底默认值），
 # 用户配置 `video_extensions` 优先。这里只保留名字做兼容。
 from utils.media_types import (  # noqa: E402
-    DEFAULT_VIDEO_EXTENSIONS as VIDEO_EXTENSIONS, split_path_name,
+    DEFAULT_VIDEO_EXTENSIONS as VIDEO_EXTENSIONS,
+    split_path_name,
 )
 
 # mp4 容器可无损容纳的编解码器（其余回退 mkv/原容器）
@@ -42,6 +44,7 @@ MP4_COMPAT_AUDIO = {"aac", "mp3", "ac3", "eac3", "alac", "opus", ""}
 @dataclass
 class PartProbe:
     """ffprobe 探测结果。"""
+
     ok: bool = True
     duration: float = 0.0
     width: int = 0
@@ -67,11 +70,13 @@ class PartProbe:
     r_fps: float = 0.0
     nb_frames: int = 0
     error: str = ""
+    streams: list = field(default_factory=list)
 
 
 @dataclass
 class PartFile:
     """一个分集文件。"""
+
     path: str
     name: str
     stem: str
@@ -86,6 +91,7 @@ class PartFile:
 @dataclass
 class EpisodeGroup:
     """同番号分组。"""
+
     number: str
     parts: list
     status: str = "ready"
@@ -97,6 +103,7 @@ class EpisodeGroup:
 @dataclass
 class MergePlan:
     """一次扫描的完整计划。"""
+
     groups: list
     unrecognized: list
     stats: dict
@@ -109,8 +116,7 @@ def extract_number_ext(name: str) -> Optional[str]:
     """扩展番号提取：在现有 extract_number 基础上支持 FC2-PPV-数字。"""
     if not name:
         return None
-    n = re.sub(r"\.(mp4|mkv|avi|mov|flv|wmv|ts|rmvb|webm|mpg)$", "",
-               str(name), flags=re.I)
+    n = re.sub(r"\.(mp4|mkv|avi|mov|flv|wmv|ts|rmvb|webm|mpg)$", "", str(name), flags=re.I)
     m = re.search(r"\bfc2\s*[-_ .]?\s*ppv\s*[-_ .]?\s*(\d{5,7})", n, re.I)
     if m:
         return f"FC2-{m.group(1)}"
@@ -135,8 +141,19 @@ def display_number_for_group(group) -> str:
 # ── 版本后缀剥离 ──
 
 _VARIANT_WORDS = {
-    "破解", "流出", "无码", "字幕", "restored", "uncensored",
-    "1080p", "720p", "2160p", "4k", "hd", "h720", "ch",
+    "破解",
+    "流出",
+    "无码",
+    "字幕",
+    "restored",
+    "uncensored",
+    "1080p",
+    "720p",
+    "2160p",
+    "4k",
+    "hd",
+    "h720",
+    "ch",
 }
 # 单字母版本标记：U=无码、C=字幕版（与分集字母 A/B/D/E... 区分）
 _VARIANT_LETTERS = {"u", "c"}
@@ -187,8 +204,7 @@ def _letter_to_index(s: str) -> int:
     return ord(s.strip().lower()) - ord("a") + 1
 
 
-_CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-              "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 
 
 def _cn_numeral(s: str) -> Optional[int]:
@@ -276,9 +292,15 @@ def group_by_number(paths) -> tuple:
             continue
         variants = strip_variant_tokens(stem)[1]
         part_index, part_kind = parse_part_index(stem, number)
-        pf = PartFile(path=path, name=name, stem=stem, number=number,
-                      part_index=part_index, part_kind=part_kind,
-                      variants=variants)
+        pf = PartFile(
+            path=path,
+            name=name,
+            stem=stem,
+            number=number,
+            part_index=part_index,
+            part_kind=part_kind,
+            variants=variants,
+        )
         groups[normalize_number(number)].append(pf)
     return dict(groups), unrecognized
 
@@ -333,10 +355,23 @@ def probe_part(ffprobe: str, path: str, timeout: int = 120) -> PartProbe:
         return probe
     try:
         r = subprocess.run(
-            [ffprobe, "-v", "quiet", "-print_format", "json",
-             "-show_streams", "-show_format", str(path)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=_creationflags(), timeout=timeout)
+            [
+                ffprobe,
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_streams",
+                "-show_format",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_creationflags(),
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired:
         probe.ok = False
         probe.error = "ffprobe 超时"
@@ -356,6 +391,8 @@ def probe_part(ffprobe: str, path: str, timeout: int = 120) -> PartProbe:
         probe.error = f"元数据解析异常: {e}"
         return probe
     for s in data.get("streams", []):
+        if not (s.get("disposition") or {}).get("attached_pic"):
+            probe.streams.append(s)
         ct = s.get("codec_type", "")
         if ct == "video":
             if (s.get("disposition") or {}).get("attached_pic"):
@@ -409,8 +446,9 @@ def probe_part(ffprobe: str, path: str, timeout: int = 120) -> PartProbe:
     return probe
 
 
-def validate_merged_output(ffprobe: str, path: str, parts: list,
-                           timeout: int = 120) -> tuple[bool, str]:
+def validate_merged_output(
+    ffprobe: str, path: str, parts: list, timeout: int = 120
+) -> tuple[bool, str]:
     """用 ffprobe 做轻量输出校验：只读元数据，不解码。
 
     检查输出是否存在视频流、时长是否接近各分集之和、帧率是否接近首分集。
@@ -429,17 +467,13 @@ def validate_merged_output(ffprobe: str, path: str, parts: list,
         expected_duration = sum(known_durations)
         dur_tolerance = max(2.0, expected_duration * 0.02)
         if abs(probe.duration - expected_duration) > dur_tolerance:
-            return False, (
-                f"输出时长异常：{probe.duration:.2f}s，预期约 {expected_duration:.2f}s"
-            )
+            return False, (f"输出时长异常：{probe.duration:.2f}s，预期约 {expected_duration:.2f}s")
 
     first_fps = parts[0].probe.fps if parts else 0.0
     if first_fps > 0 and probe.fps > 0:
         diff = abs(probe.fps - first_fps)
         if diff > max(0.05, first_fps * 0.10):
-            return False, (
-                f"输出帧率异常：{probe.fps:.3f}fps，预期约 {first_fps:.3f}fps"
-            )
+            return False, (f"输出帧率异常：{probe.fps:.3f}fps，预期约 {first_fps:.3f}fps")
 
     first_video = parts[0].probe.video_codec if parts else ""
     if first_video and probe.video_codec != first_video:
@@ -476,14 +510,22 @@ def check_merge_compat(parts: list) -> tuple:
         if ref.video_codec and pr.video_codec and ref.video_codec != pr.video_codec:
             issues.append(f"{p.name}: 视频编码不同 ({ref.video_codec} vs {pr.video_codec})")
         if ref.width and pr.width and (ref.width != pr.width or ref.height != pr.height):
-            issues.append(f"{p.name}: 分辨率不同 ({ref.width}x{ref.height} vs {pr.width}x{pr.height})")
+            issues.append(
+                f"{p.name}: 分辨率不同 ({ref.width}x{ref.height} vs {pr.width}x{pr.height})"
+            )
         fps_tol = max(0.01, min(ref.fps, pr.fps) * 0.01) if (ref.fps and pr.fps) else 0.05
         if ref.fps and pr.fps and abs(ref.fps - pr.fps) > fps_tol:
             issues.append(f"{p.name}: 帧率不同 ({ref.fps} vs {pr.fps})")
         if ref.pixel_format and pr.pixel_format and ref.pixel_format != pr.pixel_format:
             issues.append(f"{p.name}: 像素格式不同 ({ref.pixel_format} vs {pr.pixel_format})")
-        if ref.sample_aspect_ratio and pr.sample_aspect_ratio and ref.sample_aspect_ratio != pr.sample_aspect_ratio:
-            issues.append(f"{p.name}: 像素宽高比不同 ({ref.sample_aspect_ratio} vs {pr.sample_aspect_ratio})")
+        if (
+            ref.sample_aspect_ratio
+            and pr.sample_aspect_ratio
+            and ref.sample_aspect_ratio != pr.sample_aspect_ratio
+        ):
+            issues.append(
+                f"{p.name}: 像素宽高比不同 ({ref.sample_aspect_ratio} vs {pr.sample_aspect_ratio})"
+            )
         if ref.color_primaries and pr.color_primaries and ref.color_primaries != pr.color_primaries:
             issues.append(f"{p.name}: 色彩原色不同 ({ref.color_primaries} vs {pr.color_primaries})")
         if ref.color_transfer and pr.color_transfer and ref.color_transfer != pr.color_transfer:
@@ -493,7 +535,9 @@ def check_merge_compat(parts: list) -> tuple:
         if ref.color_range and pr.color_range and ref.color_range != pr.color_range:
             issues.append(f"{p.name}: 色彩范围不同 ({ref.color_range} vs {pr.color_range})")
         if ref.audio_codec != pr.audio_codec:
-            issues.append(f"{p.name}: 音频编码不同 ({ref.audio_codec or '无'} vs {pr.audio_codec or '无'})")
+            issues.append(
+                f"{p.name}: 音频编码不同 ({ref.audio_codec or '无'} vs {pr.audio_codec or '无'})"
+            )
         if ref.sample_rate and pr.sample_rate and ref.sample_rate != pr.sample_rate:
             issues.append(f"{p.name}: 音频采样率不同 ({ref.sample_rate} vs {pr.sample_rate})")
         if ref.channels and pr.channels and ref.channels != pr.channels:
@@ -534,8 +578,7 @@ def validate_merge_selection(parts: list, allow_reencode: bool = False) -> tuple
 # ── 去重（内容级） ──
 
 
-def quick_file_hash(path: str, head: int = 8 * 1024 * 1024,
-                    tail: int = 8 * 1024 * 1024) -> str:
+def quick_file_hash(path: str, head: int = 8 * 1024 * 1024, tail: int = 8 * 1024 * 1024) -> str:
     """快速采样哈希：文件大小 + 首 8MB + 尾 8MB。失败返回空串。"""
     try:
         size = os.path.getsize(path)
@@ -586,33 +629,48 @@ def _dhash64(gray: bytes, w: int, h: int) -> int:
     for r in range(H):
         for c in range(W - 1):
             if cells[r * W + c] > cells[r * W + c + 1]:
-                bits |= (1 << idx)
+                bits |= 1 << idx
             idx += 1
     return bits
 
 
-def extract_frame_hashes(ffmpeg: str, path: str, timestamps: list,
-                         size: int = 32, timeout: int = 60) -> Optional[list]:
+def extract_frame_hashes(
+    ffmpeg: str, path: str, timestamps: list, size: int = 32, timeout: int = 60
+) -> Optional[list]:
     """用 ffmpeg 抽帧并计算 dHash。任一帧失败返回 None（视为无法判定）。"""
     if not ffmpeg or not path or not os.path.isfile(path) or not timestamps:
         return None
     hashes = []
     for t in timestamps:
         cmd = [
-            ffmpeg, "-hide_banner", "-loglevel", "error",
-            "-accurate_seek", "-ss", f"{t:.3f}", "-i", str(path),
-            "-map", "0:v:0", "-frames:v", "1",
-            "-vf", f"scale={size}:{size}:flags=area,format=gray",
-            "-f", "rawvideo", "-",
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-accurate_seek",
+            "-ss",
+            f"{t:.3f}",
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale={size}:{size}:flags=area,format=gray",
+            "-f",
+            "rawvideo",
+            "-",
         ]
         try:
-            r = subprocess.run(cmd, capture_output=True, timeout=timeout,
-                               creationflags=_creationflags())
+            r = subprocess.run(
+                cmd, capture_output=True, timeout=timeout, creationflags=_creationflags()
+            )
         except Exception:  # noqa: BLE001
             return None
         if r.returncode != 0 or not r.stdout:
             return None
-        gray = r.stdout[:size * size]
+        gray = r.stdout[: size * size]
         if len(gray) != size * size:
             return None
         hashes.append(_dhash64(gray, size, size))
@@ -620,6 +678,7 @@ def extract_frame_hashes(ffmpeg: str, path: str, timestamps: list,
 
 
 if hasattr(int, "bit_count"):
+
     def popcount(value: int) -> int:
         """二进制里 1 的个数。"""
         return value.bit_count()
@@ -646,8 +705,9 @@ def _quick_hash_cached(path: str, cache: dict) -> str:
     return cache[path]
 
 
-def _frame_hashes_cached_at(ffmpeg: str, path: str, timestamps: list,
-                            cache: dict) -> Optional[list]:
+def _frame_hashes_cached_at(
+    ffmpeg: str, path: str, timestamps: list, cache: dict
+) -> Optional[list]:
     key = (path, tuple(timestamps))
     if key not in cache:
         cache[key] = extract_frame_hashes(ffmpeg, path, timestamps)
@@ -672,11 +732,17 @@ def _should_fingerprint(a: PartFile, b: PartFile) -> bool:
     return False
 
 
-def _duplicate_pair(a: PartFile, b: PartFile, ffmpeg: str,
-                    max_distance: int, sim_threshold: float,
-                    frame_count: int, dur_tolerance: float,
-                    hash_cache: Optional[dict] = None,
-                    frame_cache: Optional[dict] = None) -> bool:
+def _duplicate_pair(
+    a: PartFile,
+    b: PartFile,
+    ffmpeg: str,
+    max_distance: int,
+    sim_threshold: float,
+    frame_count: int,
+    dur_tolerance: float,
+    hash_cache: Optional[dict] = None,
+    frame_cache: Optional[dict] = None,
+) -> bool:
     """判定两个文件是否内容重复（字节级 或 画面指纹级）。"""
     pa, pb = a.probe, b.probe
     # 1) 字节级完全重复（同大小 + 首尾采样哈希一致）
@@ -720,9 +786,20 @@ def detect_duplicates(parts: list, ffmpeg: str = "", options: Optional[dict] = N
     hash_cache: dict = {}
     frame_cache: dict = {}
     for p in parts:
-        if any(_duplicate_pair(p, q, ffmpeg, max_distance, sim_threshold,
-                               frame_count, dur_tolerance,
-                               hash_cache, frame_cache) for q in kept):
+        if any(
+            _duplicate_pair(
+                p,
+                q,
+                ffmpeg,
+                max_distance,
+                sim_threshold,
+                frame_count,
+                dur_tolerance,
+                hash_cache,
+                frame_cache,
+            )
+            for q in kept
+        ):
             duplicates.append(p.path)
         else:
             kept.append(p)
@@ -810,8 +887,7 @@ def _classify_group(group: EpisodeGroup, kept: list, options: dict) -> tuple:
     if len(kept) > max_parts:
         return "needs_review", [f"分集数 {len(kept)} 超过上限 {max_parts}"]
 
-    short = [p.name for p in kept
-             if p.probe.duration and p.probe.duration < min_duration]
+    short = [p.name for p in kept if p.probe.duration and p.probe.duration < min_duration]
     if short:
         return "needs_review", [f"疑似预告/广告短分集: {'、'.join(short[:3])}"]
 
@@ -821,10 +897,14 @@ def _classify_group(group: EpisodeGroup, kept: list, options: dict) -> tuple:
 # ── 合并计划 ──
 
 
-def build_merge_plan(paths, ffmpeg: str = "", ffprobe: str = "",
-                     options: Optional[dict] = None,
-                     progress: Optional[Callable] = None,
-                     should_stop: Optional[Callable] = None) -> MergePlan:
+def build_merge_plan(
+    paths,
+    ffmpeg: str = "",
+    ffprobe: str = "",
+    options: Optional[dict] = None,
+    progress: Optional[Callable] = None,
+    should_stop: Optional[Callable] = None,
+) -> MergePlan:
     """扫描 → 分组 → probe → 去重 → 兼容性 → 状态。纯逻辑，可在后台线程调用。"""
     options = options or {}
     groups, unrecognized = group_by_number(paths)
@@ -850,15 +930,19 @@ def build_merge_plan(paths, ffmpeg: str = "", ffprobe: str = "",
             break
         files.sort(key=lambda p: p.part_index)
         kept, dup_paths = detect_duplicates(files, ffmpeg, options)
-        group = EpisodeGroup(number=number, parts=files,
-                             duplicate_paths=dup_paths,
-                             selected_paths=[p.path for p in kept])
+        group = EpisodeGroup(
+            number=number,
+            parts=files,
+            duplicate_paths=dup_paths,
+            selected_paths=[p.path for p in kept],
+        )
         group.status, group.issues = _classify_group(group, kept, options)
         if group.status in ("needs_review", "conflict"):
             group.selected_paths = []
         plans.append(group)
-    return MergePlan(groups=plans, unrecognized=unrecognized,
-                     stats=_plan_stats(plans, unrecognized))
+    return MergePlan(
+        groups=plans, unrecognized=unrecognized, stats=_plan_stats(plans, unrecognized)
+    )
 
 
 def _plan_stats(plans: list, unrecognized: list) -> dict:
@@ -891,36 +975,13 @@ def is_auxiliary_media(path: str) -> bool:
     return is_junk_attachment_path(path, split_path_name(str(path)))
 
 
-def scan_files(root_paths, extensions=VIDEO_EXTENSIONS,
-               exclude_keywords=None) -> list:
-    """递归扫描目录/文件，返回视频路径列表。"""
-    exts = {e.lower() for e in extensions}
-    exclude = [k.lower() for k in (exclude_keywords or []) if k]
-    out = []
-    seen = set()
-    for root in root_paths:
-        p = Path(root)
-        if p.is_file():
-            candidates = [p]
-        elif p.is_dir():
-            candidates = p.rglob("*")
-        else:
-            continue
-        for f in candidates:
-            if not f.is_file():
-                continue
-            if f.suffix.lower() not in exts:
-                continue
-            sp = str(f)
-            if is_auxiliary_media(sp):
-                continue
-            if exclude and any(k in sp.lower() for k in exclude):
-                continue
-            if sp in seen:
-                continue
-            seen.add(sp)
-            out.append(sp)
-    return out
+def scan_files(root_paths, extensions=VIDEO_EXTENSIONS, exclude_keywords=None) -> list:
+    """Compatibility adapter for the shared cancellable discovery service."""
+    from utils.file_scan import iter_media_files
+
+    return list(
+        iter_media_files(root_paths, video_exts=extensions, exclude_keywords=exclude_keywords)
+    )
 
 
 def unique_output_path(p: Path) -> Path:
@@ -1121,13 +1182,15 @@ def discover_legacy_merged_files(root_paths, extensions=VIDEO_EXTENSIONS) -> lis
             if not base_stem:
                 continue
             number = extract_number_ext(base_stem) or base_stem
-            items.append({
-                "path": key,
-                "stem": stem,
-                "base_stem": base_stem,
-                "display_number": number,
-                "target": str(candidate.with_name(number + candidate.suffix)),
-            })
+            items.append(
+                {
+                    "path": key,
+                    "stem": stem,
+                    "base_stem": base_stem,
+                    "display_number": number,
+                    "target": str(candidate.with_name(number + candidate.suffix)),
+                }
+            )
     return items
 
 
@@ -1164,39 +1227,72 @@ def finalize_legacy_merged_output(video_path: str) -> tuple[bool, str, str]:
             if f == sp or not f.is_file():
                 continue
             suffix = f.suffix.lower()
-            if suffix in {".nfo", ".srt", ".ass", ".ssa", ".sub", ".vtt",
-                          ".jpg", ".jpeg", ".png", ".webp"}:
+            if suffix in {
+                ".nfo",
+                ".srt",
+                ".ass",
+                ".ssa",
+                ".sub",
+                ".vtt",
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".webp",
+            }:
                 if f.stem == stem or f.stem.startswith(stem + "."):
                     sidecars.append(f)
     except OSError:
         pass
 
-    try:
-        os.replace(str(sp), str(target))
-    except OSError as e:
-        return False, f"重命名视频失败：{e}", ""
+    from utils.file_ops import safe_replace, safe_write_text, OperationJournal
 
+    mappings = []
     for side in sidecars:
-        remainder = side.stem[len(stem):]
+        remainder = side.stem[len(stem) :]
         new_side = sp.with_name(target.stem + remainder + side.suffix)
-        try:
+        if new_side.exists():
+            return False, f"关联文件已存在，拒绝覆盖：{new_side.name}", ""
+        mappings.append((side, new_side))
+    journal = OperationJournal()
+    completed = []
+    try:
+        result = safe_replace(
+            sp,
+            target,
+            journal=journal,
+            move_source=True,
+            allow_overwrite=False,
+            kind="legacy_merge_rename",
+        )
+        if not result["ok"]:
+            raise OSError(result["error"])
+        completed.append(result)
+        for side, new_side in mappings:
+            result = safe_replace(
+                side,
+                new_side,
+                journal=journal,
+                move_source=True,
+                allow_overwrite=False,
+                kind="legacy_sidecar_rename",
+            )
+            if not result["ok"]:
+                raise OSError(result["error"])
+            completed.append(result)
             if side.suffix.lower() == ".nfo":
-                text = read_text_any_encoding(str(side)) or ""
-                if text:
-                    if stem in text:
-                        text = text.replace(stem, target.stem)
-                    if base_stem and base_stem != target.stem and base_stem in text:
-                        text = text.replace(base_stem, target.stem)
-                    new_side.write_text(text, encoding="utf-8")
-                    try:
-                        os.remove(str(side))
-                    except OSError:
-                        pass
-                else:
-                    os.replace(str(side), str(new_side))
-            else:
-                os.replace(str(side), str(new_side))
-        except OSError as e:
-            # 视频已改名成功，sidecar 失败仅记录为非致命错误。
-            return True, f"已重命名视频，但 {side.name} 同步失败：{e}", str(target)
-    return True, "", str(target)
+                text = read_text_any_encoding(str(new_side))
+                if text and stem in text:
+                    result = safe_write_text(
+                        new_side, text.replace(stem, target.stem), journal=journal
+                    )
+                    if not result["ok"]:
+                        raise OSError(result["error"])
+                    completed.append(result)
+        return True, "", str(target)
+    except Exception as exc:
+        errors = [str(exc)]
+        for operation in reversed(completed):
+            restored = journal.restore(operation["operation_id"])
+            if not restored["ok"]:
+                errors.append("恢复冲突，日志已保留：" + restored["error"])
+        return False, "；".join(errors), ""

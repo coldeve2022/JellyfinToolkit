@@ -24,6 +24,27 @@ os.environ.setdefault("PYSIDE_ABORT_ON_EXCEPTION", "0")
 
 from version import APP_NAME_CN, __version__
 
+PAGE_SPECS = [
+    ("ui.pages.onboarding", "OnboardingPage"),
+    ("ui.pages.insight", "InsightPage"),
+    ("ui.pages.profile", "ProfilePage"),
+    ("ui.pages.review", "ReviewPage"),
+    ("ui.pages.delete", "DeletePage"),
+    ("ui.pages.dedup", "DedupPage"),
+    ("ui.pages.censorship", "CensorshipPage"),
+    ("ui.pages.subtitle", "SubtitlePage"),
+    ("ui.pages.subtitle_gen", "SubtitleGenPage"),
+    ("ui.pages.replace", "ReplacePage"),
+    ("ui.pages.lada", "LadaPage"),
+    ("ui.pages.repair", "RepairPage"),
+    ("ui.pages.nfo_fix", "NFOPage"),
+    ("ui.pages.db_tools", "DBToolsPage"),
+    ("ui.pages.merge", "MergePage"),
+    ("ui.pages.automation", "AutomationPage"),
+    ("ui.pages.settings", "SettingsPage"),
+    ("ui.pages.tasks", "TaskCenterPage"),
+]
+
 
 def _install_excepthook() -> None:
     """把未捕获异常写入 app-error.log，避免 PySide6 静默崩溃且便于诊断。
@@ -32,6 +53,7 @@ def _install_excepthook() -> None:
     保证打包后仍可写且不会污染只读的 _internal 目录。
     """
     from config import DATA_DIR
+
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -78,33 +100,39 @@ def print_doctor() -> int:
     print("-" * 52)
     print(f"{'data_dir':<12}: {info.get('data_dir', '')}")
     print(f"{'config_file':<12}: {info.get('config_file', '')}")
-    print(f"{'mode':<12}: {'frozen/exe' if info.get('frozen') else 'source'}"
-          f"{' (portable)' if info.get('portable') else ''}")
+    print(
+        f"{'mode':<12}: {'frozen/exe' if info.get('frozen') else 'source'}"
+        f"{' (portable)' if info.get('portable') else ''}"
+    )
     print(f"{'python':<12}: {info.get('python', '')}")
     print(f"{'ffmpeg':<12}: {info.get('ffmpeg') or 'NOT FOUND'}")
     print(f"{'ffprobe':<12}: {info.get('ffprobe') or 'NOT FOUND'}")
     if info.get("encoders") is not None:
         print(f"{'encoders':<12}: {', '.join(info['encoders']) or '(libx264 only)'}")
-        print(f"{'hwaccels':<12}: "
-              f"{', '.join(a for a in info['hwaccels'] if a != 'none') or '(none)'}")
-        print(f"{'recommend':<12}: {info.get('recommended_encoder')} / "
-              f"{info.get('recommended_hwaccel')}")
+        print(
+            f"{'hwaccels':<12}: {', '.join(a for a in info['hwaccels'] if a != 'none') or '(none)'}"
+        )
+        print(
+            f"{'recommend':<12}: {info.get('recommended_encoder')} / "
+            f"{info.get('recommended_hwaccel')}"
+        )
     print("-" * 52)
     print("说明：编码器/硬解结果均由真实跑一次得出，而非 ffmpeg 的编译期列表。")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog=APP_NAME_CN, description="Jellyfin 影视库管理工具箱")
-    parser.add_argument("--version", action="version",
-                        version=f"{APP_NAME_CN} {__version__}")
-    parser.add_argument("--doctor", action="store_true",
-                        help="打印环境自检结果后退出（不启动界面）")
-    parser.add_argument("--portable", action="store_true",
-                        help="强制便携模式：配置与数据写在程序目录下的 AppData/")
-    parser.add_argument("--data-dir", default="",
-                        help="自定义数据目录（等价于环境变量 JELLYFIN_TOOLKIT_DATA_DIR）")
+    parser = argparse.ArgumentParser(prog=APP_NAME_CN, description="Jellyfin 影视库管理工具箱")
+    parser.add_argument("--version", action="version", version=f"{APP_NAME_CN} {__version__}")
+    parser.add_argument(
+        "--doctor", action="store_true", help="打印环境自检结果后退出（不启动界面）"
+    )
+    parser.add_argument(
+        "--portable", action="store_true", help="强制便携模式：配置与数据写在程序目录下的 AppData/"
+    )
+    parser.add_argument(
+        "--data-dir", default="", help="自定义数据目录（等价于环境变量 JELLYFIN_TOOLKIT_DATA_DIR）"
+    )
     return parser
 
 
@@ -146,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
     from ui.pages.merge import MergePage
     from ui.pages.automation import AutomationPage
     from ui.pages.settings import SettingsPage
+    from ui.pages.tasks import TaskCenterPage
+    from ui.services import events
 
     app = QApplication(sys.argv[:1])
     app.setStyle("Fusion")
@@ -170,9 +200,23 @@ def main(argv: list[str] | None = None) -> int:
     window.register_page(DeletePage(cfg))
     window.register_page(DedupPage(cfg))
     window.register_page(CensorshipPage(cfg))
-    window.register_page(SubtitlePage(cfg))
-    window.register_page(SubtitleGenPage(cfg))
-    window.register_page(ReplacePage(cfg))
+    subtitle_page = SubtitlePage(cfg)
+    subtitle_gen_page = SubtitleGenPage(cfg)
+    replace_page = ReplacePage(cfg)
+    window.register_page(subtitle_page)
+    window.register_page(subtitle_gen_page)
+    window.register_page(replace_page)
+
+    def send_subtitles(paths):
+        subtitle_gen_page._add_paths(paths)
+        _goto(window, "批量生成字幕")
+
+    def send_restored(paths, originals):
+        replace_page.receive_outputs(paths, originals)
+        _goto(window, "破解视频替换")
+
+    events.subtitle_ready.connect(send_subtitles)
+    events.restored_ready.connect(send_restored)
     # Lada 需要 ffprobe 校验产出时长，用与 ffmpeg 同一套解析逻辑取它的路径
     lada_page = LadaPage(cfg)
     lada_page.set_ffprobe(resolve_tool("ffprobe") or "ffprobe")
@@ -183,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     window.register_page(MergePage(cfg))
     window.register_page(AutomationPage(cfg))
     window.register_page(settings_page)
+    window.register_page(TaskCenterPage(cfg))
 
     # 主题切换：设置页选择 → 主窗口立即应用（保存时才写入配置）
     settings_page.theme_changed.connect(window.apply_theme)
@@ -190,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
     # 首次运行自动进入新手引导
     if not cfg.onboarding_done:
         window._navigate(0)
+    else:
+        window._navigate(1)
 
     window.show()
     return app.exec()

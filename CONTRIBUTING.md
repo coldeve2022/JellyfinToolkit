@@ -49,7 +49,7 @@ CI 里有独立的隐私守卫 job 会做二次拦截，绕过它没有意义。
 按架构分派读取器、统一归一化。
 
 理由：这个项目同时支持 Jellyfin 与 Emby，库文件有两种不兼容的架构
-（Jellyfin 10.9+ 的 EF 架构 `jellyfin.db`，以及 Emby / Jellyfin ≤10.8 的
+（Jellyfin 10.11+ 的 EF 架构 `jellyfin.db`，以及 Emby / Jellyfin ≤10.10 的
 `TypedBaseItems` 架构 `library.db`）。如果每个页面各写一套 SQL，
 必然出现"同一个库在不同页面统计数字不一样"。
 

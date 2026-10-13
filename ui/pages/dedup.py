@@ -1,7 +1,7 @@
-"""重复版本处理页 - 同番号分组，留优删差(移入回收站)；CD 分卷保护。
+"""重复版本处理页 - 同番号分组，留优删差(移入可恢复隔离区)；CD 分卷保护。
 
 依据 scoring.dedup_groups：
-- 真重复（同番号 >=2 且非全 CD）→ 组内按 无码/完整/大/新 排序，差版本一键回收站
+- 真重复（同番号 >=2 且非全 CD）→ 组内按 无码/完整/大/新 排序，差版本一键可恢复隔离区
 - CD 全分卷组 → 保护，不自动处理，提示整体查看
 
 本页改进（修复"无法手动选 + 只显示名称 + 误识别附属文件"）：
@@ -10,16 +10,28 @@
 2. 每组每一版本行都带【勾选框】+ 完整【标签/演员/类型】辅助信息 + 封面，
    默认勾选"建议删差"版本；可手动勾选/取消，删除只删勾选版本。
 """
+
 from __future__ import annotations
+
+from ui.services import busy, start_task, stop_page, events, state_context
 
 import os
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QMessageBox, QGroupBox, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QAbstractItemView,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QProgressBar,
+    QMessageBox,
+    QGroupBox,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QHeaderView,
+    QAbstractItemView,
 )
 
 from config import DATA_DIR, ToolkitConfig
@@ -28,13 +40,14 @@ from ui.widgets import LogPanel
 from utils import scoring
 from utils.labels import LabelStore
 from utils.trash import DeleteJournal
+from ui.services import analysis_worker, accept_snapshot
 from workers.scorer import AnalyzeWorker
 from workers.trash import TrashWorker
 
-ROLE_ITEM_ID = Qt.UserRole + 1      # 版本 item id
-ROLE_PATH = Qt.UserRole + 2         # 版本文件路径
-ROLE_SIZE = Qt.UserRole + 3         # 版本字节数
-ROLE_IS_LOSER = Qt.UserRole + 4     # 是否系统建议删差
+ROLE_ITEM_ID = Qt.UserRole + 1  # 版本 item id
+ROLE_PATH = Qt.UserRole + 2  # 版本文件路径
+ROLE_SIZE = Qt.UserRole + 3  # 版本字节数
+ROLE_IS_LOSER = Qt.UserRole + 4  # 是否系统建议删差
 
 
 def _size_str(n: int | None) -> str:
@@ -67,15 +80,22 @@ class DedupPage(QWidget):
     def __init__(self, cfg: ToolkitConfig, parent=None):
         super().__init__(parent)
         self.cfg = cfg
-        self.store = LabelStore(DATA_DIR / "smart.db")
+        self._state_context = state_context(cfg)
+        self.store = LabelStore(DATA_DIR / "smart.db", context=state_context(self.cfg))
         self.journal = DeleteJournal(DATA_DIR / "trash_journal.db")
         self.analyzer: AnalyzeWorker | None = None
         self.trash_worker: TrashWorker | None = None
         self.labels: dict = self.store.all()
         self.groups: list[dict] = []
-        self._item2id: dict[str, str] = {}   # path -> item id（查勾选）
-        self._in_check_sync: bool = False    # 防止勾选联动递归触发
+        self._item2id: dict[str, str] = {}  # path -> item id（查勾选）
+        self._in_check_sync: bool = False  # 防止勾选联动递归触发
+        self._ai_predictions = {}
         self._setup_ui()
+        events.labels_changed.connect(self._refresh_labels)
+
+    def _refresh_labels(self):
+        self.store = LabelStore(DATA_DIR / "smart.db", context=state_context(self.cfg))
+        self.labels = self.store.all()
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -88,7 +108,7 @@ class DedupPage(QWidget):
 
         hint = QLabel(
             "同一番号多版本自动分组：无码/破解版 > 有码版，高分辨率 > 低，完整 > 分卷，新 > 旧。\n"
-            "每一行都可手动勾选「删除」/取消，勾选的版本移入回收站（可恢复）。"
+            "每一行都可手动勾选「删除」/取消，勾选的版本移入可恢复隔离区（可恢复）。"
             "CD 分卷组是同一作品分集，已保护，不会自动勾选。"
         )
         hint.setProperty("cssClass", "subtitle")
@@ -103,13 +123,18 @@ class DedupPage(QWidget):
         self.btn_reset.setToolTip("重新按「建议删差」规则勾选每个版本，取消你手动改动。")
         self.btn_reset.clicked.connect(self._reset_checks)
         act.addWidget(self.btn_reset)
-        self.btn_all = QPushButton("🗑️ 删除勾选版本 (移入回收站)")
+        self.btn_all = QPushButton("🗑️ 删除勾选版本 (移入可恢复隔离区)")
         self.btn_all.clicked.connect(self._trash_checked)
         act.addWidget(self.btn_all)
         self.btn_ai_dedup = QPushButton("🤖 AI 判定重复组")
-        self.btn_ai_dedup.setToolTip("让 AI 判定每组保留哪个版本/哪些真重复，自动更新「建议删差」勾选（删除仍需你确认）。")
+        self.btn_ai_dedup.setToolTip(
+            "AI给出逐组建议。你明确采纳后才改变勾选，删除仍须审阅路径计划。"
+        )
         self.btn_ai_dedup.clicked.connect(self._ai_dedup)
         act.addWidget(self.btn_ai_dedup)
+        adopt_ai = QPushButton("审阅并采纳 AI 勾选建议…")
+        adopt_ai.clicked.connect(self._apply_ai_predictions)
+        act.addWidget(adopt_ai)
         act.addStretch()
         self.progress = QProgressBar()
         self.progress.setFixedWidth(240)
@@ -130,7 +155,7 @@ class DedupPage(QWidget):
         self.tree.header().setDefaultSectionSize(360)
         self.tree.setColumnWidth(1, 420)
         self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.tree.itemChanged.connect(self._on_item_check_changed)   # 组头全选 ↔ 子项联动
+        self.tree.itemChanged.connect(self._on_item_check_changed)  # 组头全选 ↔ 子项联动
         root.addWidget(self.tree, 1)
 
         g = QGroupBox("日志")
@@ -141,27 +166,41 @@ class DedupPage(QWidget):
         root.addWidget(g)
 
     def _load(self) -> None:
+        self._refresh_labels()
+        if busy(self):
+            return
         if self.analyzer and self.analyzer.isRunning():
             return
         self.btn_load.setEnabled(False)
         self.log.clear()
         self.progress.setValue(0)
-        self.analyzer = AnalyzeWorker(
-            self.cfg, self.labels,
+        self.analyzer = analysis_worker(
+            self.cfg,
+            self.labels,
             exclude_keywords=self.cfg.exclude_path_keywords,
-            th_keep=self.cfg.score_th_keep / 100, th_delete=self.cfg.score_th_delete / 100)
+            th_keep=self.cfg.score_th_keep / 100,
+            th_delete=self.cfg.score_th_delete / 100,
+        )
         self.analyzer.log.connect(self.log.log)
         self.analyzer.progress.connect(self.progress.setValue)
         self.analyzer.finished.connect(self._on_loaded)
-        self.analyzer.start()
+        start_task(self, self.analyzer)
 
     def _on_loaded(self, data: dict) -> None:
+        accept_snapshot(self, data)
         self.btn_load.setEnabled(True)
         self.progress.setValue(100 if "items" in data else 0)
         if "error" in data:
             QMessageBox.warning(self, "错误", str(data["error"]))
             return
-        self.groups = scoring.dedup_groups(data["items"])
+        from utils.labels import legacy_protection_labels
+
+        self._legacy_protection = legacy_protection_labels(
+            DATA_DIR / "smart.db", data["items"], self.labels
+        )
+        self.groups = scoring.dedup_groups(
+            data["items"], labels={**self._legacy_protection, **self.labels}
+        )
         self._render_tree()
         n_group = len(self.groups)
         n_loser = sum(len(g["losers"]) for g in self.groups)
@@ -169,7 +208,9 @@ class DedupPage(QWidget):
             f"重复组 {n_group} 个 ｜ 建议删差版本 {n_loser} 条 ｜ "
             f"已删除记录 {self.journal.count()} 条"
         )
-        self.log.log_success(f"发现重复组 {n_group} 个，差版本 {n_loser} 条（已排除 theme/fanart/预告等附属文件）")
+        self.log.log_success(
+            f"发现重复组 {n_group} 个，差版本 {n_loser} 条（已排除 theme/fanart/预告等附属文件）"
+        )
 
     # ── 树渲染 ──
     def _on_item_check_changed(self, item: QTreeWidgetItem, column: int) -> None:
@@ -244,12 +285,18 @@ class DedupPage(QWidget):
         return QColor(theme.color(key))
 
     def _render_tree(self) -> None:
+        checks = {}
+        for row in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(row)
+            for idx in range(top.childCount()):
+                child = top.child(idx)
+                checks[child.data(0, ROLE_PATH)] = child.checkState(0)
         self.tree.clear()
         self._item2id = {}
         muted = theme.color("text_muted")
         danger = theme.color("danger")
         success = theme.color("success")
-        self._in_check_sync = True   # 填充期间屏蔽勾选联动
+        self._in_check_sync = True  # 填充期间屏蔽勾选联动
         try:
             for g in self.groups:
                 grp_item = QTreeWidgetItem([f"{g['num']}  ({len(g['items'])}个版本)", "", "", ""])
@@ -276,13 +323,22 @@ class DedupPage(QWidget):
                     desc.append("完整" if not it.is_cd else "分卷")
                     desc.append(f"{it.year or '?'}")
                     name_line = f"{os.path.basename(it.path)}"
-                    child = QTreeWidgetItem([
-                        name_line, _feat_summary(it), _size_str(it.size), it.path,
-                    ])
+                    child = QTreeWidgetItem(
+                        [
+                            name_line,
+                            _feat_summary(it),
+                            _size_str(it.size),
+                            it.path,
+                        ]
+                    )
                     # 可勾选：默认勾选"建议删差"版本；CD 全分卷组不勾
                     child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
-                    child.setCheckState(0, Qt.Checked if is_loser else Qt.Unchecked)
-                    child.setToolTip(0, f"{'⚠ 建议删差（保留更优版本）' if is_loser else '保留'}\n{it.path}")
+                    child.setCheckState(
+                        0, checks.get(it.path, Qt.Checked if is_loser else Qt.Unchecked)
+                    )
+                    child.setToolTip(
+                        0, f"{'⚠ 建议删差（保留更优版本）' if is_loser else '保留'}\n{it.path}"
+                    )
                     child.setToolTip(1, " ｜ ".join(desc) + " ｜ " + (it.num or "无番号"))
                     child.setToolTip(3, it.path)
                     # 颜色：建议删差红，保留绿
@@ -317,18 +373,45 @@ class DedupPage(QWidget):
                         targets.append((p, child.data(0, ROLE_SIZE)))
         return targets
 
-    def _trash_checked(self) -> None:
+    def _planned_targets(self):
         targets = self._collect_checked()
+        selected = {path for path, _ in targets}
+        blocked = set()
+        for group in self.groups:
+            paths = {item.path for item in group["items"]}
+            if paths and paths <= selected:
+                blocked.update(paths)
+            for item in group["items"]:
+                if (
+                    (
+                        self.labels.get(item.id)
+                        or getattr(self, "_legacy_protection", {}).get(item.id)
+                    )
+                    in scoring.POSITIVE_LABELS
+                    or getattr(item, "is_favorite", False)
+                    or getattr(item, "is_played", False)
+                ):
+                    blocked.add(item.path)
+        return [(path, size) for path, size in targets if path not in blocked]
+
+    def _trash_checked(self) -> None:
+        if busy(self, mutating=True):
+            return
+        targets = self._planned_targets()
         if not targets:
-            QMessageBox.information(self, "提示", "没有勾选任何要删除的版本。\n先勾选要删的「重复差版本」行。")
+            QMessageBox.information(
+                self, "提示", "没有勾选任何要删除的版本。\n先勾选要删的「重复差版本」行。"
+            )
             return
         total = sum(s or 0 for _, s in targets)
         warn = (
-            f"⚠️ 此操作非常危险，可能导致不可逆的数据丢失！\n\n"
-            f"将把 {len(targets)} 个勾选版本移入回收站（约 {_size_str(total)}）\n"
-            f"请先核对「路径」列确认没选错；回收站中可恢复。确定继续？"
+            f"请审阅以下归档计划，执行后可在任务中心恢复。\n\n"
+            f"将把 {len(targets)} 个勾选版本移入可恢复隔离区（约 {_size_str(total)}）\n"
+            f"请核对以下实际计划（最后一个版本及受保护作品已排除）：\n"
+            + "\n".join(path for path, _ in targets)
+            + "\n确认执行同一计划？"
         )
-        if QMessageBox.question(self, "确认移入回收站", warn) != QMessageBox.Yes:
+        if QMessageBox.question(self, "确认移入可恢复隔离区", warn) != QMessageBox.Yes:
             return
         self.btn_all.setEnabled(False)
         self.progress.setValue(0)
@@ -336,35 +419,46 @@ class DedupPage(QWidget):
         self.trash_worker.log.connect(self.log.log)
         self.trash_worker.progress.connect(self.progress.setValue)
         self.trash_worker.finished.connect(self._on_done)
-        self.trash_worker.start()
+        start_task(self, self.trash_worker)
 
     def _on_done(self, stats: dict) -> None:
         self.btn_all.setEnabled(True)
         self.progress.setValue(100)
         self.log.log_success(f"本次：成功 {stats['ok']} / 失败 {stats['fail']}")
         if stats["fail"]:
-            QMessageBox.warning(self, "部分失败", f"{stats['fail']} 个未能移入回收站（原文件已保留）")
+            QMessageBox.warning(
+                self, "部分失败", f"{stats['fail']} 个未能移入可恢复隔离区（原文件已保留）"
+            )
         # 刷新已删数量；重载分组以移除已删版本
-        self.summary.setText(f"重复组 {len(self.groups)} 个 ｜ 已删除记录 {self.journal.count()} 条")
+        self.summary.setText(
+            f"重复组 {len(self.groups)} 个 ｜ 已删除记录 {self.journal.count()} 条"
+        )
         self._on_loaded_dedup_refresh()
 
     def _on_loaded_dedup_refresh(self) -> None:
         """删除后重新加载分组（后台），确保界面与磁盘一致。"""
         if self.analyzer and self.analyzer.isRunning():
             return
-        self.analyzer = AnalyzeWorker(
-            self.cfg, self.labels,
+        self.analyzer = analysis_worker(
+            self.cfg,
+            self.labels,
             exclude_keywords=self.cfg.exclude_path_keywords,
-            th_keep=self.cfg.score_th_keep / 100, th_delete=self.cfg.score_th_delete / 100)
+            th_keep=self.cfg.score_th_keep / 100,
+            th_delete=self.cfg.score_th_delete / 100,
+        )
         self.analyzer.finished.connect(self._on_loaded)
-        self.analyzer.start()
+        start_task(self, self.analyzer)
 
     # ── AI 判定重复组 ──
     def _ai_dedup(self) -> None:
+        if busy(self):
+            return
         from workers.ai import AIDedupWorker
+
         if not self.cfg.ai_enabled:
-            QMessageBox.information(self, "未启用 AI",
-                                    "请在「设置」→「本地 AI 二次校验」启用本地 LLM。")
+            QMessageBox.information(
+                self, "未启用 AI", "请在「设置」→「本地 AI 二次校验」启用本地 LLM。"
+            )
             return
         if not getattr(self, "groups", None):
             QMessageBox.information(self, "无分组", "请先「🔍 加载重复分组」。")
@@ -375,22 +469,87 @@ class DedupPage(QWidget):
         if not groups:
             QMessageBox.information(self, "无候选", "没有可判定的重复组。")
             return
-        payload = [{
-            "num": g["num"],
-            "items": [{"id": it.id, "name": it.name, "size_mb": getattr(it, "size_mb", ""),
-                       "is_cd": it.is_cd, "cd_index": it.cd_index,
-                       "is_uncensored": it.is_uncensored} for it in g["items"]],
-        } for g in groups]
+        payload = [
+            {
+                "num": g["num"],
+                "items": [
+                    {
+                        "id": it.id,
+                        "name": it.name,
+                        "size_mb": getattr(it, "size_mb", ""),
+                        "is_cd": it.is_cd,
+                        "cd_index": it.cd_index,
+                        "is_uncensored": it.is_uncensored,
+                    }
+                    for it in g["items"]
+                ],
+            }
+            for g in groups
+        ]
         self.btn_ai_dedup.setEnabled(False)
-        self._dedup_ai = AIDedupWorker(payload, self.cfg.ai_base_url,
-                                       self.cfg.ai_key, self.cfg.ai_model)
+        self._dedup_ai = AIDedupWorker(
+            payload, self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model
+        )
         self._dedup_ai.log.connect(self.log.log)
         self._dedup_ai.result.connect(self._note_dedup)
+        self._dedup_ai.verdict.connect(self._collect_ai_prediction)
         self._dedup_ai.finished.connect(self._on_dedup_ai_done)
-        self._dedup_ai.start()
+        start_task(self, self._dedup_ai)
 
     def _note_dedup(self, s: str) -> None:
         self.log.log(str(s)[:160])
+
+    def _collect_ai_prediction(self, data):
+        group = next((group for group in self.groups if group["num"] == data.get("num")), None)
+        if group is None:
+            return
+        valid = {item.id for item in group["items"]}
+        keeps, deletes = set(data.get("keep_ids") or []), set(data.get("delete_ids") or [])
+        if keeps and keeps <= valid and deletes <= valid and not (keeps & deletes):
+            self._ai_predictions[group["num"]] = dict(data)
+            self.log.log_info(group["num"] + "：" + str(data.get("reason", "")))
+
+    def _apply_ai_predictions(self):
+        if busy(self) or not self._ai_predictions:
+            return
+        details = "\n".join(
+            num
+            + " | 保留 "
+            + ", ".join(row["keep_ids"])
+            + " | 删除建议 "
+            + ", ".join(row["delete_ids"])
+            + " | "
+            + row.get("reason", "")
+            for num, row in self._ai_predictions.items()
+        )
+        if (
+            QMessageBox.question(
+                self,
+                "确认采纳AI勾选建议",
+                details + "\n\n只更新勾选，文件不会现在删除。确认？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        self.tree.blockSignals(True)
+        try:
+            for idx, group in enumerate(self.groups):
+                prediction = self._ai_predictions.get(group["num"])
+                if prediction is None or group["all_cd"]:
+                    continue
+                top = self.tree.topLevelItem(idx)
+                for child_idx in range(top.childCount()):
+                    child = top.child(child_idx)
+                    child.setCheckState(
+                        0,
+                        Qt.Checked
+                        if child.data(0, ROLE_ITEM_ID) in prediction["delete_ids"]
+                        else Qt.Unchecked,
+                    )
+        finally:
+            self.tree.blockSignals(False)
 
     def _on_dedup_ai_done(self, data: dict) -> None:
         self.btn_ai_dedup.setEnabled(True)
@@ -399,17 +558,20 @@ class DedupPage(QWidget):
             return
         self.log.log_warning("AI 去重判定完成。请人工核对勾选后点「🗑️ 删除勾选版本」执行。")
         QMessageBox.information(
-            self, "AI 去重判定完成",
+            self,
+            "AI 去重判定完成",
             f"已判定 {data.get('verdicts', 0)} 组。判定建议已写入日志（含每组保留哪个版本）。\n"
-            "你可结合日志核对勾选，再点「🗑️ 删除勾选版本」执行删除（进回收站可恢复）。")
+            "你可结合日志核对勾选，再点「🗑️ 删除勾选版本」执行删除（进可恢复隔离区可恢复）。",
+        )
 
     def apply_theme(self) -> None:
         """主题切换后按当前主题重绘树（颜色取自 theme）。"""
-        if self.groups:
-            self._render_tree()
+        for row in range(self.tree.topLevelItemCount()):
+            group = self.tree.topLevelItem(row)
+            for idx in range(group.childCount()):
+                child = group.child(idx)
+                role = "danger" if child.data(0, ROLE_IS_LOSER) else "success"
+                child.setForeground(1, QColor(theme.color(role)))
 
     def shutdown(self) -> None:
-        for w in (self.analyzer, self.trash_worker, getattr(self, "_dedup_ai", None)):
-            if w and w.isRunning():
-                w.stop() if hasattr(w, "stop") else None
-                w.wait(3000)
+        stop_page(self)

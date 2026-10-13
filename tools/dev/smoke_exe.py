@@ -64,34 +64,46 @@ def _still_running(proc: subprocess.Popen) -> bool:
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
+def error_log_path(data_root: Path) -> Path:
+    return data_root / "data" / "app-error.log"
+
+
+def alive_is_sufficient(alive_checks: int, total: int) -> bool:
+    return alive_checks == total
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="打包产物启动冒烟测试")
     parser.add_argument("--exe", default="")
     parser.add_argument("--seconds", type=float, default=6.0)
-    parser.add_argument("--data-dir", default="",
-                        help="自定义数据目录（默认用临时目录，避免污染真实配置）")
+    parser.add_argument(
+        "--data-dir", default="", help="自定义数据目录（默认用临时目录，避免污染真实配置）"
+    )
     args = parser.parse_args()
 
     exe = Path(args.exe).expanduser() if args.exe else _find_exe()
     if not exe or not exe.exists():
-        print("[跳过] 没找到打包产物（先跑 scripts/build_release.py）")
-        return 0
+        print("[失败] 没找到打包产物（先跑 scripts/build_release.py）")
+        return 1
 
-    data_dir = Path(args.data_dir) if args.data_dir else Path(
-        tempfile.mkdtemp(prefix="jellyfin-smoke-"))
+    data_dir = (
+        Path(args.data_dir) if args.data_dir else Path(tempfile.mkdtemp(prefix="jellyfin-smoke-"))
+    )
 
     env = dict(os.environ)
     env["JELLYFIN_TOOLKIT_DATA_DIR"] = str(data_dir)
     env.pop("CODEBUDDY_SESSION_ID", None)
     env.pop("CLAUDE_SESSION_ID", None)
 
-    log = data_dir / "app-error.log"
+    log = error_log_path(data_dir)
     if log.exists():
         log.unlink()
 
     print(f"启动: {exe}")
     print(f"数据目录: {data_dir}")
-    proc = subprocess.Popen([str(exe)], env=env, creationflags=DETACHED_FLAGS)
+    proc = subprocess.Popen(
+        [str(exe)], env=env, creationflags=DETACHED_FLAGS if sys.platform == "win32" else 0
+    )
 
     alive_checks = 0
     total = max(3, int(args.seconds))
@@ -104,12 +116,13 @@ def main() -> int:
 
     try:
         proc.kill()
+        proc.wait(timeout=5)
     except Exception:  # noqa: BLE001
         pass
 
     ok = True
     print(f"存活采样: {alive_checks}/{total} 秒")
-    if alive_checks < min(3, total):
+    if not alive_is_sufficient(alive_checks, total):
         print("[失败] 进程过早退出 —— 大概率是构造期异常（窗口根本没显示）。")
         ok = False
 

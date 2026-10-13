@@ -40,15 +40,15 @@ def _to_keys(items, exclude=()) -> set:
                 kind, value = parts[0].strip(), parts[1].strip()
             else:
                 kind, value = "tag", str(it).strip()
-        if not value:
+        if not isinstance(value, str) or not value.strip():
             continue
         k = _KIND_MAP.get(str(kind).strip().lower()) or str(kind).strip().lower()
         if k in WANTED_KINDS and k not in exclude:
-            keys.add((k, value))
+            keys.add((k, value.strip()))
     return keys
 
 
-def parse_ai_taste(text: str):
+def parse_ai_taste(text: str, strict: bool = False):
     """解析 AI 输出为 (liked_keys, disliked_keys, notes)。容错 markdown 代码块与前后缀。
 
     disliked 解析时排除 prefix(系列前缀)——用户认为厂商/系列差异不算"内容不喜欢"。
@@ -63,7 +63,17 @@ def parse_ai_taste(text: str):
     try:
         data = json.loads(t)
     except json.JSONDecodeError:
+        if strict:
+            raise ValueError("AI画像返回的不是有效JSON，旧画像已保留")
         return set(), set(), ""
+    if not isinstance(data, dict) or not isinstance(data.get("liked"), list) or not isinstance(data.get("disliked"), list):
+        if strict:
+            raise ValueError("AI画像结构无效，旧画像已保留")
+        return set(), set(), ""
+    if strict and any(not isinstance(it, dict) or it.get("kind") not in WANTED_KINDS
+                      or not isinstance(it.get("value"), str) or not it["value"].strip()
+                      for it in data["liked"] + data["disliked"]):
+        raise ValueError("AI画像特征无效，旧画像已保留")
     liked = _to_keys(data.get("liked"))
     disliked = _to_keys(data.get("disliked"), exclude={"prefix"})
     notes = str(data.get("notes") or "").strip()
@@ -109,8 +119,13 @@ def build_ai_prompt(p: dict) -> str:
 class AIProfileStore:
     """持久化 AI 提炼的画像。每次独立短连接，线程安全。"""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, context: str = "", fingerprint: str = ""):
         self.path = Path(path)
+        self.context, self.fingerprint = context, fingerprint
+        from utils.state_context import ScopedState
+        self._scoped = ScopedState(path, "ai_profile", context) if context or fingerprint else None
+        if self._scoped:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
@@ -128,6 +143,12 @@ class AIProfileStore:
             )
 
     def save(self, liked: set, disliked: set, notes: str = "") -> None:
+        if self._scoped:
+            self._scoped.set("profile", {"liked": [list(k) for k in liked],
+                                       "disliked": [list(k) for k in disliked], "notes": notes,
+                                       "fingerprint": self.fingerprint,
+                                       "created_at": datetime.now().isoformat(timespec="seconds")})
+            return
         payload = json.dumps({
             "liked": sorted([list(k) for k in liked]),
             "disliked": sorted([list(k) for k in disliked]),
@@ -142,6 +163,13 @@ class AIProfileStore:
             )
 
     def load(self) -> dict | None:
+        if self._scoped:
+            data = self._scoped.get("profile")
+            if not data or data.get("fingerprint") != self.fingerprint:
+                return None
+            return {"liked_keys": {tuple(k) for k in data["liked"]},
+                    "disliked_keys": {tuple(k) for k in data["disliked"]},
+                    "notes": data["notes"], "created_at": data["created_at"]}
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT payload, updated_at FROM ai_profile WHERE id=1"
@@ -157,5 +185,15 @@ class AIProfileStore:
         }
 
     def clear(self) -> None:
+        if self._scoped:
+            self._scoped.clear()
+            return
         with self._connect() as conn:
             conn.execute("DELETE FROM ai_profile WHERE id=1")
+
+    def has_saved(self) -> bool:
+        """Allow rollback even when a cached profile is obsolete or malformed."""
+        if self._scoped:
+            return self._scoped.has_any()
+        with self._connect() as conn:
+            return conn.execute("SELECT 1 FROM ai_profile LIMIT 1").fetchone() is not None

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -69,15 +70,26 @@ def parse_score_json(text: str) -> dict[int, dict]:
         arr = json.loads(t)
     except json.JSONDecodeError:
         return {}
+    if not isinstance(arr, list):
+        return {}
     out = {}
+    duplicated = set()
     for item in arr:
         if isinstance(item, dict) and "i" in item:
             try:
-                idx = int(item["i"])
-                sc = max(0.0, min(1.0, float(item.get("score", 0.5))))
-            except (TypeError, ValueError):
+                idx = item["i"]
+                if not isinstance(idx, int) or isinstance(idx, bool) or idx <= 0:
+                    continue
+                sc = float(item["score"])
+                if not math.isfinite(sc) or not 0 <= sc <= 1 or isinstance(item["score"], bool):
+                    continue
+            except (TypeError, ValueError, KeyError):
                 continue
+            if idx in out:
+                duplicated.add(idx)
             out[idx] = {"score": sc, "note": str(item.get("note", ""))}
+    for idx in duplicated:
+        out.pop(idx, None)
     return out
 
 
@@ -85,8 +97,13 @@ def parse_score_json(text: str) -> dict[int, dict]:
 class AIScoreStore:
     """持久化 AI 语义打分结果（增量缓存）。每次独立短连接，线程安全。"""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, context: str = "", fingerprint: str = ""):
         self.path = Path(path)
+        self.context, self.fingerprint = context, fingerprint
+        from utils.state_context import ScopedState
+        self._scoped = ScopedState(path, "ai_score", context) if context or fingerprint else None
+        if self._scoped:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
@@ -105,6 +122,13 @@ class AIScoreStore:
             )
 
     def save(self, item_id: str, score: float, note: str = "") -> None:
+        if not math.isfinite(score) or not 0 <= score <= 1:
+            raise ValueError("AI分数必须是0到1之间的有限数值")
+        if self._scoped:
+            self._scoped.set(item_id, {"item_id": item_id, "score": round(score, 3), "note": note,
+                                      "fingerprint": self.fingerprint,
+                                      "updated_at": datetime.now().isoformat(timespec="seconds")})
+            return
         with self._conn() as c:
             c.execute(
                 """INSERT INTO ai_score(item_id, score, note, updated_at)
@@ -115,6 +139,9 @@ class AIScoreStore:
             )
 
     def get(self, item_id: str) -> Optional[float]:
+        if self._scoped:
+            row = self._scoped.get(item_id)
+            return row["score"] if row and row.get("fingerprint") == self.fingerprint else None
         with self._conn() as c:
             row = c.execute(
                 "SELECT score FROM ai_score WHERE item_id=?", (item_id,)
@@ -122,6 +149,9 @@ class AIScoreStore:
             return row[0] if row else None
 
     def get_many(self, ids) -> dict[str, float]:
+        if self._scoped:
+            wanted = set(ids)
+            return {key: row["score"] for key, row in self.all_hint().items() if key in wanted}
         with self._conn() as c:
             q = ",".join("?" * len(ids))
             if not ids:
@@ -134,14 +164,26 @@ class AIScoreStore:
 
     def all_hint(self) -> dict[str, dict]:
         """返回全部 AI 打分条目（供画像页可视化 AI 语义分）。"""
+        if self._scoped:
+            return {key: row for key, row in self._scoped.all().items()
+                    if row.get("fingerprint") == self.fingerprint}
         with self._conn() as c:
             c.row_factory = sqlite3.Row
             rows = c.execute("SELECT item_id, score, note, updated_at FROM ai_score").fetchall()
             return {r["item_id"]: dict(r) for r in rows}
 
     def clear(self) -> None:
+        if self._scoped:
+            self._scoped.clear()
+            return
         with self._conn() as c:
             c.execute("DELETE FROM ai_score")
+
+    def has_saved(self) -> bool:
+        if self._scoped:
+            return self._scoped.has_any()
+        with self._conn() as conn:
+            return conn.execute("SELECT 1 FROM ai_score LIMIT 1").fetchone() is not None
 
 
 def fuse_content(rule_hit: float, ai_score: Optional[float],

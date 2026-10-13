@@ -3,6 +3,7 @@
 所有控件颜色一律通过 token 获取，禁止在页面代码中硬编码颜色值。
 切换主题 = 切换 token 集 + 重新应用全局 QSS。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -17,12 +18,12 @@ DARK: dict[str, Any] = {
     "warning": "#FFA726",
     "danger": "#EF5350",
     # 背景层级
-    "bg_darkest": "#0D1117",   # 侧边栏
-    "bg_dark": "#161B22",      # 主背景
-    "bg_card": "#21262D",      # 卡片/面板
-    "bg_hover": "#30363D",     # 悬停
-    "bg_input": "#0D1117",     # 输入框
-    "border": "#30363D",       # 边框
+    "bg_darkest": "#0D1117",  # 侧边栏
+    "bg_dark": "#161B22",  # 主背景
+    "bg_card": "#21262D",  # 卡片/面板
+    "bg_hover": "#30363D",  # 悬停
+    "bg_input": "#0D1117",  # 输入框
+    "border": "#30363D",  # 边框
     # 文字
     "text_primary": "#E6EDF3",
     "text_secondary": "#8B949E",
@@ -30,7 +31,7 @@ DARK: dict[str, Any] = {
     # 组件专属
     "title_color": "#4FC3F7",
     "logo_color": "#4FC3F7",
-    "selection_text": "#0D1117",   # 强调按钮上的文字色
+    "selection_text": "#0D1117",  # 强调按钮上的文字色
 }
 
 LIGHT: dict[str, Any] = {
@@ -43,12 +44,12 @@ LIGHT: dict[str, Any] = {
     "warning": "#9A6700",
     "danger": "#CF222E",
     # 背景层级
-    "bg_darkest": "#F6F8FA",   # 侧边栏
-    "bg_dark": "#FFFFFF",      # 主背景
-    "bg_card": "#F6F8FA",      # 卡片/面板
-    "bg_hover": "#E8ECEF",     # 悬停
-    "bg_input": "#FFFFFF",     # 输入框
-    "border": "#D0D7DE",       # 边框
+    "bg_darkest": "#F6F8FA",  # 侧边栏
+    "bg_dark": "#FFFFFF",  # 主背景
+    "bg_card": "#F6F8FA",  # 卡片/面板
+    "bg_hover": "#E8ECEF",  # 悬停
+    "bg_input": "#FFFFFF",  # 输入框
+    "border": "#D0D7DE",  # 边框
     # 文字
     "text_primary": "#1F2328",
     "text_secondary": "#59636E",
@@ -56,7 +57,7 @@ LIGHT: dict[str, Any] = {
     # 组件专属
     "title_color": "#0969DA",
     "logo_color": "#0969DA",
-    "selection_text": "#FFFFFF",   # 强调按钮上的文字色
+    "selection_text": "#FFFFFF",  # 强调按钮上的文字色
 }
 
 THEMES: dict[str, dict] = {"dark": DARK, "light": LIGHT}

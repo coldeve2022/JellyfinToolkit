@@ -29,7 +29,10 @@ def test_fix_nfo_directory(tmp_path):
     assert (tmp_path / "movie.mp4-poster.jpg").exists()
 
 
-def test_replace_restored_success(tmp_path):
+def test_replace_restored_success(tmp_path, monkeypatch):
+    # This test isolates pairing/file transactions. Real media validation has
+    # dedicated FFmpeg fixtures in test_media_remediation_execution.py.
+    monkeypatch.setattr('utils.replacement.validate_restored_output', lambda *_: (True, ''))
     lib = tmp_path / "lib"
     lib.mkdir()
     target = lib / "Movie.mp4"

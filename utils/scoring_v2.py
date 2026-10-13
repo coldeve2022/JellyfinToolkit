@@ -35,6 +35,7 @@ from utils.scoring import (
     Scored, KIND_CN,
     is_junk_item, quality_score,
     sample_weight, idf_weights, dedup_loser_ids,
+    positive_weight, CONTENT_KINDS,
     dedup_groups, decision_counts, _feat_values, _mk as _mk_v1,
 )
 
@@ -96,7 +97,7 @@ def build_bucket_profiles(
 
     for it in items:
         lab = labels.get(it.id)
-        w = sample_weight(it)
+        w = positive_weight(it, lab)
         feats = feats_map.get(it.id, {})
         b = _bucket_of_it(it)
         if lab in NEGATIVE_LABELS:
@@ -156,7 +157,7 @@ def _liked_prior(feats_map: dict, items: Sequence[Item], labels: dict,
     """
     acc: dict[tuple, float] = defaultdict(float)
     for it in items:
-        sw = sample_weight(it)
+        sw = positive_weight(it, labels.get(it.id))
         if labels.get(it.id) in NEGATIVE_LABELS or sw <= 0:
             continue
         for k, fw in feats_map.get(it.id, {}).items():
@@ -205,7 +206,7 @@ def _propagate_affinity(
     feat_liked_cnt: dict[tuple, int] = defaultdict(int)
     feat_total_cnt: dict[tuple, int] = defaultdict(int)
 
-    pos_items = [it for it in items if sample_weight(it) > 0
+    pos_items = [it for it in items if positive_weight(it, labels.get(it.id)) > 0
                  and labels.get(it.id) not in NEGATIVE_LABELS]
     for it in pos_items:
         for k in feats_map.get(it.id, {}):
@@ -273,7 +274,14 @@ def rank_items(
     liked_prior = _liked_prior(feats_map, items, labels, idf)
     disliked_prior = _disliked_prior(feats_map, items, labels, idf)
     boosts = _propagate_affinity(items, feats_map, profiles, labels, idf, enhance)
-    losers = dedup_loser_ids(items)
+    losers = dedup_loser_ids(items, labels)
+    ready_buckets = {_bucket_of_it(it) for it in items
+                     if positive_weight(it, labels.get(it.id)) > 0
+                     and any(k[0] in CONTENT_KINDS for k in feats_map[it.id])}
+    trusted_negative = defaultdict(set)
+    for it in items:
+        if labels.get(it.id) in NEGATIVE_LABELS:
+            trusted_negative[_bucket_of_it(it)].update(k for k in feats_map[it.id] if k[0] in CONTENT_KINDS)
     ai_scores = ai_scores or {}
 
     out: list[Scored] = []
@@ -304,7 +312,7 @@ def rank_items(
                                 liked_prior=liked_prior,
                                 dislike_prior=disliked_prior)
         featureless = cov is None
-        has_content = any(FEAT_WEIGHT.get(k[0], 0) > 0 for k in feats)
+        has_content = any(k[0] in CONTENT_KINDS for k in feats)
 
         # AI 语义分融合：规则分与 LLM 语义分加权（ai 缺省则纯规则）
         ai_score = ai_scores.get(it.id)
@@ -327,6 +335,9 @@ def rank_items(
         elif featureless or not has_content:
             decision, final = DEC_REVIEW, 0.0
             reason = "无可用元数据（演员/类型/标签均缺失），无法预测"
+        elif not it.behavior_known or (b not in ready_buckets and not (set(feats) & trusted_negative[b])):
+            decision, final = DEC_REVIEW, 0.0
+            reason = "观看用户/当前分类的喜好样本不足，尚不能据此建议删除"
         elif it.is_cd:
             decision, final = DEC_REVIEW, wc * kv + wq * sq - wd * sd
             reason = "CD 分卷（同一作品多集），需整体判断"

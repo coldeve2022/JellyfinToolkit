@@ -29,9 +29,18 @@ from pathlib import Path
 from typing import Optional
 
 __all__ = [
-    "TOOL_NAME", "EXE_NAME", "HOMEPAGE", "DOWNLOAD_PAGE",
-    "candidate_dirs", "find_lada_cli", "probe", "parse_table",
-    "build_command", "prerequisites_hint", "describe_cli", "OUTPUT_PATTERN",
+    "TOOL_NAME",
+    "EXE_NAME",
+    "HOMEPAGE",
+    "DOWNLOAD_PAGE",
+    "candidate_dirs",
+    "find_lada_cli",
+    "probe",
+    "parse_table",
+    "build_command",
+    "prerequisites_hint",
+    "describe_cli",
+    "OUTPUT_PATTERN",
 ]
 
 TOOL_NAME = "Lada（马赛克破解）"
@@ -104,7 +113,7 @@ def candidate_dirs(configured: str = "", extra: Optional[list] = None) -> list:
         for name in _DROP_IN_NAMES:
             add(root / name)
             add(root / "tools" / name)
-    for p in (extra or []):
+    for p in extra or []:
         add(p)
     return out
 
@@ -127,8 +136,9 @@ def _cli_in(directory: Path) -> Optional[Path]:
     return None
 
 
-def search_lada_cli(configured: str = "", extra_dirs: Optional[list] = None,
-                    time_budget: float = 12.0, log=None) -> dict:
+def search_lada_cli(
+    configured: str = "", extra_dirs: Optional[list] = None, time_budget: float = 12.0, log=None
+) -> dict:
     """定位 ``lada-cli.exe``，**连搜索过程一起返回**。
 
     最后一档按名称关键词在盘上浅层搜索 —— 用户的目录叫
@@ -139,16 +149,26 @@ def search_lada_cli(configured: str = "", extra_dirs: Optional[list] = None,
     if configured:
         hit = tool_search.exe_in_dir(Path(configured.strip().strip('"')), (EXE_NAME,))
         if hit:
-            return {"path": hit, "source": "设置里指定的位置", "scanned": 0,
-                    "elapsed": 0.0, "stopped_early": False}
+            return {
+                "path": hit,
+                "source": "设置里指定的位置",
+                "scanned": 0,
+                "elapsed": 0.0,
+                "stopped_early": False,
+            }
     for d in candidate_dirs("", extra=extra_dirs):
         hit = tool_search.exe_in_dir(d, (EXE_NAME,))
         if hit:
-            return {"path": hit, "source": f"已知常见位置：{d}", "scanned": 0,
-                    "elapsed": 0.0, "stopped_early": False}
+            return {
+                "path": hit,
+                "source": f"已知常见位置：{d}",
+                "scanned": 0,
+                "elapsed": 0.0,
+                "stopped_early": False,
+            }
     return tool_search.find_executable(
-        (EXE_NAME,), SEARCH_KEYWORDS, extra_dirs=extra_dirs,
-        time_budget=time_budget, log=log)
+        (EXE_NAME,), SEARCH_KEYWORDS, extra_dirs=extra_dirs, time_budget=time_budget, log=log
+    )
 
 
 def find_lada_cli(configured: str = "", extra_dirs: Optional[list] = None) -> Optional[Path]:
@@ -160,6 +180,7 @@ def find_lada_cli(configured: str = "", extra_dirs: Optional[list] = None) -> Op
 
 
 # ── 能力探测 ────────────────────────────────────────────────
+
 
 def parse_table(text: str) -> list:
     """解析 Lada 输出的对齐表格，返回 ``[{"name":..., "description":..., "path":...}, ...]``。
@@ -183,7 +204,7 @@ def parse_table(text: str) -> list:
     if not spans:
         return []
     rows = []
-    for line in lines[sep_idx + 1:]:
+    for line in lines[sep_idx + 1 :]:
         if not line.strip():
             continue
         cells = []
@@ -192,11 +213,13 @@ def parse_table(text: str) -> list:
         cells += [""] * (3 - len(cells))
         if not cells[0]:
             continue
-        rows.append({
-            "name": cells[0],
-            "description": cells[1] if len(cells) > 1 else "",
-            "path": cells[2] if len(cells) > 2 else "",
-        })
+        rows.append(
+            {
+                "name": cells[0],
+                "description": cells[1] if len(cells) > 1 else "",
+                "path": cells[2] if len(cells) > 2 else "",
+            }
+        )
     return rows
 
 
@@ -214,8 +237,12 @@ def _run(cli: Path, args: list, timeout: int) -> tuple:
     try:
         proc = subprocess.run(
             [str(cli), *args],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, creationflags=_no_window_flags(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=_no_window_flags(),
         )
     except (OSError, subprocess.SubprocessError) as e:
         return -1, f"{type(e).__name__}: {e}"
@@ -250,8 +277,13 @@ def probe(cli: Path, timeout: int = 120) -> dict:
     "工具在、但读不出预设"这种有用的状态。
     """
     info = {
-        "ok": False, "error": "", "options": set(),
-        "presets": [], "detection_models": [], "restoration_models": [], "devices": [],
+        "ok": False,
+        "error": "",
+        "options": set(),
+        "presets": [],
+        "detection_models": [],
+        "restoration_models": [],
+        "devices": [],
         "raw": {},
     }
     if not cli or not Path(cli).is_file():
@@ -289,6 +321,7 @@ def probe(cli: Path, timeout: int = 120) -> dict:
 
 
 # ── 命令行构建 ──────────────────────────────────────────────
+
 
 def build_command(
     cli,
@@ -375,9 +408,14 @@ def parse_progress(line: str) -> Optional[int]:
         return None
 
 
-def validate_output_timing(input_path, output_path, ffprobe: str = "ffprobe",
-                           tolerance_ratio: float = 0.05, min_tolerance: float = 2.0,
-                           timeout: int = 60) -> tuple:
+def validate_output_timing(
+    input_path,
+    output_path,
+    ffprobe: str = "ffprobe",
+    tolerance_ratio: float = 0.05,
+    min_tolerance: float = 2.0,
+    timeout: int = 60,
+) -> tuple:
     """校验产出视频的时长是否与输入相符，返回 ``(是否可信, 说明)``。
 
     **为什么需要**：Lada 偶尔会以退出码 0 结束、却没写出可用文件（或写出时间轴
@@ -392,9 +430,20 @@ def validate_output_timing(input_path, output_path, ffprobe: str = "ffprobe",
     def _video_duration(path):
         try:
             proc = subprocess.run(
-                [ffprobe, "-v", "error", "-show_entries",
-                 "stream=codec_type,duration:format=duration", "-of", "json", str(path)],
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type,duration:format=duration",
+                    "-of",
+                    "json",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 creationflags=(0x08000000 if os.name == "nt" else 0),
             )
@@ -434,9 +483,18 @@ def validate_output_timing(input_path, output_path, ffprobe: str = "ffprobe",
     return True, ""
 
 
-def run_one(cli, input_path, output_dir, *, on_line=None, progress=None,
-            should_stop=None, timeout: int = 0, cpu_affinity=None,
-            **kwargs) -> dict:
+def run_one(
+    cli,
+    input_path,
+    output_dir,
+    *,
+    on_line=None,
+    progress=None,
+    should_stop=None,
+    timeout: int = 0,
+    cpu_affinity=None,
+    **kwargs,
+) -> dict:
     """跑一次破解（``kwargs`` 原样交给 :func:`build_command`）。
 
     ``on_line`` 收原始输出行；``progress`` 收解析出来的百分比（0~100），
@@ -456,14 +514,22 @@ def run_one(cli, input_path, output_dir, *, on_line=None, progress=None,
                 progress(pct)
 
     result = proc_utils.run_streaming(
-        cmd, on_line=_on_line, should_stop=should_stop, timeout=timeout,
+        cmd,
+        on_line=_on_line,
+        should_stop=should_stop,
+        timeout=timeout,
         cpu_affinity=cpu_affinity,
     )
     result["cmd"] = cmd
+    if not result["error"] and result["code"] != 0:
+        result["error"] = f"Lada 返回非零退出码 {result['code']}：" + "\n".join(
+            result["lines"][-5:]
+        )
     return result
 
 
 # ── 面向用户的说明 ──────────────────────────────────────────
+
 
 def describe_cli(cli: Optional[Path]) -> str:
     """一句话说明当前状态，供界面直接显示。"""

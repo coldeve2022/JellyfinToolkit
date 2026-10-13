@@ -33,6 +33,80 @@ _BELOW_NORMAL_PRIORITY = 0x00004000
 _NEW_PROCESS_GROUP = 0x00000200
 
 
+def _attach_process_tree(proc):
+    """Windows job lifetime includes descendants, even when their parent exits."""
+    if os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("ProcessTime", ctypes.c_int64),
+            ("JobTime", ctypes.c_int64),
+            ("Flags", wintypes.DWORD),
+            ("MinimumWorkingSet", ctypes.c_size_t),
+            ("MaximumWorkingSet", ctypes.c_size_t),
+            ("ActiveProcesses", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("Priority", wintypes.DWORD),
+            ("Scheduling", wintypes.DWORD),
+        ]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("Basic", BasicLimits),
+            ("IO", ctypes.c_uint64 * 6),
+            ("ProcessMemory", ctypes.c_size_t),
+            ("JobMemory", ctypes.c_size_t),
+            ("PeakProcessMemory", ctypes.c_size_t),
+            ("PeakJobMemory", ctypes.c_size_t),
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateJobObjectW(None, None)
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "无法创建子进程监督组")
+    limits = ExtendedLimits()
+    limits.Basic.Flags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    try:
+        if not kernel.SetInformationJobObject(
+            handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            raise OSError(ctypes.get_last_error(), "无法设置子进程监督组")
+        if not kernel.AssignProcessToJobObject(handle, wintypes.HANDLE(int(proc._handle))):
+            raise OSError(ctypes.get_last_error(), "无法监督子进程树")
+    except Exception:
+        kernel.CloseHandle(handle)
+        raise
+    proc._toolkit_job = (kernel, handle)
+
+
+def _close_process_tree(proc):
+    job = getattr(proc, "_toolkit_job", None)
+    if job:
+        kernel, handle = job
+        proc._toolkit_job = None
+        kernel.CloseHandle(handle)
+    elif os.name != "nt":
+        try:
+            import signal
+
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (OSError, AttributeError):
+            pass
+
+
 def psutil_available() -> bool:
     """``psutil`` 是否可用（用于绑核 / 调优先级这类可选优化）。"""
     try:
@@ -42,8 +116,9 @@ def psutil_available() -> bool:
     return True
 
 
-def creation_flags(*, new_group: bool = False, high_priority: bool = False,
-                   low_priority: bool = False) -> int:
+def creation_flags(
+    *, new_group: bool = False, high_priority: bool = False, low_priority: bool = False
+) -> int:
     """Windows 上需要的 ``creationflags``（其它平台返回 0）。
 
     - ``CREATE_NO_WINDOW``：这些 exe 都是控制台程序，不屏蔽就会**弹出黑窗口**；
@@ -86,15 +161,18 @@ def apply_process_prefs(proc, *, cpu_affinity=None, keep_awake: bool = False) ->
         return False
 
 
-def run_streaming(cmd,
-                  *,
-                  on_line: Optional[Callable[[str], None]] = None,
-                  should_stop: Optional[Callable[[], bool]] = None,
-                  timeout: int = 0,
-                  cwd=None,
-                  extra_env: Optional[dict] = None,
-                  cpu_affinity=None,
-                  high_priority: bool = False) -> dict:
+def run_streaming(
+    cmd,
+    *,
+    on_line: Optional[Callable[[str], None]] = None,
+    on_started: Optional[Callable[[object], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+    timeout: int = 0,
+    cwd=None,
+    extra_env: Optional[dict] = None,
+    cpu_affinity=None,
+    high_priority: bool = False,
+) -> dict:
     """同步跑完 ``cmd``，边跑边把每一行输出交给 ``on_line``。
 
     返回 ``{"code", "stopped", "timed_out", "error", "lines"}``。
@@ -106,8 +184,13 @@ def run_streaming(cmd,
     """
     on_line = on_line or (lambda _s: None)
     if not cmd:
-        return {"code": None, "stopped": False, "timed_out": False,
-                "error": "命令为空", "lines": []}
+        return {
+            "code": None,
+            "stopped": False,
+            "timed_out": False,
+            "error": "命令为空",
+            "lines": [],
+        }
 
     env = dict(os.environ)
     if extra_env:
@@ -127,17 +210,52 @@ def run_streaming(cmd,
     try:
         proc = subprocess.Popen(
             [str(c) for c in cmd],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            text=True, encoding="utf-8", errors="replace",
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=str(cwd) if cwd else None,
-            env=env, creationflags=flags,
+            env=env,
+            creationflags=flags,
             start_new_session=(os.name != "nt"),
         )
     except (OSError, ValueError) as e:
-        return {"code": None, "stopped": False, "timed_out": False,
-                "error": f"无法启动程序：{e}", "lines": []}
+        return {
+            "code": None,
+            "stopped": False,
+            "timed_out": False,
+            "error": f"无法启动程序：{e}",
+            "lines": [],
+        }
 
+    try:
+        _attach_process_tree(proc)
+    except OSError as exc:
+        _terminate(proc)
+        proc.stdout.close()
+        return {
+            "code": proc.returncode,
+            "stopped": False,
+            "timed_out": False,
+            "error": str(exc),
+            "lines": [],
+        }
+
+    if on_started:
+        try:
+            on_started(proc)
+        except Exception as exc:
+            _terminate(proc)
+            proc.stdout.close()
+            return {
+                "code": proc.returncode,
+                "stopped": False,
+                "timed_out": False,
+                "error": f"进程启动回调失败：{exc}",
+                "lines": [],
+            }
     apply_process_prefs(proc, cpu_affinity=cpu_affinity)
 
     lines: list = []
@@ -163,44 +281,63 @@ def run_streaming(cmd,
     reader = threading.Thread(target=_reader, name="proc-reader", daemon=True)
     reader.start()
 
-    while True:
-        if proc.poll() is not None:
-            break
-        if should_stop and should_stop():
-            stopped = True
-            _terminate(proc)
-            break
-        if deadline and time.monotonic() > deadline:
-            timed_out = True
-            _terminate(proc)
-            break
-        time.sleep(0.15)
-
-    reader.join(timeout=5)
+    monitor_error = ""
     try:
-        proc.stdout.close()  # type: ignore[union-attr]
-    except Exception:  # noqa: BLE001
-        pass
+        while True:
+            if proc.poll() is not None:
+                break
+            if should_stop and should_stop():
+                stopped = True
+                _terminate(proc)
+                break
+            if deadline and time.monotonic() > deadline:
+                timed_out = True
+                _terminate(proc)
+                break
+            time.sleep(0.15)
+    except Exception as exc:
+        monitor_error = f"进程监测失败：{exc}"
+    finally:
+        if proc.poll() is None:
+            _terminate(proc)
+        _close_process_tree(proc)
+        reader.join(timeout=5)
+        try:
+            proc.stdout.close()  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            pass
 
     code = proc.returncode
-    error = ""
+    error = monitor_error
     if stopped:
         error = "用户已停止"
     elif timed_out:
         error = f"超时（超过 {timeout} 秒）"
-    return {"code": code, "stopped": stopped, "timed_out": timed_out,
-            "error": error, "lines": lines}
+    return {
+        "code": code,
+        "stopped": stopped,
+        "timed_out": timed_out,
+        "error": error,
+        "lines": lines,
+    }
 
 
 def _terminate(proc) -> None:
     """结束进程**整组**（先温和后强硬），并等它真的退出。"""
     if proc.poll() is not None:
+        _close_process_tree(proc)
         return
     try:
-        if os.name == "nt":
+        if getattr(proc, "_toolkit_job", None):
+            _close_process_tree(proc)
+        elif os.name == "nt":
             # 结束整棵进程树：这些工具内部会拉起 ffmpeg，只杀主进程会留孤儿
-            result = subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                                    capture_output=True, creationflags=_NO_WINDOW, timeout=3)
+            result = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                creationflags=_NO_WINDOW,
+                timeout=3,
+            )
             if result.returncode != 0:
                 proc.kill()
         else:

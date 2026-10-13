@@ -5,7 +5,10 @@ import os
 import pytest
 
 from utils.nfo import (
-    fix_nfo_content, nfo_new_filename, read_text_any_encoding, safe_rename,
+    fix_nfo_content,
+    nfo_new_filename,
+    read_text_any_encoding,
+    safe_rename,
 )
 
 
@@ -32,12 +35,15 @@ class TestFixNfoContent:
 
 
 class TestNfoNewFilename:
-    @pytest.mark.parametrize("name,expected", [
-        ("Movie.ts.nfo", "Movie.mp4.nfo"),
-        ("Movie.TS.NFO", "Movie.mp4.NFO"),
-        ("Movie.ts-poster.jpg", "Movie.mp4-poster.jpg"),
-        ("Movie.ts-thumb.jpg", "Movie.mp4-thumb.jpg"),
-    ])
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("Movie.ts.nfo", "Movie.mp4.nfo"),
+            ("Movie.TS.NFO", "Movie.mp4.NFO"),
+            ("Movie.ts-poster.jpg", "Movie.mp4-poster.jpg"),
+            ("Movie.ts-thumb.jpg", "Movie.mp4-thumb.jpg"),
+        ],
+    )
     def test_rename(self, name, expected):
         assert nfo_new_filename(name) == expected
 
@@ -76,8 +82,10 @@ class TestSafeRename:
         dst = tmp_path / "new.nfo"
         src.write_text("x", encoding="utf-8")
         dst.write_text("y", encoding="utf-8")
-        safe_rename(str(src), str(dst))  # 不应抛错
-        assert dst.read_text(encoding="utf-8") == "x"
+        with pytest.raises(FileExistsError):
+            safe_rename(str(src), str(dst))
+        assert dst.read_text(encoding="utf-8") == "y"
+        assert src.read_text(encoding="utf-8") == "x"
 
     def test_same_path(self, tmp_path):
         src = tmp_path / "same.nfo"

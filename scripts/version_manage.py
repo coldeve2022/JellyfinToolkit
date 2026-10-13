@@ -28,9 +28,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 __all__ = [
-    "read_version_py", "read_pyproject_version", "read_changelog_versions",
-    "check_consistency", "bump_version_py", "bump_pyproject",
-    "insert_changelog_entry", "VERSION_RE",
+    "read_version_py",
+    "read_pyproject_version",
+    "read_changelog_versions",
+    "check_consistency",
+    "bump_version_py",
+    "bump_pyproject",
+    "insert_changelog_entry",
+    "VERSION_RE",
 ]
 
 VERSION_RE = re.compile(r'__version__\s*=\s*["\']([^"\']+)["\']')
@@ -61,6 +66,7 @@ def _force_utf8_stdout() -> None:
 
 # ── 读取各处版本号 ──────────────────────────────────────────
 
+
 def read_version_py(text: str) -> str:
     m = VERSION_RE.search(text or "")
     return m.group(1) if m else ""
@@ -84,8 +90,10 @@ def parse_version(v: str) -> tuple:
 
 # ── 一致性校验 ──────────────────────────────────────────────
 
-def check_consistency(version_py: str, pyproject: str, changelog_text: str,
-                      git_tag: str = "") -> tuple:
+
+def check_consistency(
+    version_py: str, pyproject: str, changelog_text: str, git_tag: str = ""
+) -> tuple:
     """返回 ``(errors, warnings)``。
 
     **errors** 必须为 0 才算通过 —— 这几条都会直接导致发版出问题：
@@ -111,8 +119,7 @@ def check_consistency(version_py: str, pyproject: str, changelog_text: str,
         cur = parse_version(version_py)
         newest = parse_version(versions[0])
         if cur and newest and cur < newest:
-            warnings.append(
-                f"CHANGELOG 最新的版本（{versions[0]}）比当前版本（{version_py}）还新")
+            warnings.append(f"CHANGELOG 最新的版本（{versions[0]}）比当前版本（{version_py}）还新")
 
     if git_tag:
         tag = git_tag.lstrip("vV")
@@ -123,16 +130,20 @@ def check_consistency(version_py: str, pyproject: str, changelog_text: str,
 
 # ── 提升版本号 ──────────────────────────────────────────────
 
+
 def bump_version_py(text: str, new: str) -> str:
-    return VERSION_RE.sub(f'__version__ = "{new}"', text, count=1)
+    text = VERSION_RE.sub(f'__version__ = "{new}"', text, count=1)
+    fixed = tuple(parse_version(new)) + (0,)
+    return re.sub(r"VERSION_TUPLE\s*=\s*\([^)]*\)", f"VERSION_TUPLE = {fixed}", text, count=1)
 
 
 def bump_pyproject(text: str, new: str) -> str:
     return PYPROJECT_RE.sub(f'version = "{new}"', text, count=1)
 
 
-def insert_changelog_entry(text: str, version: str, date: str, note: str = "",
-                           body: str = "") -> str:
+def insert_changelog_entry(
+    text: str, version: str, date: str, note: str = "", body: str = ""
+) -> str:
     """在 CHANGELOG 顶部（第一个 ``## [`` 之前）插入新版本小节。
 
     保留文件原有的开头说明；没有现成小节时插到文件末尾。
@@ -140,7 +151,7 @@ def insert_changelog_entry(text: str, version: str, date: str, note: str = "",
     entry = [f"## [{version}] — {date}", ""]
     if note:
         entry += [note, ""]
-    entry += (body.rstrip().splitlines() if body else ["### 新增", "", "- ", ""])
+    entry += body.rstrip().splitlines() if body else ["### 新增", "", "- ", ""]
     block = "\n".join(entry).rstrip() + "\n\n"
 
     m = CHANGELOG_HEAD_RE.search(text or "")
@@ -153,10 +164,18 @@ def insert_changelog_entry(text: str, version: str, date: str, note: str = "",
 
 # ── git / 产物状态 ──────────────────────────────────────────
 
+
 def _git(args, cwd) -> str:
     try:
-        r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", timeout=60)
+        r = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
     except (OSError, subprocess.SubprocessError):
         return ""
     return (r.stdout or "").strip()
@@ -181,10 +200,25 @@ def gather_status(root: Path) -> dict:
     zips = sorted(dist.glob("*.zip")) if dist.is_dir() else []
 
     errors, warnings = check_consistency(version, pyproject, changelog)
-    return {"version": version, "pyproject": pyproject, "head": head, "branch": branch,
-            "dirty": dirty, "tags": tags, "dist_zips": [z.name for z in zips],
-            "errors": errors, "warnings": warnings,
-            "changelog_versions": read_changelog_versions(changelog)}
+    if vp.is_file():
+        match = re.search(r"VERSION_TUPLE\s*=\s*\(([^)]*)\)", vp.read_text(encoding="utf-8"))
+        actual = (
+            tuple(int(p.strip()) for p in match.group(1).split(",") if p.strip()) if match else ()
+        )
+        if actual != parse_version(version) + (0,):
+            errors.append("VERSION_TUPLE 与版本号不一致，固定版本资源会错误")
+    return {
+        "version": version,
+        "pyproject": pyproject,
+        "head": head,
+        "branch": branch,
+        "dirty": dirty,
+        "tags": tags,
+        "dist_zips": [z.name for z in zips],
+        "errors": errors,
+        "warnings": warnings,
+        "changelog_versions": read_changelog_versions(changelog),
+    }
 
 
 def _print_status(st: dict) -> None:
@@ -210,6 +244,7 @@ def _print_status(st: dict) -> None:
 
 
 # ── 命令行 ──────────────────────────────────────────────────
+
 
 def main() -> int:
     _force_utf8_stdout()
@@ -272,9 +307,9 @@ def main() -> int:
     print()
     print("  接下来（先写 CHANGELOG，再提交、打标签）：")
     print(f"    1. 编辑 CHANGELOG.md 里的 [{new}] 小节")
-    print("    2. git add -A && git commit -m \"v" + new + ": …\"")
+    print('    2. git add -A && git commit -m "v' + new + ': …"')
     print("    3. git push origin main")
-    print(f"    4. git tag -a v{new} -m \"v{new}\" && git push origin v{new}")
+    print(f'    4. git tag -a v{new} -m "v{new}" && git push origin v{new}')
     print("    5. 等 Actions 变绿（它会自动构建 + 校验 + 生成 Release）")
     print()
     print("  详见 docs/版本管理.md")

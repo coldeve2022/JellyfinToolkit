@@ -14,8 +14,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
-import shutil
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -47,8 +48,9 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="端到端手动验证")
-    parser.add_argument("--demo", default=str(DEFAULT_DEMO),
-                        help="演示库目录（中性路径，默认 C:\\MediaDemo）")
+    parser.add_argument(
+        "--demo", default=str(DEFAULT_DEMO), help="演示库目录（中性路径，默认 C:\\MediaDemo）"
+    )
     parser.add_argument("--count", type=int, default=60)
     parser.add_argument("--keep", action="store_true", help="保留演示库，不重建")
     parser.add_argument("--timeout", type=float, default=120.0)
@@ -57,8 +59,9 @@ def main() -> int:
     demo = Path(args.demo).expanduser().resolve()
     if not (args.keep and (demo / "jellyfin.db").exists()):
         from seed_demo import seed
-        if demo.exists():
-            shutil.rmtree(demo, ignore_errors=True)
+
+        if demo.exists() and any(demo.iterdir()):
+            demo = Path(tempfile.mkdtemp(prefix=demo.name + "-", dir=demo.parent))
         seed(demo, max(20, args.count))
     print(f"演示库: {demo / 'jellyfin.db'}\n")
 
@@ -71,27 +74,14 @@ def main() -> int:
     app = QApplication.instance() or QApplication([])
     app.setStyle("Fusion")
     from utils.fonts import ui_font
+
     font = ui_font(10)
     if font is not None:
         app.setFont(font)
 
     from config import ToolkitConfig
     from ui.main_window import MainWindow, NAV_LABELS
-    from ui.pages.automation import AutomationPage
-    from ui.pages.censorship import CensorshipPage
-    from ui.pages.db_tools import DBToolsPage
-    from ui.pages.dedup import DedupPage
-    from ui.pages.delete import DeletePage
-    from ui.pages.insight import InsightPage
-    from ui.pages.merge import MergePage
-    from ui.pages.nfo_fix import NFOPage
-    from ui.pages.onboarding import OnboardingPage
-    from ui.pages.profile import ProfilePage
-    from ui.pages.repair import RepairPage
-    from ui.pages.replace import ReplacePage
-    from ui.pages.review import ReviewPage
-    from ui.pages.settings import SettingsPage
-    from ui.pages.subtitle import SubtitlePage
+    from main import PAGE_SPECS
     from workers.ingest import IngestWorker
     from workers.scorer import AnalyzeWorker
 
@@ -109,27 +99,27 @@ def main() -> int:
 
     print("=== [A] 环境 ===")
     from utils.tools import probe_hardware, resolve_tool
+
     ffmpeg = resolve_tool("ffmpeg")
     check("ffmpeg 已定位", bool(ffmpeg), f"路径: {ffmpeg or '未找到'}")
     if ffmpeg:
         info = probe_hardware(ffmpeg)
         print(f"     实测可用编码器: {', '.join(info['encoders'])}")
-        print(f"     实测可用硬解  : "
-              f"{', '.join(a for a in info['hwaccels'] if a != 'none') or '无'}")
+        print(
+            f"     实测可用硬解  : {', '.join(a for a in info['hwaccels'] if a != 'none') or '无'}"
+        )
 
     print("\n=== [B] 主窗口 + 全部页面注册与导航 ===")
-    pages = [
-        OnboardingPage(cfg), InsightPage(cfg), ProfilePage(cfg), ReviewPage(cfg),
-        DeletePage(cfg), DedupPage(cfg), CensorshipPage(cfg), SubtitlePage(cfg),
-        ReplacePage(cfg), RepairPage(cfg), NFOPage(cfg), DBToolsPage(cfg),
-        MergePage(cfg), AutomationPage(cfg), SettingsPage(cfg),
-    ]
+    pages = [getattr(importlib.import_module(module), name)(cfg) for module, name in PAGE_SPECS]
     window = MainWindow(cfg)
     for page in pages:
         window.register_page(page)
     window.show()
-    check("侧边栏条目数 == 页面数", len(NAV_LABELS) == window.stack.count(),
-          f"{len(NAV_LABELS)} vs {window.stack.count()}")
+    check(
+        "侧边栏条目数 == 页面数",
+        len(NAV_LABELS) == window.stack.count(),
+        f"{len(NAV_LABELS)} vs {window.stack.count()}",
+    )
     for i in range(window.stack.count()):
         window._navigate(i)
         app.processEvents()
@@ -148,18 +138,22 @@ def main() -> int:
     ok = wait_worker(ingest)
     check("采集完成", ok)
     check("指标卡 6 项", insight.metric_row.count() == 6)
-    check("分布表有数据", insight.table.rowCount() > 10,
-          f"{insight.table.rowCount()} 行")
+    check("分布表有数据", insight.table.rowCount() > 10, f"{insight.table.rowCount()} 行")
     loop(200)
 
     print("\n=== [D] 快速打标 / 删除暂存 / 重复处理（真实分析线程）===")
-    for label, page, slot in (("快速打标", review, review._on_analyzed),
-                              ("删除暂存", delete, delete._on_loaded),
-                              ("重复处理", dedup, dedup._on_loaded)):
-        worker = AnalyzeWorker(db, {},
-                               exclude_keywords=cfg.exclude_path_keywords,
-                               th_keep=cfg.score_th_keep / 100,
-                               th_delete=cfg.score_th_delete / 100)
+    for label, page, slot in (
+        ("快速打标", review, review._on_analyzed),
+        ("删除暂存", delete, delete._on_loaded),
+        ("重复处理", dedup, dedup._on_loaded),
+    ):
+        worker = AnalyzeWorker(
+            db,
+            {},
+            exclude_keywords=cfg.exclude_path_keywords,
+            th_keep=cfg.score_th_keep / 100,
+            th_delete=cfg.score_th_delete / 100,
+        )
         worker.finished.connect(slot)
         worker.start()
         ok = wait_worker(worker)

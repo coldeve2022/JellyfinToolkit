@@ -547,7 +547,7 @@ def test_spec_has_icon_version_and_no_upx():
     spec = (Path(__file__).resolve().parents[1] / "JellyfinToolkit.spec").read_text(
         encoding="utf-8")
     assert "upx=False" in spec, "UPX 压缩会被国产安全软件误报"
-    assert "assets" in spec and "icon.ico" in spec
+    assert '"build"' in spec and "icons" in spec and "icon.ico" in spec
     assert "version_info.txt" in spec
     assert "console=False" in spec
 

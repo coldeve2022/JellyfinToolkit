@@ -88,8 +88,9 @@ body:
       label: 实际的行为
       description: |
         有报错就把日志贴上来。错误日志在数据目录下的 `app-error.log`：
-        - Windows: `%APPDATA%\JellyfinToolkit\app-error.log`
+        - Windows 默认打包运行: `%APPDATA%\JellyfinToolkit\data\app-error.log`
         - 源码运行: 项目目录下的 `data/app-error.log`
+        - 自定义 `--data-dir` 或环境变量: `<指定目录>\data\app-error.log`
     validations:
       required: true
 

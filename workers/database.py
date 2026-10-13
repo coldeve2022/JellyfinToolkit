@@ -3,10 +3,11 @@
 核心逻辑 `transfer_userdata()` 为纯函数（不依赖 Qt），可单元测试；
 `CrossDBTransferWorker` 仅负责线程包装与信号发射。
 """
+
 from __future__ import annotations
 
-import shutil
 import sqlite3
+import uuid
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,7 @@ def transfer_userdata(
     Raises:
         FileNotFoundError: 任一数据库文件不存在
     """
+
     def _log(msg: str) -> None:
         if log:
             log(msg)
@@ -54,21 +56,56 @@ def transfer_userdata(
     if not current_db.exists():
         raise FileNotFoundError(f"新库不存在: {current_db}")
 
-    stats = {"matched": 0, "transferred": 0, "not_found": 0}
+    stats = {"matched": 0, "transferred": 0, "not_found": 0, "preserved": 0, "cancelled": False}
+
+    fields = [
+        "ItemId",
+        "UserId",
+        "CustomDataKey",
+        "AudioStreamIndex",
+        "IsFavorite",
+        "LastPlayedDate",
+        "Likes",
+        "PlayCount",
+        "PlaybackPositionTicks",
+        "Played",
+        "Rating",
+        "SubtitleStreamIndex",
+        "RetentionDate",
+    ]
+
+    def columns(conn, table):
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    def require_schema(conn):
+        if not {"Id", "Path"} <= columns(conn, "BaseItems") or not {
+            "ItemId",
+            "UserId",
+            "CustomDataKey",
+        } <= columns(conn, "UserData"):
+            raise sqlite3.DatabaseError(
+                "当前数据库结构不支持安全播放记录迁移（需 BaseItems/UserData 身份字段），已拒绝写入"
+            )
+
+    def meaningful(ud):
+        return any(ud[i] not in (None, "", 0, False) for i in (4, 5, 6, 7, 8, 9, 10))
+
+    def rank(ud):
+        return (str(ud[5] or ""), int(ud[9] or 0), int(ud[7] or 0), int(ud[8] or 0))
 
     conn_old = sqlite3.connect(str(old_db))
     c_old = conn_old.cursor()
     try:
+        require_schema(conn_old)
         c_old.execute("SELECT Id, Path FROM BaseItems WHERE Path LIKE '%.ts'")
         old_items = c_old.fetchall()
         _log(f"📋 从旧库读取到 {len(old_items)} 条 .ts 记录")
 
+        old_columns = columns(conn_old, "UserData")
         c_old.execute(
-            """SELECT ItemId, UserId, CustomDataKey, AudioStreamIndex,
-                      IsFavorite, LastPlayedDate, Likes, PlayCount,
-                      PlaybackPositionTicks, Played, Rating,
-                      SubtitleStreamIndex, RetentionDate
-               FROM UserData"""
+            "SELECT "
+            + ",".join(f if f in old_columns else f"NULL AS {f}" for f in fields)
+            + " FROM UserData"
         )
         old_userdata: dict = defaultdict(list)
         for row in c_old.fetchall():
@@ -79,15 +116,24 @@ def transfer_userdata(
     conn_new = sqlite3.connect(str(current_db))
     c_new = conn_new.cursor()
     try:
+        require_schema(conn_new)
+        new_columns = columns(conn_new, "UserData")
+        has_key = "PresentationUniqueKey" in columns(conn_new, "BaseItems")
+        conn_new.execute("BEGIN IMMEDIATE")
         for i, (old_id, old_path) in enumerate(old_items):
             if should_stop and should_stop():
-                break
+                conn_new.rollback()
+                stats.update(cancelled=True, transferred=0)
+                _log("已停止，当前迁移事务已回滚")
+                return stats
             if not old_path or not str(old_path).lower().endswith(".ts"):
                 continue
 
             new_path = str(old_path)[:-3] + ".mp4"
             c_new.execute(
-                "SELECT Id, PresentationUniqueKey FROM BaseItems WHERE Path = ? COLLATE NOCASE",
+                "SELECT Id,"
+                + ("PresentationUniqueKey" if has_key else "NULL")
+                + " FROM BaseItems WHERE Path = ? COLLATE NOCASE",
                 (new_path,),
             )
             row = c_new.fetchone()
@@ -98,32 +144,53 @@ def transfer_userdata(
 
             stats["matched"] += 1
             new_id = row[0]
-            new_key = row[1] if row[1] else new_id.lower()
+            new_key = row[1] or (
+                uuid.UUID(bytes_le=new_id).hex
+                if isinstance(new_id, bytes) and len(new_id) == 16
+                else str(new_id).lower()
+            )
 
             if old_id in old_userdata:
+                users = {}
                 for ud in old_userdata[old_id]:
+                    if ud[1] not in users or rank(ud) > rank(users[ud[1]]):
+                        users[ud[1]] = ud
+                for ud in users.values():
                     user_id = ud[1]
+                    existing = c_new.execute(
+                        "SELECT "
+                        + ",".join(f if f in new_columns else f"NULL AS {f}" for f in fields)
+                        + " FROM UserData WHERE ItemId=? AND UserId=?",
+                        (new_id, user_id),
+                    ).fetchall()
+                    if any(meaningful(current) for current in existing):
+                        stats["preserved"] += 1
+                        continue
+                    actual_key = next((current[2] for current in existing if current[2]), new_key)
                     c_new.execute(
                         "DELETE FROM UserData WHERE ItemId = ? AND UserId = ?",
                         (new_id, user_id),
                     )
+                    values = (new_id, user_id, actual_key, *ud[3:])
+                    writable = [(f, value) for f, value in zip(fields, values) if f in new_columns]
                     c_new.execute(
-                        """INSERT INTO UserData (
-                            ItemId, UserId, CustomDataKey, AudioStreamIndex,
-                            IsFavorite, LastPlayedDate, Likes, PlayCount,
-                            PlaybackPositionTicks, Played, Rating,
-                            SubtitleStreamIndex, RetentionDate
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (new_id, user_id, new_key, ud[3], ud[4],
-                         ud[5], ud[6], ud[7], ud[8],
-                         ud[9], ud[10], ud[11], ud[12]),
+                        "INSERT INTO UserData ("
+                        + ",".join(f for f, _ in writable)
+                        + ") VALUES ("
+                        + ",".join("?" for _ in writable)
+                        + ")",
+                        tuple(value for _, value in writable),
                     )
                     stats["transferred"] += 1
 
             if progress and old_items:
                 progress(int((i + 1) / len(old_items) * 100))
 
-        conn_new.commit()
+        if should_stop and should_stop():
+            conn_new.rollback()
+            stats.update(cancelled=True, transferred=0)
+        else:
+            conn_new.commit()
     except Exception:
         conn_new.rollback()
         raise
@@ -143,7 +210,7 @@ class CrossDBTransferWorker(QThread):
 
     log = Signal(str)
     progress = Signal(int)
-    finished = Signal(dict)    # 统计结果
+    finished = Signal(dict)  # 统计结果
 
     def __init__(self, data_dir: str, parent=None):
         super().__init__(parent)
@@ -166,16 +233,18 @@ class CrossDBTransferWorker(QThread):
             self.finished.emit({"error": "no_backup"})
             return
 
-        oldest = backups[0]
+        oldest = backups[-1]
         self.log.emit(f"📦 旧库: {oldest.name}")
         self.log.emit(f"📦 新库: {current_db.name}")
 
         # 操作前先为当前库做安全备份
         safe_backup = current_db.with_name(
-            f"jellyfin.db.cross_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            f"jellyfin.db.cross_backup_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         )
         try:
-            shutil.copy2(str(current_db), str(safe_backup))
+            from utils.file_ops import snapshot_sqlite
+
+            snapshot_sqlite(current_db, safe_backup)
             self.log.emit(f"✅ 当前库已备份至: {safe_backup.name}")
         except OSError as e:
             self.log.emit(f"❌ 备份当前库失败，已中止: {e}")
@@ -184,7 +253,8 @@ class CrossDBTransferWorker(QThread):
 
         try:
             stats = transfer_userdata(
-                oldest, current_db,
+                oldest,
+                current_db,
                 log=self.log.emit,
                 progress=self.progress.emit,
                 should_stop=lambda: self._stopped,

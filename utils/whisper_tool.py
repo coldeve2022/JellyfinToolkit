@@ -28,10 +28,22 @@ from pathlib import Path
 from typing import Optional
 
 __all__ = [
-    "TOOL_NAME", "EXE_NAME", "HOMEPAGE", "MODEL_CHOICES",
-    "candidate_dirs", "find_infer_exe", "search_infer_exe", "probe", "build_command",
-    "find_infer_source", "is_encoding_patched", "patch_encoding", "PATCH_MARKER",
-    "default_audio_suffixes", "prerequisites_hint", "describe_exe",
+    "TOOL_NAME",
+    "EXE_NAME",
+    "HOMEPAGE",
+    "MODEL_CHOICES",
+    "candidate_dirs",
+    "find_infer_exe",
+    "search_infer_exe",
+    "probe",
+    "build_command",
+    "find_infer_source",
+    "is_encoding_patched",
+    "patch_encoding",
+    "PATCH_MARKER",
+    "default_audio_suffixes",
+    "prerequisites_hint",
+    "describe_exe",
 ]
 
 TOOL_NAME = "Faster-Whisper 批量字幕（TransWithAI 打包版）"
@@ -122,7 +134,7 @@ def candidate_dirs(configured: str = "", extra: Optional[list] = None) -> list[P
             add(root / name)
             add(root / "tools" / name)
 
-    for p in (extra or []):
+    for p in extra or []:
         add(p)
     return out
 
@@ -146,8 +158,9 @@ def _exe_in(directory: Path) -> Optional[Path]:
     return None
 
 
-def search_infer_exe(configured: str = "", extra_dirs: Optional[list] = None,
-                     time_budget: float = 12.0, log=None) -> dict:
+def search_infer_exe(
+    configured: str = "", extra_dirs: Optional[list] = None, time_budget: float = 12.0, log=None
+) -> dict:
     """定位 ``infer.exe``，**连搜索过程一起返回**（界面要用它解释"搜了哪儿"）。
 
     顺序：显式配置 → 已知常见位置（快） → 按名称关键词在盘上浅层搜索（慢但管用）。
@@ -162,16 +175,26 @@ def search_infer_exe(configured: str = "", extra_dirs: Optional[list] = None,
     if configured:
         hit = tool_search.exe_in_dir(Path(configured.strip().strip('"')), (EXE_NAME,))
         if hit:
-            return {"path": hit, "source": "设置里指定的位置", "scanned": 0,
-                    "elapsed": 0.0, "stopped_early": False}
+            return {
+                "path": hit,
+                "source": "设置里指定的位置",
+                "scanned": 0,
+                "elapsed": 0.0,
+                "stopped_early": False,
+            }
     for d in candidate_dirs("", extra=extra_dirs):
         hit = tool_search.exe_in_dir(d, (EXE_NAME,))
         if hit:
-            return {"path": hit, "source": f"已知常见位置：{d}", "scanned": 0,
-                    "elapsed": 0.0, "stopped_early": False}
+            return {
+                "path": hit,
+                "source": f"已知常见位置：{d}",
+                "scanned": 0,
+                "elapsed": 0.0,
+                "stopped_early": False,
+            }
     return tool_search.find_executable(
-        (EXE_NAME,), SEARCH_KEYWORDS, extra_dirs=extra_dirs,
-        time_budget=time_budget, log=log)
+        (EXE_NAME,), SEARCH_KEYWORDS, extra_dirs=extra_dirs, time_budget=time_budget, log=log
+    )
 
 
 def find_infer_exe(configured: str = "", extra_dirs: Optional[list] = None) -> Optional[Path]:
@@ -220,8 +243,12 @@ def probe(infer_exe: Path, timeout: int = 60) -> dict:
     try:
         proc = subprocess.run(
             [str(infer_exe), "--help"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, creationflags=_no_window_flags(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=_no_window_flags(),
         )
     except (OSError, subprocess.SubprocessError) as e:
         info["error"] = f"无法运行 {EXE_NAME}：{e}"
@@ -232,7 +259,8 @@ def probe(infer_exe: Path, timeout: int = 60) -> dict:
     if not options:
         info["error"] = (
             f"{EXE_NAME} 没有输出版本/选项信息（退出码 {proc.returncode}）。"
-            "可能不是预期的那个工具，或文件已损坏。")
+            "可能不是预期的那个工具，或文件已损坏。"
+        )
         return info
     info["options"] = options
     info["ok"] = True
@@ -265,6 +293,7 @@ def default_audio_suffixes(video_extensions=None) -> str:
 
 
 # ── 命令行构建 ──────────────────────────────────────────────
+
 
 def build_command(
     infer_exe,
@@ -361,9 +390,12 @@ def skipped_arguments(requested: dict, options: Optional[set]) -> list:
         return []
     out = []
     for key, flag in (
-        ("model", "--model_name_or_path"), ("device", "--device"),
-        ("compute_type", "--compute_type"), ("audio_suffixes", "--audio_suffixes"),
-        ("sub_formats", "--sub_formats"), ("output_dir", "--output_dir"),
+        ("model", "--model_name_or_path"),
+        ("device", "--device"),
+        ("compute_type", "--compute_type"),
+        ("audio_suffixes", "--audio_suffixes"),
+        ("sub_formats", "--sub_formats"),
+        ("output_dir", "--output_dir"),
         ("language", "--language"),
     ):
         if requested.get(key) and flag not in options:
@@ -372,6 +404,7 @@ def skipped_arguments(requested: dict, options: Optional[set]) -> list:
 
 
 # ── 面向用户的说明 ──────────────────────────────────────────
+
 
 def describe_exe(infer_exe: Optional[Path]) -> str:
     """一句话说明当前状态，供界面直接显示。"""
@@ -406,12 +439,13 @@ def describe_exit_code(code) -> str:
     """
     if code == 0:
         return ""
-    if code == 3221226505:      # 0xC0000409 STATUS_STACK_BUFFER_OVERRUN
+    if code == 3221226505:  # 0xC0000409 STATUS_STACK_BUFFER_OVERRUN
         return (
             "底层引擎发生未处理异常（Windows 0xC0000409）。"
             "字幕文件可能**仍已生成**，请先检查输出目录；"
-            "若没有生成，可关闭批处理加速、把批处理大小调小，或改用 CPU 重试这个文件。")
-    if code == 3221225477:      # 0xC0000005 访问冲突
+            "若没有生成，可关闭批处理加速、把批处理大小调小，或改用 CPU 重试这个文件。"
+        )
+    if code == 3221225477:  # 0xC0000005 访问冲突
         return "底层引擎访问冲突（0xC0000005）。通常是显存不足或驱动问题，可尝试降低批处理大小 / 关闭批处理 / 更新驱动。"
     if code == 1:
         return "底层引擎返回错误（Exit Code: 1），通常是文件读取失败或参数不被支持。"
@@ -420,8 +454,9 @@ def describe_exit_code(code) -> str:
     return f"底层引擎异常中断（Exit Code: {code}）"
 
 
-def run_one(infer_exe, media_path, *, on_line=None, should_stop=None,
-            timeout: int = 0, **kwargs) -> dict:
+def run_one(
+    infer_exe, media_path, *, on_line=None, should_stop=None, timeout: int = 0, **kwargs
+) -> dict:
     """跑一次识别（``kwargs`` 原样交给 :func:`build_command`）。
 
     返回 ``utils.proc.run_streaming`` 的结果，另外补上 ``error`` 的人类可读说明。
@@ -431,12 +466,16 @@ def run_one(infer_exe, media_path, *, on_line=None, should_stop=None,
     options = kwargs.pop("options", None)
     cmd = build_command(infer_exe, media_path, options=options, **kwargs)
     result = proc_utils.run_streaming(
-        cmd, on_line=on_line, should_stop=should_stop, timeout=timeout,
+        cmd,
+        on_line=on_line,
+        should_stop=should_stop,
+        timeout=timeout,
         extra_env={"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
     )
     if not result["error"] and result["code"] not in (0, None):
         result["error"] = describe_exit_code(result["code"])
     return result
+
 
 # ── 编码补丁（中文 Windows 上不打必崩）──────────────────────
 
@@ -451,7 +490,7 @@ PATCH_MARKER = "# [JellyfinToolkit 补丁]"
 #: 不代表"能干活"。）
 #: 实测 PYTHONIOENCODING / PYTHONUTF8 对该打包版**全部无效**（冻结后的解释器不读
 #: 这些变量），所以只能改文件 —— 好在它把源码放在 _internal 下，改了就生效。
-_PATCH_BODY = '''{marker}
+_PATCH_BODY = """{marker}
 # 中文 Windows 上这个打包版会在开工前打印带 emoji 的开源声明，而它冻结后的
 # stdout 编码是 GBK → UnicodeEncodeError，**每次运行必崩、实际什么活都没干**。
 # 下面让编码错误不再抛异常；输出是管道时（调用方按 UTF-8 读）切成 UTF-8，
@@ -463,7 +502,7 @@ try:
     sys.stderr.reconfigure(encoding=_jt_err_enc, errors="replace")
 except Exception:
     pass
-'''
+"""
 
 
 def find_infer_source(explicit: str = "") -> Optional[Path]:
@@ -471,8 +510,15 @@ def find_infer_source(explicit: str = "") -> Optional[Path]:
     exe = None
     if explicit:
         p = Path(str(explicit).strip().strip('"'))
-        exe = p if (p.is_file() and p.suffix.lower() == ".py") else \
-            _exe_in(p) or p if p.is_dir() else p if p.is_file() else None
+        exe = (
+            p
+            if (p.is_file() and p.suffix.lower() == ".py")
+            else _exe_in(p) or p
+            if p.is_dir()
+            else p
+            if p.is_file()
+            else None
+        )
         if exe and Path(exe).suffix.lower() == ".py":
             return Path(exe)
     if not exe:
@@ -514,8 +560,7 @@ def patch_encoding(source=None, backup: bool = True) -> tuple:
     lines = text.split("\n")
     idx = next((i for i, l in enumerate(lines) if l.startswith("from typing import")), None)
     if idx is None:
-        idx = next((i for i, l in enumerate(lines)
-                    if l.startswith(("import ", "from "))), None)
+        idx = next((i for i, l in enumerate(lines) if l.startswith(("import ", "from "))), None)
     if idx is None:
         return False, "找不到插入位置（该版本的 infer.py 结构可能变了）", src
 
@@ -523,8 +568,9 @@ def patch_encoding(source=None, backup: bool = True) -> tuple:
         bak = src.with_suffix(src.suffix + ".orig")
         if not bak.exists():
             import shutil as _shutil
+
             _shutil.copy2(src, bak)
 
-    lines[idx + 1:idx + 1] = ["", _PATCH_BODY.format(marker=PATCH_MARKER).rstrip()]
+    lines[idx + 1 : idx + 1] = ["", _PATCH_BODY.format(marker=PATCH_MARKER).rstrip()]
     src.write_text("\n".join(lines), encoding="utf-8")
     return True, f"已插入补丁（第 {idx + 3} 行起），原文件备份为 {src.name}.orig", src

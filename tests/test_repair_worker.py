@@ -26,9 +26,21 @@ HW = "none"
 
 
 def _make_video(path: Path, fmt: str = "mp4", duration: int = 2) -> Path:
-    cmd = [_FFMPEG, "-y", "-v", "error",
-           "-f", "lavfi", "-i", f"testsrc=duration={duration}:size=64x64:rate=5",
-           "-c:v", CODEC, "-pix_fmt", "yuv420p", str(path)]
+    cmd = [
+        _FFMPEG,
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=duration={duration}:size=64x64:rate=5",
+        "-c:v",
+        CODEC,
+        "-pix_fmt",
+        "yuv420p",
+        str(path),
+    ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         pytest.skip(f"无法生成测试视频: {r.stderr[:100]}")
@@ -67,7 +79,7 @@ class TestAutoMode:
         w, logs = _run_worker([str(v)], "auto")
         target = tmp_path / "movie.mp4"
         assert target.exists(), logs
-        assert not v.exists(), "旧 mkv 应被删除"
+        assert v.exists(), "原格式源应保留，后续审核可移入安全隔离"
         assert target.stat().st_size > 0
 
     def test_corrupted_file_preserved_on_failure(self, tmp_path):
@@ -90,7 +102,7 @@ class TestAutoMode:
         v = _make_video(tmp_path / "force.mkv", fmt="mkv")
         w, logs = _run_worker([str(v)], "transcode")
         assert (tmp_path / "force.mp4").exists()
-        assert not v.exists()
+        assert v.exists()
 
 
 class TestWorkerLifecycle:
@@ -102,41 +114,24 @@ class TestWorkerLifecycle:
         这里把 worker 的 subprocess.Popen 换成"挂起到被 kill 为止"的假进程，
         保证 stop() 一定命中中断分支，并断言我们确实观察到了子进程。
         """
-        import threading
-
         from workers import ffmpeg as ffmpeg_mod
+        import sys
 
-        killed = threading.Event()
-        observed: dict = {}
+        observed = {}
+        actual_popen = subprocess.Popen
 
-        class _BlockingProc:
-            def __init__(self, cmd, **kwargs):
+        def launch(cmd, **kwargs):
+            if Path(cmd[0]).name.lower().startswith("ffmpeg"):
                 observed["cmd"] = cmd
-                self.returncode = None
-                self.stdout = iter(())      # repair 会逐行读 stdout，这里立即结束
-
-            def wait(self, timeout=None):
-                if not killed.wait(timeout if timeout else None):
-                    raise subprocess.TimeoutExpired("ffmpeg", timeout)
-                self.returncode = -9
-                return self.returncode
-
-            def kill(self):
-                killed.set()
-
-            # 兼容 with 语句（subprocess.run 内部会用）
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
+                return actual_popen([sys.executable, "-c", "import time;time.sleep(30)"], **kwargs)
+            return actual_popen(cmd, **kwargs)
 
         # 先生成测试视频：subprocess 是同一个模块对象，
         # patch 之后再调用 _make_video 会把这个假进程也套进去。
         v = _make_video(tmp_path / "life.mp4")
         original = v.read_bytes()
 
-        monkeypatch.setattr(ffmpeg_mod.subprocess, "Popen", _BlockingProc)
+        monkeypatch.setattr(ffmpeg_mod.subprocess, "Popen", launch)
 
         w = FFmpegRepairWorker([str(v)], "repair", CODEC, HW, crf=30)
         w.start()

@@ -54,6 +54,7 @@ def _force_utf8_stdout() -> None:
         except (AttributeError, ValueError, OSError):
             continue
 
+
 #: 版本小节标题：``## [3.8.0] — 2026-09-19`` / ``## [3.8.0]`` / ``## 3.8.0``
 VERSION_HEAD_RE = re.compile(r"^##\s+\[?(\d+(?:\.\d+)*)\]?", re.M)
 
@@ -105,8 +106,7 @@ def build_body(version: str, changelog_text: str, repo_url: str = "") -> str:
     if section:
         parts.append(f"## 本次更新（{tag}）\n\n{section}")
     else:
-        parts.append(f"## 本次更新（{tag}）\n\n"
-                     "本次未在 CHANGELOG.md 找到对应小节。")
+        parts.append(f"## 本次更新（{tag}）\n\n本次未在 CHANGELOG.md 找到对应小节。")
 
     parts.append(INSTALL_BLOCK.rstrip())
     if repo_url:
@@ -134,9 +134,11 @@ def main() -> int:
     if args.out:
         Path(args.out).write_text(body, encoding="utf-8")
         section = extract_section(path.read_text(encoding="utf-8"), args.version)
-        print(f"已写入 {args.out}"
-              f"（本次更新部分 {len(section.splitlines())} 行，正文共 "
-              f"{len(body.splitlines())} 行）")
+        print(
+            f"已写入 {args.out}"
+            f"（本次更新部分 {len(section.splitlines())} 行，正文共 "
+            f"{len(body.splitlines())} 行）"
+        )
     else:
         print(body)
     return 0

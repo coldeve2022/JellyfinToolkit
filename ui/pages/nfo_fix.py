@@ -1,16 +1,28 @@
 """NFO 关联修复页面 — 修复 .ts → .mp4 后的 NFO 文件和关联资源。"""
+
 from __future__ import annotations
 
+from ui.services import busy, start_task, stop_page
+
 import os
+from pathlib import Path
+import copy
+from ui.services import CallWorker
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QFileDialog, QMessageBox,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QProgressBar,
+    QFileDialog,
+    QMessageBox,
 )
 
 from ui.widgets import LogPanel, InfoCard
-from utils.nfo import read_text_any_encoding, fix_nfo_content, nfo_new_filename, safe_rename
+from utils.nfo import read_text_any_encoding
 
 
 class NFOWorker(QThread):
@@ -29,51 +41,20 @@ class NFOWorker(QThread):
         self._stopped = True
 
     def run(self) -> None:
-        fixed = 0
-        renamed = 0
+        from utils.nfo import preview_nfo_fixes, execute_nfo_fixes
 
-        all_files = []
-        for root, dirs, files in os.walk(self._dir):
-            for f in files:
-                all_files.append((root, f))
-
-        total = len(all_files)
-        for i, (root, f) in enumerate(all_files):
-            if self._stopped:
-                return
-            old_path = os.path.join(root, f)
-
-            # 1) 重命名关联文件：xxx.ts.nfo / xxx.ts-poster.jpg → .mp4 版本
-            new_name = nfo_new_filename(f)
-            if new_name and new_name != f:
-                new_path = os.path.join(root, new_name)
-                try:
-                    safe_rename(old_path, new_path)
-                    self.log.emit(f"[重命名] {f} → {new_name}")
-                    renamed += 1
-                    old_path = new_path  # 后续按新路径处理
-                except OSError as e:
-                    self.log.emit(f"[重命名失败] {f}: {e}")
-
-            # 2) 修正 NFO 文件内部内容
-            if old_path.lower().endswith(".nfo"):
-                content = read_text_any_encoding(old_path)
-                if content is None:
-                    self.log.emit(f"[跳过] 无法解码 {os.path.basename(old_path)}")
-                else:
-                    new_content = fix_nfo_content(content)
-                    if new_content is not None:
-                        try:
-                            with open(old_path, "w", encoding="utf-8") as fh:
-                                fh.write(new_content)
-                            self.log.emit(f"[修正] {os.path.basename(old_path)}")
-                            fixed += 1
-                        except OSError as e:
-                            self.log.emit(f"[写入失败] {os.path.basename(old_path)}: {e}")
-
-            self.progress.emit(int((i + 1) / total * 100))
-
-        self.finished.emit(fixed, renamed)
+        try:
+            plan = getattr(self, "plan", None)
+            if plan is None:
+                plan = preview_nfo_fixes([self._dir], lambda: self._stopped)
+            result = execute_nfo_fixes(plan, lambda: self._stopped, self.log.emit)
+            self.stats = result
+            self.progress.emit(100 if not result["cancelled"] and not result.get("fail") else 0)
+            self.finished.emit(result["fixed"], result["renamed"])
+        except Exception as exc:
+            self.stats = {"error": str(exc)}
+            self.log.emit("NFO修复失败：" + str(exc))
+            self.finished.emit(0, 0)
 
 
 class NFOPage(QWidget):
@@ -85,6 +66,7 @@ class NFOPage(QWidget):
         self.cfg = cfg
         self._dir: str | None = None
         self._worker: NFOWorker | None = None
+        self._plan = None
         self.setAcceptDrops(True)
         self._setup_ui()
 
@@ -124,6 +106,9 @@ class NFOPage(QWidget):
         layout.addWidget(self.log_panel)
 
         btn_row = QHBoxLayout()
+        self.btn_preview = QPushButton("只读生成修复计划")
+        self.btn_preview.clicked.connect(self._preview)
+        btn_row.addWidget(self.btn_preview)
         self.btn_start = QPushButton("开始修复")
         self.btn_start.setProperty("cssClass", "accent")
         self.btn_start.clicked.connect(self._start)
@@ -131,7 +116,9 @@ class NFOPage(QWidget):
         btn_row.addWidget(self.btn_start)
 
         self.btn_ai = QPushButton("🤖 冲突 NFO 检查")
-        self.btn_ai.setToolTip("扫描目录，找出同一视频存在多个 NFO 的目录，用 AI 判断哪个最优、哪些冗余（只给建议，不自动删）。")
+        self.btn_ai.setToolTip(
+            "扫描目录，找出同一视频存在多个 NFO 的目录，用 AI 判断哪个最优、哪些冗余（只给建议，不自动删）。"
+        )
         self.btn_ai.clicked.connect(self._ai_check_nfo)
         btn_row.addWidget(self.btn_ai)
 
@@ -143,39 +130,82 @@ class NFOPage(QWidget):
         layout.addLayout(btn_row)
 
     # ── AI 冲突 NFO 检查 ──
+    def _preview(self):
+        if busy(self) or not self._dir:
+            return
+        from utils.nfo import preview_nfo_fixes
+
+        directory = self._dir
+        self._preview_worker = CallWorker(lambda cancel: preview_nfo_fixes([directory], cancel))
+        self._preview_worker.result.connect(self._show_plan)
+        self._preview_worker.error.connect(self.log_panel.log_error)
+        start_task(self, self._preview_worker, "生成NFO/关联资源修复计划")
+
+    def _show_plan(self, plan):
+        self._plan = plan
+        self.log_panel.clear()
+        for row in plan:
+            self.log_panel.log_info(row["source"] + " → " + row["target"] + " | " + row["status"])
+        self.btn_start.setEnabled(bool(plan) and all(row["status"] == "ready" for row in plan))
+
     def _ai_check_nfo(self) -> None:
-        from workers.ai import query_llm
-        if not self.cfg.ai_enabled:
-            QMessageBox.information(self, "未启用 AI",
-                                    "请在「设置」→「本地 AI 二次校验」启用本地 LLM。")
+        if busy(self):
             return
-        if not self._dir:
-            QMessageBox.information(self, "未选目录", "请先选择媒体库目录。")
+        if not self.cfg.ai_enabled or not self._dir:
+            QMessageBox.information(self, "准备AI检查", "先选择目录并在设置启用AI。")
             return
-        conflicts = []
-        for root, _, files in os.walk(self._dir):
-            nfos = [f for f in files if f.lower().endswith(".nfo")]
-            if len(nfos) >= 2:
-                conflicts.append((root, nfos))
-        if not conflicts:
-            QMessageBox.information(self, "无冲突", "未发现同一目录存在多个 NFO 的情况。")
-            return
-        self.btn_ai.setEnabled(False)
-        self.log_panel.log_warning(
-            f"发现 {len(conflicts)} 个含多个 NFO 的目录，AI 分析前 {min(len(conflicts), 8)} 个…")
-        try:
-            for root, nfos in conflicts[:8]:
-                lines = [f"目录 {root}", "NFO 文件："] + [f"  - {n}" for n in nfos]
+        cfg, directory = copy.deepcopy(self.cfg), self._dir
+
+        def check(cancel):
+            from collections import defaultdict
+            from workers.ai import query_llm
+
+            conflicts = []
+            for root, _, files in os.walk(directory):
+                if cancel():
+                    return []
+                by_video = defaultdict(list)
+                for filename in files:
+                    if filename.lower().endswith(".nfo"):
+                        stem = Path(filename).stem.lower()
+                        for suffix in (".ts", ".mp4", ".mkv"):
+                            if stem.endswith(suffix):
+                                stem = stem[: -len(suffix)]
+                        by_video[stem].append(filename)
+                for names in by_video.values():
+                    if len(names) >= 2:
+                        conflicts.append((root, names))
+            output = []
+            for root, names in conflicts[:8]:
+                if cancel():
+                    break
+                records = [
+                    name
+                    + "\n"
+                    + (read_text_any_encoding(os.path.join(root, name)) or "无法读取")[:4000]
+                    for name in names
+                ]
                 prompt = (
-                    "以下是同一视频目录下的多个 NFO 文件。请判断哪个 NFO 内容最完整/规范(最优)应保留，"
-                    "哪些是冗余/空壳可移入回收站。只输出『最优: <文件名>；冗余: <文件名列表> - 一句话理由』。"
-                    "基于文件名与常见刮削习惯判断。\n\n" + "\n".join(lines))
-                text = query_llm(self.cfg.ai_base_url, self.cfg.ai_key, self.cfg.ai_model,
-                                 [{"role": "user", "content": prompt}], timeout=90)
-                self.log_panel.log(str(text)[:300])
-        finally:
-            self.btn_ai.setEnabled(True)
-        self.log_panel.log_success("AI 冲突检查完成（建议仅供参考，不自动改动）。")
+                    "以下为同一视频不同NFO的真实内容片段。比较完整性/引用，仅给出建议与不确定性，不执行删除：\n"
+                    + "\n".join(records)
+                )
+                output.append(
+                    query_llm(
+                        cfg.ai_base_url,
+                        cfg.ai_key,
+                        cfg.ai_model,
+                        [{"role": "user", "content": prompt}],
+                        timeout=90,
+                    )
+                )
+            return output
+
+        self._ai_nfo_worker = CallWorker(check)
+        self._ai_nfo_worker.result.connect(
+            lambda rows: self.log_panel.log_info("\n".join(rows) or "未发现同一视频的NFO冲突。")
+        )
+        self._ai_nfo_worker.error.connect(self.log_panel.log_error)
+        start_task(self, self._ai_nfo_worker, "比较同一视频的NFO内容")
 
     # ── 拖拽支持 ──
     def dragEnterEvent(self, event):
@@ -184,7 +214,6 @@ class NFOPage(QWidget):
         else:
             event.ignore()
 
-
     def dropEvent(self, event):
         try:
             for url in event.mimeData().urls():
@@ -192,6 +221,7 @@ class NFOPage(QWidget):
                 if p and os.path.isdir(p):
                     event.acceptProposedAction()
                     from PySide6.QtCore import QTimer
+
                     QTimer.singleShot(0, self, lambda: self._set_dir(p))
                     return
             event.ignore()
@@ -199,9 +229,12 @@ class NFOPage(QWidget):
             event.ignore()
 
     def _set_dir(self, d: str) -> None:
+        if busy(self):
+            return
         self._dir = d
         self.dir_label.setText(d)
-        self.btn_start.setEnabled(True)
+        self._plan = None
+        self.btn_start.setEnabled(False)
 
     def _browse(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "选择媒体库目录")
@@ -209,7 +242,24 @@ class NFOPage(QWidget):
             self._set_dir(d)
 
     def _start(self) -> None:
+        if busy(self, mutating=True):
+            return
         if not self._dir:
+            return
+        if not self._plan or any(row["status"] != "ready" for row in self._plan):
+            QMessageBox.information(self, "先审阅计划", "请先只读生成计划，排除关联文件冲突。")
+            return
+        detail = "\n".join(row["source"] + " → " + row["target"] for row in self._plan)
+        if (
+            QMessageBox.question(
+                self,
+                "确认NFO修复计划",
+                detail + "\n\n原文件会保留备份。执行以上同一计划？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
             return
 
         self.btn_start.setEnabled(False)
@@ -218,25 +268,36 @@ class NFOPage(QWidget):
         self.progress.setValue(0)
 
         self._worker = NFOWorker(self._dir)
+        self._worker.plan = list(self._plan)
         self._worker.log.connect(self.log_panel.log)
         self._worker.progress.connect(self.progress.setValue)
         self._worker.finished.connect(self._on_finished)
-        self._worker.start()
+        start_task(self, self._worker)
 
     def _stop(self) -> None:
         if self._worker and self._worker.isRunning():
             self._worker.stop()
-        self.btn_start.setEnabled(True)
+        self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(False)
 
     def shutdown(self) -> None:
-        """应用退出时调用：停止后台修复线程。"""
-        if self._worker and self._worker.isRunning():
-            self._worker.stop()
-            self._worker.wait(3000)
+        stop_page(self)
 
     def _on_finished(self, fixed: int, renamed: int) -> None:
-        self.btn_start.setEnabled(True)
+        self._plan = None
+        self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(False)
         self.log_panel.log("─" * 50)
-        self.log_panel.log_success(f"✅ 完成！修正 NFO 内容: {fixed} | 重命名关联文件: {renamed}")
+        stats = getattr(self._worker, "stats", {})
+        if stats.get("cancelled") or getattr(self._worker, "_stopped", False):
+            self.progress.setValue(0)
+            self.log_panel.log_warning(f"已取消；内容修正 {fixed} 项，关联重命名 {renamed} 项。")
+        elif stats.get("error") or stats.get("fail"):
+            self.progress.setValue(0)
+            self.log_panel.log_error(
+                "NFO修复失败或部分失败：" + str(stats.get("error") or stats.get("fails") or "")
+            )
+        else:
+            self.log_panel.log_success(
+                f"NFO修复完成：内容修正 {fixed} 项，关联重命名 {renamed} 项。"
+            )

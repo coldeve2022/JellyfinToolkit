@@ -43,6 +43,7 @@ PAGE_SPECS = [
     ("ui.pages.merge", "MergePage"),
     ("ui.pages.automation", "AutomationPage"),
     ("ui.pages.settings", "SettingsPage"),
+    ("ui.pages.tasks", "TaskCenterPage"),
 ]
 
 
@@ -168,8 +169,11 @@ def test_subtitle_page_scan_and_resume(qapp, cfg, tmp_path):
 
 
 # ── 4. 破解替换页 ──────────────────────────────────────────
-def test_replace_page_worker_and_dragdrop(qapp, cfg, tmp_path):
+def test_replace_page_worker_and_dragdrop(qapp, cfg, tmp_path, monkeypatch):
     from ui.pages.replace import ReplacePage, ReplaceWorker
+    # This legacy test checks pairing and recoverable file transactions. Real
+    # valid/invalid-video validation is exercised in media remediation fixtures.
+    monkeypatch.setattr('utils.replacement.validate_restored_output', lambda *_: (True, ''))
 
     page = ReplacePage(cfg)
     lib = tmp_path / "lib"
@@ -210,7 +214,7 @@ def test_replace_page_worker_and_dragdrop(qapp, cfg, tmp_path):
 
 
 # ── 5. 修复转码页 ──────────────────────────────────────────
-def test_repair_page_state_transitions(qapp, cfg, tmp_path):
+def test_repair_page_state_transitions(qapp, qtbot, cfg, tmp_path):
     from ui.pages.repair import RepairPage
 
     page = RepairPage(cfg)
@@ -224,6 +228,7 @@ def test_repair_page_state_transitions(qapp, cfg, tmp_path):
 
     (tmp_path / "test.mp4").write_bytes(b"\x00" * 100)
     page._on_files_dropped([str(tmp_path)])
+    qtbot.waitUntil(lambda: page.file_list.count() == 1, timeout=3000)
     assert page.file_list.count() == 1
     assert page.btn_start.isEnabled(), "拖入文件后应无需先扫描即可开始"
     assert page.btn_scan.isEnabled()

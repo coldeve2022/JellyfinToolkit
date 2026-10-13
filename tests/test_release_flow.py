@@ -157,7 +157,7 @@ def test_index_gives_a_path_that_actually_exists(tmp_path):
     # 把「直接打开用最新版」那一行里的反引号内容提取出来验证
     line = next(l for l in text.splitlines() if "直接打开用最新版" in l and "`" in l)
     rel = line.split("`")[1]
-    assert (root / "v3.8.1" / rel).is_file(), f"索引给的路径不存在：{rel}"
+    assert (root / rel).is_file(), f"索引给的路径不存在：{rel}"
 
 
 def test_index_on_empty_archive_is_safe(tmp_path):

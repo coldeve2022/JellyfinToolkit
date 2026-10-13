@@ -17,7 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from utils.whisper_tool import (  # noqa: E402
-    find_infer_source, is_encoding_patched, patch_encoding,
+    find_infer_source,
+    is_encoding_patched,
+    patch_encoding,
 )
 
 
@@ -42,8 +44,7 @@ def force_utf8_stdout() -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="给第三方字幕工具打 UTF-8 补丁（中文 Windows 必需）")
+    ap = argparse.ArgumentParser(description="给第三方字幕工具打 UTF-8 补丁（中文 Windows 必需）")
     ap.add_argument("--infer", default="", help="infer.exe 或其所在目录；留空则自动查找")
     ap.add_argument("--no-backup", action="store_true", help="不生成 .orig 备份")
     ap.add_argument("--check", action="store_true", help="只检查是否已打补丁")

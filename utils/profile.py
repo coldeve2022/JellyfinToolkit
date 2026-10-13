@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import csv
+import io
 from typing import Optional
 
 from utils.library import Item
 from utils.scoring import (
-    DEC_DELETE, KIND_CN, NEGATIVE_LABELS, Scored, _feat_values, sample_weight,
+    DEC_DELETE, KIND_CN, NEGATIVE_LABELS, Scored, _feat_values, positive_weight, LABEL_LIKE,
     item_features, _build_feature_sets_from_map,
 )
 
@@ -29,12 +31,12 @@ def _cap_vals(values, n=8):
 def build_profile(items: list[Item], labels: dict[str, str],
                   results: Optional[list[Scored]] = None) -> dict:
     """构建喜好画像。results 可选：用于"未看推荐 Top N"。"""
-    pos = [it for it in items if sample_weight(it) > 0
+    pos = [it for it in items if positive_weight(it, labels.get(it.id)) > 0
            and labels.get(it.id) not in NEGATIVE_LABELS]
     neg = [it for it in items if labels.get(it.id) in NEGATIVE_LABELS]
 
     def stat():
-        return {"fav": 0, "played": 0, "weight": 0.0}
+        return {"fav": 0, "played": 0, "liked": 0, "weight": 0.0}
 
     actors: dict[str, dict] = defaultdict(stat)
     studios: dict[str, dict] = defaultdict(stat)
@@ -45,9 +47,10 @@ def build_profile(items: list[Item], labels: dict[str, str],
     n_year_unknown = 0
 
     for it in pos:
-        w = sample_weight(it)
+        w = positive_weight(it, labels.get(it.id))
         fav = 1 if it.is_favorite else 0
         played = 1 if it.is_played else 0
+        liked = int(labels.get(it.id) == LABEL_LIKE)
         n_fav += fav
         n_played += played
         if it.is_uncensored:
@@ -63,29 +66,33 @@ def build_profile(items: list[Item], labels: dict[str, str],
                     s["fav"] += fav
                     s["played"] += played
                     s["weight"] += w
+                    s["liked"] += liked
             elif kind == "studio":
                 for st in vals:
                     s = studios[st]
                     s["fav"] += fav
                     s["played"] += played
                     s["weight"] += w
+                    s["liked"] += liked
             elif kind == "genre":
                 for g in vals:
                     s = genres[g]
                     s["fav"] += fav
                     s["played"] += played
                     s["weight"] += w
+                    s["liked"] += liked
             elif kind == "tag":
                 for t in vals:
                     s = tags[t]
                     s["fav"] += fav
                     s["played"] += played
                     s["weight"] += w
+                    s["liked"] += liked
 
     def top(d: dict, limit=15):
         return sorted(
             ({"name": k, **v} for k, v in d.items()
-             if v["fav"] + v["played"] >= _MIN_BEHAVIOR),
+              if v["fav"] + v["played"] + v["liked"] >= _MIN_BEHAVIOR),
             key=lambda x: (-x["weight"], -x["fav"]),
         )[:limit]
 
@@ -106,19 +113,8 @@ def build_profile(items: list[Item], labels: dict[str, str],
                 neg_feats[key] += 1
                 manual_keys.add(key)
 
-    if results:
-        pos_ids = {it.id for it in pos}
-        for r in results:
-            it = r.item
-            if r.is_seen or it.id in pos_ids or r.is_junk or r.featureless:
-                continue
-            if r.decision != DEC_DELETE:
-                continue
-            for kind, vals in _feat_values(it):
-                if kind == "prefix":
-                    continue
-                for v in vals:
-                    neg_feats[f"{_neg_common_name(kind)}: {v}"] += 1
+    # Model predictions are never trusted negative feedback. Only explicit labels above
+    # contribute to the profile passed to another model or a later ranking run.
 
     neg_features = [
         kv for kv in neg_feats.most_common(15)
@@ -146,6 +142,7 @@ def build_profile(items: list[Item], labels: dict[str, str],
         cand = [
             r for r in results
             if not r.is_seen and not r.is_junk and not r.featureless
+            and r.decision != DEC_DELETE and r.s_content > 0 and pos
             and not r.item.is_cd
             and labels.get(r.item.id) not in NEGATIVE_LABELS
         ]
@@ -232,22 +229,24 @@ def build_profile(items: list[Item], labels: dict[str, str],
 
 def profile_to_csv(p: dict) -> str:
     """把画像导出为 CSV 文本。"""
-    lines = ["字段,名称,强度,收藏,看过"]
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["字段", "名称", "强度", "收藏", "看过"])
     for label, key in [("Top演员", "top_actors"), ("Top厂商", "top_studios"),
                        ("Top类型", "top_genres"), ("Top标签", "top_tags")]:
         for r in p[key]:
-            lines.append(f"{label},{r['name']},{r['weight']:.1f},{r['fav']},{r['played']}")
-    lines.append("")
-    lines.append("年份偏好")
+            writer.writerow([label, r["name"], f"{r['weight']:.1f}", r["fav"], r["played"]])
+    writer.writerow([])
+    writer.writerow(["年份偏好"])
     for y, n in p["year_pref"]:
-        lines.append(f"{y},{n}")
-    lines.append("")
-    lines.append("不喜欢特征")
+        writer.writerow([y, n])
+    writer.writerow([])
+    writer.writerow(["不喜欢特征"])
     for feat, n in p["neg_features"]:
-        lines.append(f"{feat},{n}")
-    lines.append("")
-    lines.append("为你推荐(未看)")
-    lines.append("番号,名称,命中度,演员,厂商")
+        writer.writerow([feat, n])
+    writer.writerow([])
+    writer.writerow(["为你推荐(未看)"])
+    writer.writerow(["番号", "名称", "命中度", "演员", "厂商"])
     for r in p["recs"]:
-        lines.append(f"{r['num']},{r['name']},{r['hit']},{'/'.join(r['actors'])},{'/'.join(r['studios'])}")
-    return "\n".join(lines)
+        writer.writerow([r["num"], r["name"], r["hit"], "/".join(r["actors"]), "/".join(r["studios"])])
+    return output.getvalue()
