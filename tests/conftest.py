@@ -48,11 +48,12 @@ def _isolate_data_dir():
 
 
 @pytest.fixture(autouse=True)
-def _restore_data_root():
-    """Keep runtime redirection in one test from changing later tests' journals."""
+def _restore_data_root(tmp_path):
+    """Isolate persisted UI state and runtime redirection for every test."""
     import config
 
     original = config.BASE_DIR
+    config.set_data_root(tmp_path / "runtime", rebind_modules=True)
     try:
         yield
     finally:
