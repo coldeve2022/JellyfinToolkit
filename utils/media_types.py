@@ -31,7 +31,7 @@ __all__ = [
 #: 视频扩展名默认值。**事实来源是配置** `video_extensions`，这里只是兜底默认值。
 DEFAULT_VIDEO_EXTENSIONS = (
     ".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".ts", ".rmvb",
-    ".webm", ".mpg", ".mpeg", ".m2ts", ".iso",
+    ".webm", ".mpg", ".mpeg", ".m2ts",
 )
 
 #: 字幕扩展名默认值（配置 `subtitle_extensions` 为事实来源）

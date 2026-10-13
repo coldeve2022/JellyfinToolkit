@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from version import APP_ID
+from utils.media_types import DEFAULT_VIDEO_EXTENSIONS, DEFAULT_SUBTITLE_EXTENSIONS
 
 # ── 默认配置 ────────────────────────────────────────────────
 # 注意：下列默认值**不得**出现盘符、用户目录、特定硬件型号。
@@ -40,13 +42,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 不能写成某个固定盘符：别人机器上没那个盘，功能会直接失效。
     "jellyfin_db_path": "",
     "jellyfin_data_dir": "",
+    "jellyfin_user_id": "",
+    "library_path_mappings": [],
     "uncensored_keywords": [
         "fc2", "1pondo", "carib", "10mu", "pacopaco", "heydouga",
         "tokyo hot", "tokyohot", "heyzo", "muramura", "luxu", "gachinco",
         "无码", "流出", "破解", "uncensored", "hack", "decensored"
     ],
-    "subtitle_extensions": [".srt", ".vtt", ".ass", ".ssa", ".sub"],
-    "video_extensions": [".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".ts", ".rmvb"],
+    "subtitle_extensions": list(DEFAULT_SUBTITLE_EXTENSIONS),
+    "video_extensions": list(DEFAULT_VIDEO_EXTENSIONS),
     "min_video_size_mb": 10,
     "theme": "dark",
     # "" = 自动探测本机真正可用的编码器（推荐）；也可显式写 h264_nvenc / h264_amf / h264_qsv / libx264
@@ -259,22 +263,56 @@ def _coerce_config(data: dict) -> dict:
         value = data.get(key)
         if value is None:
             continue
-        if isinstance(default, bool):
+        if key == "whisper_merge_segments":
+            out[key] = value if isinstance(value, bool) else None
+        elif key == "library_path_mappings":
+            out[key] = [
+                {"remote": str(entry["remote"]).strip(), "local": str(entry["local"]).strip()}
+                for entry in value if isinstance(entry, dict)
+                and isinstance(entry.get("remote"), str) and entry["remote"].strip()
+                and isinstance(entry.get("local"), str) and entry["local"].strip()
+            ] if isinstance(value, list) else []
+        elif isinstance(default, bool):
             out[key] = value if isinstance(value, bool) else default
         elif isinstance(default, int):
             try:
                 out[key] = int(value)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 out[key] = default
         elif isinstance(default, list):
             out[key] = [str(x) for x in value] if isinstance(value, list) else default
         elif isinstance(default, float):
             try:
                 out[key] = float(value)
+                if not math.isfinite(out[key]):
+                    out[key] = default
             except (TypeError, ValueError):
                 out[key] = default
         else:
             out[key] = value if isinstance(value, str) else default
+    bounds = {
+        "min_video_size_mb": (0, 1_000_000), "score_th_keep": (1, 100),
+        "score_th_delete": (0, 99), "transcode_crf": (0, 51),
+        "ffmpeg_timeout": (1, 86400), "merge_timeout_per_file": (1, 86400),
+        "merge_max_parts": (2, 1000), "merge_min_part_seconds": (0.0, 86400.0),
+        "merge_dup_frame_count": (1, 1000), "merge_dup_hash_distance": (0, 64),
+        "merge_dup_sim_threshold": (0.0, 1.0), "whisper_batch_size": (1, 512),
+        "whisper_max_batch_size": (0, 512), "whisper_vad_threshold": (0.0, 1.0),
+        "whisper_cleanup_max_duration": (0.1, 86400.0),
+        "whisper_cleanup_similarity": (0.0, 1.0), "lada_parallel_workers": (1, 64),
+        "lada_max_clip_length": (0, 1_000_000), "lada_vram_high": (0.1, 1024.0),
+        "lada_vram_low": (0.0, 1024.0),
+    }
+    for key, (low, high) in bounds.items():
+        out[key] = max(low, min(high, out[key]))
+    out["score_th_delete"] = min(out["score_th_delete"], out["score_th_keep"] - 1)
+    out["lada_vram_low"] = min(out["lada_vram_low"], max(0.0, out["lada_vram_high"] - 0.1))
+    for key, choices in {"library_source": {"auto", "db", "api"},
+                         "server_type": {"auto", "jellyfin", "emby"},
+                         "engine": {"v1", "v2"}, "theme": {"dark", "light"},
+                         "lada_cpu_affinity": {"auto", "off", "custom"}}.items():
+        if out[key] not in choices:
+            out[key] = DEFAULT_CONFIG[key]
     return out
 
 
@@ -307,6 +345,8 @@ class ToolkitConfig:
     server_type: str = DEFAULT_CONFIG["server_type"]
     jellyfin_db_path: str = DEFAULT_CONFIG["jellyfin_db_path"]
     jellyfin_data_dir: str = DEFAULT_CONFIG["jellyfin_data_dir"]
+    jellyfin_user_id: str = DEFAULT_CONFIG["jellyfin_user_id"]
+    library_path_mappings: List[dict] = field(default_factory=list)
     uncensored_keywords: List[str] = field(default_factory=lambda: list(DEFAULT_CONFIG["uncensored_keywords"]))
     subtitle_extensions: List[str] = field(default_factory=lambda: list(DEFAULT_CONFIG["subtitle_extensions"]))
     video_extensions: List[str] = field(default_factory=lambda: list(DEFAULT_CONFIG["video_extensions"]))
@@ -431,8 +471,10 @@ def find_ffmpeg() -> str | None:
 
 def doctor() -> dict[str, Any]:
     """环境自检：返回结构化结果，供 CLI ``--doctor`` 与设置页「环境自检」共用。"""
-    from utils.tools import probe_hardware, resolve_tool
+    from utils.tools import configure_tools, probe_hardware, resolve_tool
 
+    cfg = ToolkitConfig.load()
+    configure_tools(cfg.merge_ffmpeg_path, force=True)
     ffmpeg = resolve_tool("ffmpeg")
     ffprobe = resolve_tool("ffprobe")
     info: dict[str, Any] = {

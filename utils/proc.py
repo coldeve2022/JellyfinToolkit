@@ -132,6 +132,7 @@ def run_streaming(cmd,
             text=True, encoding="utf-8", errors="replace",
             cwd=str(cwd) if cwd else None,
             env=env, creationflags=flags,
+            start_new_session=(os.name != "nt"),
         )
     except (OSError, ValueError) as e:
         return {"code": None, "stopped": False, "timed_out": False,
@@ -198,19 +199,25 @@ def _terminate(proc) -> None:
     try:
         if os.name == "nt":
             # 结束整棵进程树：这些工具内部会拉起 ffmpeg，只杀主进程会留孤儿
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, creationflags=_NO_WINDOW, timeout=20)
+            result = subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                    capture_output=True, creationflags=_NO_WINDOW, timeout=3)
+            if result.returncode != 0:
+                proc.kill()
         else:
             import signal
 
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
     except Exception:  # noqa: BLE001
-        pass
+        try:
+            proc.kill()
+        except OSError:
+            pass
     try:
-        proc.wait(timeout=10)
+        proc.wait(timeout=3)
     except Exception:  # noqa: BLE001
         try:
             proc.kill()
+            proc.wait(timeout=3)
         except Exception:  # noqa: BLE001
             pass
 
