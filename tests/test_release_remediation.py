@@ -191,3 +191,20 @@ def test_build_refuses_source_change_after_smoke_before_manifest(tmp_path, monke
     assert len(validations) == 2
     assert not list(tmp_path.rglob("build-manifest.json"))
     assert not list(tmp_path.rglob("*.zip"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows native DLL search path")
+def test_packaging_ignores_unrelated_dlls_on_global_path(monkeypatch):
+    from scripts import build_release
+    import os
+
+    monkeypatch.setenv("PATH", r"C:\unrelated-poppler\bin;C:\unrelated-ffmpeg\bin")
+    received = []
+    monkeypatch.setattr(build_release.subprocess, "call", lambda *a, **kw: received.append(kw) or 0)
+    assert build_release._run([sys.executable, "-m", "PyInstaller", "JellyfinToolkit.spec"]) == 0
+    native_path = received[-1]["env"]["PATH"]
+    assert "unrelated-poppler" not in native_path
+    assert "unrelated-ffmpeg" not in native_path
+    assert str(Path(os.environ["SystemRoot"]) / "System32") in native_path
+    assert build_release._run([sys.executable, "tools/dev/smoke_exe.py"]) == 0
+    assert "unrelated-poppler" in received[-1]["env"]["PATH"]

@@ -50,6 +50,20 @@ def _run(cmd: list[str], extra_env: dict[str, str] | None = None, **kwargs) -> i
     env["PYTHONIOENCODING"] = "utf-8"
     if extra_env:
         env.update(extra_env)
+    if sys.platform == "win32" and "PyInstaller" in cmd:
+        # Qt's Windows ICU imports use native unversioned exports. A global PATH
+        # containing Poppler/Conda can make binary discovery collect a different
+        # ICU DLL with versioned exports, producing an executable that cannot load.
+        system_root = Path(env.get("SystemRoot") or env.get("SYSTEMROOT") or r"C:\Windows")
+        env["PATH"] = os.pathsep.join(
+            str(path)
+            for path in (
+                Path(sys.executable).parent,
+                Path(sys.base_prefix),
+                system_root / "System32",
+                system_root,
+            )
+        )
     return subprocess.call(cmd, cwd=str(ROOT), env=env, **kwargs)
 
 
