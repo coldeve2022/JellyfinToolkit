@@ -76,3 +76,36 @@ def qapp():
 
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
+    """会话收尾时，趁 QApplication 还在，把残留的顶层部件先销毁掉。
+
+    为什么要这一步：本套件里很多页面/窗口是**不带父部件**单独构造的
+    （``DeletePage(cfg)``、``MainWindow()``…），它们彼此成环、又被若干闭包
+    握着，因此不会被引用计数立即回收，只能等到解释器退出阶段由 PySide 析构
+    —— 而那时 QApplication 已经先被销毁了。PySide6 6.12 起，这个顺序会直接
+    触发访问违例（Linux/macOS 段错误，Windows 同为异常退出），表现是
+    「所有用例都通过、进程却以非零状态码结束」，把 CI 的发布门禁卡红。
+
+    真实程序的退出路径不受影响：页面挂在 ``MainWindow`` 下，随窗口一起
+    有序析构（已验证）。所以这里只需要在测试收尾补一次有序清理。
+
+    放在 hook 而不是 fixture 里：部分测试文件自带 module 级 ``qapp``，
+    session 级 fixture 去依赖它会触发 pytest 的 ScopeMismatch。
+    """
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+
+    for widget in list(app.topLevelWidgets()):
+        try:
+            widget.deleteLater()
+        except RuntimeError:  # C++ 侧已先行销毁
+            continue
+    # 让 deleteLater 真正执行，而不是留到退出阶段
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()

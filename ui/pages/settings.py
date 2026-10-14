@@ -178,7 +178,10 @@ class SettingsPage(QWidget):
         pg.addWidget(advanced)
         self.input_mappings = QTextEdit()
         self.input_mappings.setMaximumHeight(100)
-        self.input_mappings.setPlaceholderText('[{"remote":"/media/movies","local":"D:/Media"}]')
+        # 示例路径用显而易见的假路径（CI 的守卫会拒绝真机盘符）
+        self.input_mappings.setPlaceholderText(
+            json.dumps([{"remote": "/media/movies", "local": r"C:\Media"}], ensure_ascii=False)
+        )
         self.input_mappings.setPlainText(
             json.dumps(self.cfg.library_path_mappings, ensure_ascii=False, indent=2)
         )
