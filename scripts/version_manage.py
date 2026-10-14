@@ -195,6 +195,11 @@ def gather_status(root: Path) -> dict:
     tags = [t for t in _git(["tag", "-l"], root).splitlines() if t.strip()]
     head = _git(["rev-parse", "--short", "HEAD"], root)
     branch = _git(["branch", "--show-current"], root)
+    if not branch:
+        # 标签检出会让 Git 处于 detached HEAD，`branch --show-current` 返回空串。
+        # 发布门禁恰恰就是在标签上跑测试，这里必须给出可读的替代值：
+        # 优先回落标签名（便于和发版对账），否则给一句明确的说明。
+        branch = _git(["describe", "--tags", "--exact-match", "HEAD"], root) or "(detached HEAD)"
 
     dist = root / "dist"
     zips = sorted(dist.glob("*.zip")) if dist.is_dir() else []
