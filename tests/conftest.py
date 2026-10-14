@@ -79,14 +79,16 @@ def qapp():
 
 
 def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
-    """会话收尾时，趁 QApplication 还在，把残留的顶层部件先销毁掉。
+    """会话收尾时，趁 QApplication 还在，把残留的 Qt 对象先有序释放掉。
 
-    为什么要这一步：本套件里很多页面/窗口是**不带父部件**单独构造的
+    为什么必须做：本套件里很多页面/窗口是**不带父部件**单独构造的
     （``DeletePage(cfg)``、``MainWindow()``…），它们彼此成环、又被若干闭包
-    握着，因此不会被引用计数立即回收，只能等到解释器退出阶段由 PySide 析构
-    —— 而那时 QApplication 已经先被销毁了。PySide6 6.12 起，这个顺序会直接
-    触发访问违例（Linux/macOS 段错误，Windows 同为异常退出），表现是
-    「所有用例都通过、进程却以非零状态码结束」，把 CI 的发布门禁卡红。
+    握着，因此不会被引用计数立即回收，只能等到**解释器退出阶段**才由
+    PySide 析构。那时 QApplication 已经先被销毁，PySide6 6.12 起会直接触发
+    访问违例（Linux/macOS 段错误、Windows 异常退出）；即便侥幸不崩，
+    收尾期 GC 仍会在 Python 3.11 上撞到 ``bool_dealloc`` 引用计数断言。
+    两者的共同表现都是「所有用例通过、进程却以非零状态码结束」，
+    把 CI 的发布门禁卡红 —— 而且失败原因和被测代码毫无关系。
 
     真实程序的退出路径不受影响：页面挂在 ``MainWindow`` 下，随窗口一起
     有序析构（已验证）。所以这里只需要在测试收尾补一次有序清理。
@@ -94,18 +96,44 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
     放在 hook 而不是 fixture 里：部分测试文件自带 module 级 ``qapp``，
     session 级 fixture 去依赖它会触发 pytest 的 ScopeMismatch。
     """
+    import gc
+    import sys
+
     from PySide6.QtCore import QEvent
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance()
-    if app is None:
-        return
 
-    for widget in list(app.topLevelWidgets()):
-        try:
-            widget.deleteLater()
-        except RuntimeError:  # C++ 侧已先行销毁
-            continue
-    # 让 deleteLater 真正执行，而不是留到退出阶段
-    app.sendPostedEvents(None, QEvent.DeferredDelete)
-    app.processEvents()
+    # 1) 顶层部件：先真的销毁，别留给解释器收尾阶段
+    if app is not None:
+        for widget in list(app.topLevelWidgets()):
+            try:
+                widget.deleteLater()
+            except RuntimeError:  # C++ 侧已先行销毁
+                continue
+        app.sendPostedEvents(None, QEvent.DeferredDelete)
+        app.processEvents()
+
+    # 2) 模块级 Qt 单例（TaskManager 还挂着运行中的 QTimer）
+    services = sys.modules.get("ui.services")
+    if services is not None:
+        manager = getattr(services.TaskManager, "_instance", None)
+        services.TaskManager._instance = None
+        if manager is not None:
+            try:
+                manager._timer.stop()
+            except RuntimeError:
+                pass
+            manager.deleteLater()
+        if app is not None:
+            app.sendPostedEvents(None, QEvent.DeferredDelete)
+            app.processEvents()
+
+    # 3) 在**运行时**（而不是解释器 finalizing 阶段）把循环垃圾收干净。
+    #    PySide6 在 Py3.11 的退出期 GC 上会踩到 bool 引用计数断言，
+    #    提前收集可以把这一步挪出收尾路径。
+    for _ in range(3):
+        gc.collect()
+        if app is not None:
+            app.sendPostedEvents(None, QEvent.DeferredDelete)
+            app.processEvents()
