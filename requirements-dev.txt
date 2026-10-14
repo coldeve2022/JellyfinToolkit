@@ -1,4 +1,15 @@
 -r requirements.txt
+
+# Qt 绑定的上限：CI 与发版都会走这份清单，而 `PySide6>=6.6.0` 不设上限
+# 意味着每次都会吃到当天最新版 —— Qt 侧一旦回归，红灯会直接砸在发布门禁上，
+# 且失败原因与被测代码毫无关系。6.12.0 就发生过一次：
+#   全部 743 项用例通过，但在 Python 3.11 上，解释器统一销毁阶段的 GC 会踩到
+#   shiboken 的引用计数错误（Fatal Python error: bool_dealloc: deallocating
+#   True or False），进程以 134 退出。Python 3.12 起 True/False 是不朽对象，
+#   这个错误被掩盖，所以只有 3.11 暴露。
+# 暂锁到 6.11.x（本机验收使用 6.11.2）；等 Qt 侧修复后再放开上限。
+PySide6>=6.6.0,<6.12
+
 pytest>=8.0
 pytest-qt>=4.4
 ruff>=0.6
