@@ -11,6 +11,10 @@ from utils.media_types import is_video
 _WORK_PRODUCT = re.compile(r"(?:\.partial|\.inter|\.norm\d*|\.concat)(?:\.|$)", re.I)
 
 
+def _is_archived_original(path):
+    return any(part.casefold() == "_merged_originals" for part in Path(path).parts)
+
+
 def iter_media_files(paths, video_exts=None, exclude_keywords=None, should_stop=None, log=None):
     """Yield unique existing main media files; directory failures are reported.
 
@@ -26,6 +30,8 @@ def iter_media_files(paths, video_exts=None, exclude_keywords=None, should_stop=
 
     def wanted(path):
         text = str(path)
+        if _is_archived_original(path):
+            return False
         if any(k in text.lower() for k in exclude):
             return False
         name = Path(text).name
@@ -46,6 +52,9 @@ def iter_media_files(paths, video_exts=None, exclude_keywords=None, should_stop=
         if stopped():
             return
         root = Path(str(raw)).expanduser()
+        if _is_archived_original(root):
+            note(f"跳过应用合并备份目录中的原始分集：{root}")
+            continue
         try:
             if root.is_file():
                 if wanted(root):
@@ -75,6 +84,7 @@ def iter_media_files(paths, video_exts=None, exclude_keywords=None, should_stop=
                         "extras",
                         "quarantine",
                         "media-backups",
+                        "_merged_originals",
                     }
                     and not d.lower().startswith((".toolkit-merge-", ".toolkit-stage-"))
                 )
