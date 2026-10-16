@@ -26,7 +26,14 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QColor, QBrush
 
 from config import ToolkitConfig
-from ui.widgets import DragDropListWidget, LogPanel, InfoCard
+from ui.widgets import (
+    DragDropListWidget,
+    LogPanel,
+    InfoCard,
+    FileInputActions,
+    accept_url_drag,
+    receive_url_drop,
+)
 from utils.library import is_junk_attachment_path
 from workers.ffmpeg import FFprobeAnalyzer, FFmpegRepairWorker
 
@@ -72,6 +79,7 @@ class RepairPage(QWidget):
         layout.addWidget(hint)
 
         layout.addWidget(QLabel("待处理列表 (支持拖入文件/文件夹):"))
+        layout.addWidget(FileInputActions(self, self._on_files_dropped))
         self.file_list = DragDropListWidget()
         self.file_list.setMaximumHeight(150)
         self.file_list.files_dropped.connect(self._on_files_dropped)
@@ -193,23 +201,10 @@ class RepairPage(QWidget):
 
     # ── 拖拽 ──
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
+        accept_url_drag(self, event)
 
     def dropEvent(self, event):
-        try:
-            paths = [u.toLocalFile() for u in event.mimeData().urls()]
-            if not paths:
-                event.ignore()
-                return
-            event.acceptProposedAction()
-            from PySide6.QtCore import QTimer
-
-            QTimer.singleShot(0, self, lambda: self._on_files_dropped(paths))
-        except Exception:
-            event.ignore()
+        receive_url_drop(self, event, self._on_files_dropped)
 
     def _on_files_dropped(self, paths: list[str]) -> None:
         if busy(self):
@@ -220,8 +215,6 @@ class RepairPage(QWidget):
         skipped_junk = 0
         for p in paths:
             pp = Path(p)
-            if len(p) > 240:
-                continue  # 跳过超长路径（避免 Windows MAX_PATH 触发异常/崩溃）
             if pp.is_file():
                 if pp.suffix.lower() not in exts:
                     continue

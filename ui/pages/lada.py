@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import ToolkitConfig
-from ui.widgets import DragDropListWidget, InfoCard, LogPanel
+from ui.widgets import DragDropListWidget, InfoCard, LogPanel, FileInputActions
 from utils import cpu_affinity, gpu, lada_tool
 from workers.lada_restore import LadaProbeWorker, LadaRestoreWorker
 
@@ -115,6 +115,7 @@ class LadaPage(QWidget):
         title = QLabel("马赛克破解（Lada）")
         title.setProperty("cssClass", "page-title")
         layout.addWidget(title)
+        layout.addWidget(FileInputActions(self, self._add_paths))
 
         layout.addWidget(
             InfoCard(
@@ -318,10 +319,6 @@ class LadaPage(QWidget):
         box = QGroupBox("待破解视频（可直接拖入）")
         lay = QVBoxLayout(box)
         row = QHBoxLayout()
-        for text, slot in (("添加文件", self._add_files), ("添加目录", self._add_dir)):
-            btn = QPushButton(text)
-            btn.clicked.connect(slot)
-            row.addWidget(btn)
         self.btn_scan = QPushButton("挑出库里判定为有码的视频")
         self.btn_scan.setToolTip("与「视频有码检测」同一套判定；已破解过的会自动跳过")
         self.btn_scan.clicked.connect(self._scan)

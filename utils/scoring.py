@@ -139,9 +139,12 @@ def _clamp01(x: float) -> float:
 
 def is_junk_item(it: Item) -> bool:
     """预告/占位/附属文件（trailer、fanart、theme 片头、极小文件）→ 直接建议删除，不参与品味判断。"""
-    from utils.library import is_junk_attachment_path
-    # 优先复用基于"文件名/路径"的附属判定（与修复转码页共用同一套规则，避免漂移）
-    if is_junk_attachment_path(it.path or "", it.name or ""):
+    from utils.media_filter import MediaFilter
+    # The same structural/path evidence as collection; display titles never prove an extra.
+    reason = MediaFilter().reason(it.path, type_full=getattr(it, "raw_type", None) or it.type_cn,
+                                  authoritative_type=bool(getattr(it, "raw_type", None)),
+                                  extra_type=getattr(it, "extra_type", None))
+    if reason in {"excluded_extra_type", "excluded_trailer", "excluded_attachment_path"}:
         return True
     # 极小文件（<10MB）视为占位/缩略图，不参与品味判断
     if it.size is not None and 0 < it.size < 10 * 1024 * 1024:
@@ -302,7 +305,7 @@ def dedup_loser_ids(items: list[Item], labels: Optional[dict] = None) -> set[str
             if not any(it.id == iid and entity_key(it.path) in protected for it in items)}
 
 
-def _dedup_groups_raw(items: list[Item]):
+def _dedup_groups_raw(items: list[Item], *, probe_entities=True):
     """按番号分组（不含 trailer/other/附属文件），仅返回 >=2 的组。
 
     排除 is_junk_item：theme/fanart/backdrop/trailer/极小占位文件——它们不是作品，
@@ -315,12 +318,22 @@ def _dedup_groups_raw(items: list[Item]):
         if is_junk_item(it):
             continue
         if it.num and it.bucket not in (BUCKET_TRAILER, BUCKET_OTHER):
-            key = entity_key(it.path) or f"id:{it.id}"
+            if probe_entities:
+                key = entity_key(it.path) or f"id:{it.id}"
+            else:
+                from utils.media_filter import physical_key
+                key = physical_key(it)
             if key in seen_entities:
                 continue
             seen_entities.add(key)
             groups[it.num].append(it)
     return [(num, grp) for num, grp in groups.items() if len(grp) >= 2]
+
+
+def dedup_candidate_groups(items: list[Item]) -> list[dict]:
+    """Metadata-only overview counts: same candidate/CD rules, no probes or deletion choices."""
+    return [{"num": num, "items": group, "losers": set(), "all_cd": all(it.is_cd for it in group)}
+            for num, group in _dedup_groups_raw(items, probe_entities=False)]
 
 
 def dedup_groups(items: list[Item], labels: Optional[dict] = None) -> list[dict]:

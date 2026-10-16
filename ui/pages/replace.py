@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import ToolkitConfig
-from ui.widgets import DragDropListWidget, LogPanel, InfoCard
+from ui.widgets import DragDropListWidget, LogPanel, InfoCard, FileInputActions
 from utils.censor_tags import update_jellyfin_db_tags
 from utils.nfo import update_nfo_censor_tags
 from utils.nfo_source import find_nfo
@@ -138,6 +138,7 @@ class ReplacePage(QWidget):
         left_l = QVBoxLayout(left_w)
         left_l.setContentsMargins(0, 0, 6, 0)
         left_l.addWidget(QLabel("📦 破解完成的视频/文件夹:"))
+        left_l.addWidget(FileInputActions(self, self._add_to_restored, role="restored"))
         self.list_restored = DragDropListWidget()
         self.list_restored.files_dropped.connect(self._add_to_restored)
         left_l.addWidget(self.list_restored)
@@ -147,6 +148,7 @@ class ReplacePage(QWidget):
         right_l = QVBoxLayout(right_w)
         right_l.setContentsMargins(6, 0, 0, 0)
         right_l.addWidget(QLabel("📚 原始媒体库 视频/文件夹:"))
+        right_l.addWidget(FileInputActions(self, self._add_to_library, role="library"))
         self.list_library = DragDropListWidget()
         self.list_library.files_dropped.connect(self._add_to_library)
         right_l.addWidget(self.list_library)
@@ -241,10 +243,14 @@ class ReplacePage(QWidget):
         self._preview()
 
     def _add_to_restored(self, paths: list[str]) -> None:
+        if busy(self):
+            return
         for p in paths:
             self.list_restored.add_item(os.path.basename(p) or p, p)
 
     def _add_to_library(self, paths: list[str]) -> None:
+        if busy(self):
+            return
         for p in paths:
             self.list_library.add_item(os.path.basename(p) or p, p)
 

@@ -20,7 +20,13 @@ from PySide6.QtWidgets import (
 )
 
 from config import ToolkitConfig
-from ui.widgets import DragDropListWidget, InfoCard
+from ui.widgets import (
+    DragDropListWidget,
+    InfoCard,
+    FileInputActions,
+    accept_url_drag,
+    receive_url_drop,
+)
 from utils import subtitle_clean
 from workers.scanner import FileScannerWorker
 
@@ -68,7 +74,7 @@ class SubtitlePage(QWidget):
         layout.addWidget(hint)
 
         set_row = QHBoxLayout()
-        set_row.addWidget(QLabel("目录列表 (支持拖入):"))
+        set_row.addWidget(QLabel("视频文件 / 文件夹 (支持拖入):"))
         set_row.addStretch()
         set_row.addWidget(QLabel("最小文件 (MB):"))
         self.spin_size = QSpinBox()
@@ -82,11 +88,11 @@ class SubtitlePage(QWidget):
         self.dir_list.paths_changed.connect(self._sync_directories)
         self.dir_list.setMaximumHeight(120)
         self.dir_list.files_dropped.connect(self._on_dirs_dropped)
+        layout.addWidget(FileInputActions(self, self._on_dirs_dropped))
         layout.addWidget(self.dir_list)
 
         btn_row = QHBoxLayout()
-        self.btn_add = QPushButton("添加文件夹")
-        self.btn_add.clicked.connect(self._add_folder)
+        self.btn_add = self.findChild(FileInputActions).folders_button
         self.btn_start = QPushButton("开始扫描")
         self.btn_start.setProperty("cssClass", "accent")
         self.btn_start.clicked.connect(self._start_scan)
@@ -98,7 +104,6 @@ class SubtitlePage(QWidget):
         self.btn_clear = QPushButton("清空")
         self.btn_clear.clicked.connect(self._clear_all)
 
-        btn_row.addWidget(self.btn_add)
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_pause)
         btn_row.addWidget(self.btn_stop)
@@ -119,6 +124,7 @@ class SubtitlePage(QWidget):
         res_label = QLabel("扫描结果（可多选拖出到资源管理器）:")
         layout.addWidget(res_label)
         self.result_list = DragDropListWidget()
+        self.result_list.setAcceptDrops(False)
         self.result_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         layout.addWidget(self.result_list)
 
@@ -144,39 +150,19 @@ class SubtitlePage(QWidget):
             events.subtitle_ready.emit(paths)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
+        accept_url_drag(self, event)
 
     def dropEvent(self, event):
-        try:
-            paths = [u.toLocalFile() for u in event.mimeData().urls()]
-            if not paths:
-                event.ignore()
-                return
-            event.acceptProposedAction()
-            # 延迟到拖拽结束后再处理，避免在 drop 回调内操作 view 触发 Qt 崩溃
-            from PySide6.QtCore import QTimer
-
-            QTimer.singleShot(0, self, lambda: self._on_dirs_dropped(paths))
-        except Exception:
-            event.ignore()
+        receive_url_drop(self, event, self._on_dirs_dropped)
 
     def _on_dirs_dropped(self, paths: list[str]) -> None:
         if busy(self):
             return
         for raw in paths:
             p = os.path.normpath(raw)  # 统一路径形式，保证 set/去重一致
-            if len(p) > 240:
-                continue  # 跳过超长路径（避免 Windows MAX_PATH 触发异常/崩溃）
-            if os.path.isdir(p):
+            if os.path.isdir(p) or os.path.isfile(p):
                 self._directories.add(p)
                 self.dir_list.add_item(os.path.basename(p) or p, p)
-            elif os.path.isfile(p):
-                d = os.path.dirname(p)
-                self._directories.add(d)
-                self.dir_list.add_item(os.path.basename(d) or d, d)
 
     def _add_folder(self) -> None:
         if busy(self):
@@ -309,7 +295,7 @@ class SubtitlePage(QWidget):
             with open(self._state_file(), "r", encoding="utf-8") as f:
                 state = json.load(f)
             for d in state.get("directories", []):
-                if os.path.isdir(d):
+                if os.path.exists(d):
                     self._directories.add(d)
                     self.dir_list.add_item(os.path.basename(d) or d, d)
             self._checked = set(state.get("checked_files", []))

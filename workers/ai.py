@@ -1,24 +1,13 @@
 """Model workers emit suggestions, never trusted user feedback."""
 from __future__ import annotations
 import json
-import urllib.request
 from PySide6.QtCore import QThread, Signal
 from utils.ai_results import parse_recheck_json, parse_dedup_json
 
 
 def query_llm(base_url: str, key: str, model: str, messages: list, timeout: int = 180) -> str:
-    url = base_url.rstrip("/") + "/chat/completions"
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    payload = {"model": model, "messages": messages, "temperature": 0.2}
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        value = json.loads(response.read().decode("utf-8"))
-    result = value["choices"][0]["message"]["content"]
-    if not isinstance(result, str):
-        raise ValueError("模型未返回可解析文本")
-    return result
+    from utils.local_ai import chat_completion
+    return chat_completion(base_url, key, model, messages, timeout=timeout)
 
 
 class _AIWorker(QThread):

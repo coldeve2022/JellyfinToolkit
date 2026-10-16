@@ -273,8 +273,8 @@ class SettingsPage(QWidget):
         ar2.addWidget(self.input_ai_model)
         self.btn_ai_detect = QPushButton("🔎 检测可用模型")
         self.btn_ai_detect.setToolTip(
-            "读取 Ollama /api/tags，列出本机已拉取的模型；"
-            "优先选中默认模型（若已拉取），避免填了不存在的模型名导致 404。"
+            "按当前接口地址读取 OpenAI 兼容模型列表或 Ollama 原生模型列表；"
+            "使用当前填写的 API Key，不会下载或加载模型。"
         )
         self.btn_ai_detect.clicked.connect(self._detect_models)
         ar2.addWidget(self.btn_ai_detect)
@@ -282,8 +282,23 @@ class SettingsPage(QWidget):
         ar3 = QHBoxLayout()
         ar3.addWidget(QLabel("API Key(可选, Ollama留空):"))
         self.input_ai_key = QLineEdit(self.cfg.ai_key)
+        self.input_ai_key.setEchoMode(QLineEdit.Password)
         ar3.addWidget(self.input_ai_key, 1)
         aib.addLayout(ar3)
+        ar4 = QHBoxLayout()
+        self.btn_ai_start = QPushButton("启动本机 Ollama 并重试")
+        self.btn_ai_start.setToolTip(
+            "仅启动已安装且配置为本机默认端口的 Ollama 服务；不下载或运行模型。"
+        )
+        self.btn_ai_start.clicked.connect(self._start_local_ai)
+        ar4.addWidget(self.btn_ai_start)
+        self.ai_status = QLabel("点击检测读取服务状态；修改接口地址后无需先保存。")
+        self.ai_status.setTextFormat(Qt.PlainText)
+        self.ai_status.setWordWrap(True)
+        ar4.addWidget(self.ai_status, 1)
+        aib.addLayout(ar4)
+        self.input_ai_url.textChanged.connect(self._update_ai_start)
+        self._update_ai_start()
         ai_hint = QLabel(
             "使用 OpenAI 兼容接口调用本地模型（如 Ollama: http://localhost:11434/v1）。未启用或连不上时，规则结果照常可用。"
         )
@@ -881,17 +896,56 @@ class SettingsPage(QWidget):
 
     # ── AI 模型检测 ──
     def _detect_models(self) -> None:
-        import urllib.request
+        self._run_ai_detection(False)
 
-        base = self.input_ai_url.text().strip().rstrip("/")
-        base = base[:-3] if base.endswith("/v1") else base
+    def _start_local_ai(self):
+        self._run_ai_detection(True)
 
-        def detect(cancel):
-            with urllib.request.urlopen(base + "/api/tags", timeout=8) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            return [row["name"] for row in data.get("models", []) if row.get("name")]
+    def _update_ai_start(self, *args):
+        from utils.local_ai import can_start_ollama
 
-        self._background("读取本地AI模型", detect, self._show_models)
+        self.btn_ai_start.setEnabled(not busy(self) and can_start_ollama(self.input_ai_url.text()))
+
+    def _run_ai_detection(self, start):
+        if busy(self):
+            return
+        from utils import local_ai
+        from ui.services import after_stopped
+
+        base, key = self.input_ai_url.text().strip(), self.input_ai_key.text()
+        function = local_ai.start_and_detect if start else local_ai.discover_models
+        self.ai_status.setText("正在启动本机服务并检测…" if start else "正在检测当前接口…")
+        worker = CallWorker(lambda cancel: function(base, key=key, should_stop=cancel))
+        self._service_worker = worker
+
+        def show(result):
+            if (self.input_ai_url.text().strip(), self.input_ai_key.text()) != (base, key):
+                self.ai_status.setText("连接设置已改变，旧检测结果已丢弃，请重新检测。")
+                return
+            if result.get("cancelled"):
+                self.ai_status.setText(result.get("error", "已取消检测。"))
+            elif not result.get("ok"):
+                text = result.get("error") or "检测未完成，请检查连接设置。"
+                if local_ai.can_start_ollama(base) and result.get("kind") in {
+                    "connection_refused",
+                    "timeout",
+                }:
+                    text += " 可点击“启动本机 Ollama 并重试”。"
+                self.ai_status.setText(text)
+            else:
+                self._show_models(result.get("models", []))
+
+        def finished():
+            if worker._stopped:
+                self.ai_status.setText("已取消检测；已显式启动的服务保持后台运行。")
+            after_stopped(self, self._update_ai_start)
+
+        worker.result.connect(show)
+        worker.error.connect(
+            lambda _: self.ai_status.setText("AI 检测未完成，请检查接口设置后重试。")
+        )
+        worker.finished.connect(finished)
+        start_task(self, worker, "启动本机 Ollama 并检测" if start else "检测 AI 可用模型")
 
     # ── Jellyfin 同步 ──
     def _invalidate_jf_plan(self, *args):
@@ -1209,11 +1263,18 @@ class SettingsPage(QWidget):
 
     def _show_models(self, names):
         if not names:
-            QMessageBox.information(self, "没有模型", "服务在线，但尚未安装模型。")
+            self.ai_status.setText(
+                "服务在线，但模型列表为空；未下载或加载模型。请在服务端准备模型或检查访问权限。"
+            )
             return
         current = self.input_ai_model.text()
-        self.input_ai_model.setText(current if current in names else names[0])
-        QMessageBox.information(self, "可用模型", ", ".join(names))
+        text = "服务在线，可用模型：" + ", ".join(names)
+        if current and current not in names:
+            text += "。当前填写的模型不在列表中；已保留编辑值，请选择以上可用模型后保存。"
+        elif not current:
+            self.input_ai_model.setText(names[0])
+            text += "。已填入第一个可用模型，保存后生效。"
+        self.ai_status.setText(text)
 
     def shutdown(self):
         from ui.services import stop_page

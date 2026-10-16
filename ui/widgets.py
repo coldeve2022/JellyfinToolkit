@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from PySide6.QtCore import Qt, Signal, QUrl, QMimeData, QRectF
+from PySide6.QtCore import Qt, Signal, QUrl, QMimeData, QRectF, QTimer
 from PySide6.QtGui import QColor, QDrag, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QListWidget,
@@ -24,9 +24,163 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QStyledItemDelegate,
     QStyle,
+    QPushButton,
+    QFileDialog,
 )
 
 from ui import theme
+
+
+def accepts_file_input(widget) -> bool:
+    """Honor disabled controls and the owning page's real task lifecycle."""
+    if not widget.isEnabled():
+        return False
+    current = widget
+    while current is not None:
+        if hasattr(current, "cfg"):
+            from ui.services import busy
+
+            return not busy(current) and not getattr(current.window(), "_closing", False)
+        current = current.parentWidget()
+    return True
+
+
+def report_input_error(widget, message):
+    """Keep a visible reason for rejected input; never silently lose a path."""
+    widget.setProperty("input_error", message)
+    signal = getattr(widget, "input_rejected", None)
+    if signal is not None:
+        signal.emit(message)
+    if not hasattr(widget, "input_feedback"):
+        surface = widget.viewport() if hasattr(widget, "viewport") else widget
+        widget.input_feedback = QLabel(surface)
+        widget.input_feedback.setWordWrap(True)
+        widget.input_feedback.setStyleSheet("background:#74352d;color:white;padding:8px;")
+    label = widget.input_feedback
+    label.setText(message)
+    if label.parentWidget() is widget or hasattr(widget, "viewport"):
+        label.setGeometry(8, 8, max(120, label.parentWidget().width() - 16), 100)
+    label.show()
+    label.raise_()
+
+
+def local_input_paths(widget, paths):
+    scope = widget
+    while scope.parentWidget() is not None and not hasattr(scope, "cfg"):
+        scope = scope.parentWidget()
+    for target in [scope] + scope.findChildren(QWidget):
+        if hasattr(target, "input_feedback"):
+            target.setProperty("input_error", None)
+            target.input_feedback.hide()
+            target.input_feedback.clear()
+    valid, errors = [], []
+    for raw in paths:
+        path = os.path.normpath(str(raw)) if raw else ""
+        try:
+            exists = bool(path) and os.path.exists(path)
+        except (OSError, ValueError) as exc:
+            errors.append(f"无法读取路径 {path}：{exc}")
+            continue
+        if exists:
+            if path not in valid:
+                valid.append(path)
+        else:
+            errors.append("路径不存在或当前不可访问：" + path)
+    if errors:
+        report_input_error(widget, "\n".join(errors))
+    return valid
+
+
+def accept_url_drag(widget, event):
+    if (
+        accepts_file_input(widget)
+        and event.mimeData().hasUrls()
+        and any(url.isLocalFile() for url in event.mimeData().urls())
+        and event.possibleActions() & Qt.CopyAction
+    ):
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
+    else:
+        event.ignore()
+
+
+def receive_url_drop(widget, event, receiver):
+    if not accepts_file_input(widget) or not event.possibleActions() & Qt.CopyAction:
+        event.ignore()
+        return
+    urls = event.mimeData().urls()
+    paths = local_input_paths(widget, [url.toLocalFile() for url in urls if url.isLocalFile()])
+    if any(not url.isLocalFile() for url in urls):
+        report_input_error(widget, "只接受本地文件、文件夹或已挂载的共享目录。")
+    if not paths:
+        event.ignore()
+        return
+    event.setDropAction(Qt.CopyAction)
+    event.accept()
+
+    # Let the native drag operation unwind before models or workers change.
+    def deliver():
+        if accepts_file_input(widget):
+            receiver(paths)
+        else:
+            report_input_error(widget, "任务正在进行，未添加本次输入；请结束后重试。")
+
+    QTimer.singleShot(0, widget, deliver)
+
+
+class FileInputActions(QWidget):
+    """Explicit, keyboard-accessible file/folder alternatives to native dragging."""
+
+    input_rejected = Signal(str)
+
+    def __init__(self, owner, receiver, role="main", *, files=True, folders=True):
+        super().__init__(owner)
+        self.setObjectName("input-actions-" + role)
+        self.owner, self.receiver = owner, receiver
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
+        self.files_button = QPushButton("添加文件…")
+        self.files_button.setObjectName("input-files-" + role)
+        self.files_button.clicked.connect(self.choose_files)
+        self.files_button.setVisible(files)
+        row.addWidget(self.files_button)
+        self.folders_button = QPushButton("添加文件夹…")
+        self.folders_button.setObjectName("input-folders-" + role)
+        self.folders_button.clicked.connect(self.choose_folder)
+        self.folders_button.setVisible(folders)
+        row.addWidget(self.folders_button)
+        row.addStretch()
+        layout.addLayout(row)
+        self.input_feedback = QLabel()
+        self.input_feedback.setWordWrap(True)
+        layout.addWidget(self.input_feedback)
+        self.input_feedback.hide()
+
+    def _deliver(self, paths):
+        if not paths or not accepts_file_input(self):
+            return
+        valid = local_input_paths(self, paths)
+        if valid:
+            self.receiver(valid)
+
+    def choose_files(self):
+        if accepts_file_input(self):
+            paths, _ = QFileDialog.getOpenFileNames(
+                self.owner,
+                "添加视频文件",
+                "",
+                "视频文件 ("
+                + " ".join("*" + ext for ext in self.owner.cfg.video_extensions)
+                + ");;所有文件 (*)",
+            )
+            self._deliver(paths)
+
+    def choose_folder(self):
+        if accepts_file_input(self):
+            path = QFileDialog.getExistingDirectory(self.owner, "添加文件夹")
+            if path:
+                self._deliver([path])
 
 
 # ───────────────── 可拖拽出入的列表 ─────────────────
@@ -40,6 +194,7 @@ class DragDropListWidget(QListWidget):
     - 右键菜单打开所在文件夹
     """
 
+    input_rejected = Signal(str)
     file_dropped = Signal(str)  # 拖入时发射文件路径
     files_dropped = Signal(list)  # 批量拖入
     paths_changed = Signal(list)  # canonical file queue, including Delete/context removal
@@ -50,7 +205,7 @@ class DragDropListWidget(QListWidget):
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
         self.setDefaultDropAction(Qt.CopyAction)
-        self.setDragDropMode(QAbstractItemView.DragOnly)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         self.model().rowsInserted.connect(self._notify_paths)
@@ -74,45 +229,16 @@ class DragDropListWidget(QListWidget):
         mime.setUrls(urls)
         drag = QDrag(self)
         drag.setMimeData(mime)
-        drag.exec(supportedActions or Qt.CopyAction)
+        drag.exec(Qt.CopyAction)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
+        accept_url_drag(self, event)
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
+        accept_url_drag(self, event)
 
     def dropEvent(self, event):
-        # 收集路径（不抛异常到 Qt 层）
-        try:
-            paths = []
-            for url in event.mimeData().urls():
-                p = os.path.normpath(url.toLocalFile())
-                # 拦截超长路径（触发 Windows MAX_PATH 会抛异常/崩溃），静默跳过
-                if not p or len(p) > 240:
-                    continue
-                if os.path.exists(p):
-                    paths.append(p)
-            if not paths:
-                event.ignore()
-                return
-            event.acceptProposedAction()
-            # 关键：延迟到拖拽释放事件完全结束后再 emit。
-            # 在 drop 回调内直接向 QListWidget 插 row（下游 add_item）会让
-            # Qt 拖拽状态机遍历 model 时崩溃（C++ 层），原 tkinterdnd2 无此问题，
-            # 故整合后需用 singleShot 延迟到事件堆栈弹出。
-            from PySide6.QtCore import QTimer
-
-            QTimer.singleShot(0, self, lambda: self.files_dropped.emit(paths))
-        except Exception:
-            # 任何异常都不应冒泡到 Qt 拖拽引擎，否则 PySide6 会 qFatal 崩溃
-            event.ignore()
+        receive_url_drop(self, event, self.files_dropped.emit)
 
     # ── 删除与右键菜单 ──
     def keyPressEvent(self, event):
@@ -164,6 +290,9 @@ class DragDropListWidget(QListWidget):
 class DragDropTableWidget(QTableWidget):
     """支持右键菜单、拖出文件、多选的表格组件。"""
 
+    files_dropped = Signal(list)
+    input_rejected = Signal(str)
+
     def __init__(self, columns: list[str], parent=None):
         super().__init__(parent)
         self.setColumnCount(len(columns))
@@ -177,10 +306,27 @@ class DragDropTableWidget(QTableWidget):
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
         self.setDefaultDropAction(Qt.CopyAction)
-        self.setDragDropMode(QAbstractItemView.DragOnly)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
         self.setSortingEnabled(True)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
+
+    def dragEnterEvent(self, event):
+        accept_url_drag(self, event)
+
+    def dragMoveEvent(self, event):
+        accept_url_drag(self, event)
+
+    def dropEvent(self, event):
+        receive_url_drop(self, event, self.files_dropped.emit)
+
+    def startDrag(self, supportedActions):
+        mime = self.mimeData(self.selectedItems())
+        if not mime.hasUrls():
+            return
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.CopyAction)
 
     def _context_menu(self, pos):
         item = self.itemAt(pos)

@@ -22,8 +22,8 @@ __all__ = [
     "window_title",
 ]
 
-__version__ = "3.10.0"
-VERSION_TUPLE = (3, 10, 0, 0)
+__version__ = "3.10.1"
+VERSION_TUPLE = (3, 10, 1, 0)
 
 APP_NAME = "JellyfinToolkit"
 APP_NAME_CN = "Jellyfin Toolkit"

@@ -21,7 +21,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
-from ui.widgets import LogPanel, InfoCard
+from ui.widgets import (
+    LogPanel,
+    InfoCard,
+    FileInputActions,
+    accept_url_drag,
+    receive_url_drop,
+    report_input_error,
+)
 from utils.nfo import read_text_any_encoding
 
 
@@ -92,9 +99,7 @@ class NFOPage(QWidget):
         self.dir_label.setProperty("cssClass", "path-display")
         dir_row.addWidget(self.dir_label, 1)
 
-        browse_btn = QPushButton("选择目录")
-        browse_btn.clicked.connect(self._browse)
-        dir_row.addWidget(browse_btn)
+        dir_row.addWidget(FileInputActions(self, self._receive_directories, files=False))
         layout.addLayout(dir_row)
 
         self.progress = QProgressBar()
@@ -209,24 +214,20 @@ class NFOPage(QWidget):
 
     # ── 拖拽支持 ──
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
+        accept_url_drag(self, event)
 
     def dropEvent(self, event):
-        try:
-            for url in event.mimeData().urls():
-                p = url.toLocalFile()
-                if p and os.path.isdir(p):
-                    event.acceptProposedAction()
-                    from PySide6.QtCore import QTimer
+        receive_url_drop(self, event, self._receive_directories)
 
-                    QTimer.singleShot(0, self, lambda: self._set_dir(p))
-                    return
-            event.ignore()
-        except Exception:
-            event.ignore()
+    def _receive_directories(self, paths):
+        if busy(self):
+            return
+        if len(paths) != 1 or not os.path.isdir(paths[0]):
+            report_input_error(
+                self, "本页一次处理一个媒体库文件夹。请单独添加文件夹，不要选择文件或多个目录。"
+            )
+            return
+        self._set_dir(paths[0])
 
     def _set_dir(self, d: str) -> None:
         if busy(self):

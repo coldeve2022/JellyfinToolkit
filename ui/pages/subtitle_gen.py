@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import ToolkitConfig
-from ui.widgets import DragDropListWidget, InfoCard, LogPanel
+from ui.widgets import DragDropListWidget, InfoCard, LogPanel, FileInputActions
 from utils import subtitle_clean, whisper_tool
 from utils.library import is_junk_attachment_path
 from workers.whisper_gen import WhisperGenWorker
@@ -142,6 +142,7 @@ class SubtitleGenPage(QWidget):
         title = QLabel("批量生成字幕")
         title.setProperty("cssClass", "page-title")
         layout.addWidget(title)
+        layout.addWidget(FileInputActions(self, self._add_paths))
 
         layout.addWidget(
             InfoCard(
@@ -281,12 +282,6 @@ class SubtitleGenPage(QWidget):
         box = QGroupBox("待处理文件（可直接把文件/文件夹拖进来）")
         lay = QVBoxLayout(box)
         row = QHBoxLayout()
-        btn_add = QPushButton("添加文件")
-        btn_add.clicked.connect(self._add_files)
-        row.addWidget(btn_add)
-        btn_dir = QPushButton("添加目录")
-        btn_dir.clicked.connect(self._add_dir)
-        row.addWidget(btn_dir)
         self.btn_scan = QPushButton("挑出库里缺字幕的视频")
         self.btn_scan.setToolTip("从媒体库读取全部条目，挑出没有同名字幕的，填进下面的清单")
         self.btn_scan.clicked.connect(self._scan_missing)

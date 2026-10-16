@@ -31,6 +31,18 @@ def _cap_vals(values, n=8):
 def build_profile(items: list[Item], labels: dict[str, str],
                   results: Optional[list[Scored]] = None) -> dict:
     """构建喜好画像。results 可选：用于"未看推荐 Top N"。"""
+    from dataclasses import replace
+    from utils.media_filter import count_media, filter_media, physical_key, profile_evidence
+    selected = filter_media(items, check_local_missing=False)
+    counts = count_media(selected)
+    items, labels, entities = profile_evidence(selected, labels)
+    if results:
+        by_entity = {}
+        for result in results:
+            key = physical_key(result.item)
+            if key in entities and (key not in by_entity or result.s_behavior > by_entity[key].s_behavior):
+                by_entity[key] = replace(result, item=entities[key])
+        results = list(by_entity.values())
     pos = [it for it in items if positive_weight(it, labels.get(it.id)) > 0
            and labels.get(it.id) not in NEGATIVE_LABELS]
     neg = [it for it in items if labels.get(it.id) in NEGATIVE_LABELS]
@@ -201,6 +213,7 @@ def build_profile(items: list[Item], labels: dict[str, str],
                        if results else Counter())
 
     return {
+        **counts,
         "n_pos": len(pos),
         "n_neg": len(neg),
         "n_fav": n_fav,

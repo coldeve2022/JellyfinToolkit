@@ -71,13 +71,19 @@ class InsightPage(QWidget):
         layout.addWidget(title)
 
         hint = QLabel(
-            "只读读取媒体库（Jellyfin / Emby 均可），统计全库作品、行为信号与分布。\n"
+            "只读读取媒体库（Jellyfin / Emby 均可），统计主视频条目、行为信号与分布。\n"
             "数据来源在设置页选择：库文件直读，或走服务器 API。\n"
             "如需排除某些目录（例如动漫库），可在设置页的「清理排除目录关键词」里填写。"
             "本页不会修改任何数据。"
         )
         hint.setProperty("cssClass", "subtitle")
         layout.addWidget(hint)
+        self.count_explanation = QLabel(
+            "扫描后显示条目、唯一视频路径和作品分组口径；预告、主题视频等附属内容不计入。"
+        )
+        self.count_explanation.setWordWrap(True)
+        self.count_explanation.setProperty("cssClass", "text-muted")
+        layout.addWidget(self.count_explanation)
 
         act = QGroupBox("数据采集")
         ag = QVBoxLayout(act)
@@ -233,7 +239,7 @@ class InsightPage(QWidget):
         self._summary = result["summary"]
         self._render_summary(result["summary"])
         self.log.log_success(
-            f"✅ 统计完成：{result['summary']['total']} 部 | "
+            f"✅ 统计完成：{result['summary']['total']} 条主视频记录 | "
             f"收藏 {result['summary']['favorite']} | 看过 {result['summary']['played']}"
         )
 
@@ -272,8 +278,17 @@ class InsightPage(QWidget):
 
     def _render_summary(self, s: dict) -> None:
         self._clear_metrics()
+        entries = s.get("entry_count", s["total"])
+        files = s.get("file_count", entries)
+        works = s.get("work_count", files)
+        filtered = s.get("filtered_out", 0)
+        self.count_explanation.setText(
+            f"库条目 {entries} · 唯一视频路径 {files} · 作品分组 {works} · 已排除附属等条目 {filtered}。\n"
+            "同一文件的多个库记录不等于多部电影；分卷、不同版本可属于同一作品分组，"
+            "无法识别作品关系的文件独立计组。路径去重不等于磁盘文件盘点；收藏、观看及下方分布按主视频条目统计。"
+        )
         for label, val in [
-            ("总数", s["total"]),
+            ("主视频条目", entries),
             ("收藏", s["favorite"]),
             ("看过", s["played"]),
             ("播放过", s["ever_play"]),

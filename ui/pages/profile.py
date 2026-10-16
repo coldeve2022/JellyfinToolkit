@@ -77,6 +77,12 @@ class ProfilePage(QWidget):
         )
         hint.setProperty("cssClass", "subtitle")
         root.addWidget(hint)
+        self.count_explanation = QLabel(
+            "画像只使用主视频，按唯一文件合并行为与人工反馈；附属内容不作为喜好样本。"
+        )
+        self.count_explanation.setWordWrap(True)
+        self.count_explanation.setProperty("cssClass", "text-muted")
+        root.addWidget(self.count_explanation)
 
         act = QHBoxLayout()
         self.btn_analyze = QPushButton("🚀 生成我的喜好画像")
@@ -277,7 +283,7 @@ class ProfilePage(QWidget):
         self.btn_ai_taste.setEnabled(True)
         self._refresh_ai_clear()
         self.log.log_success(
-            f"画像已生成：正样本 {self.profile['n_pos']} 部作品 · 覆盖演员 {self.profile['actors_covered']} 位"
+            f"画像已生成：正样本 {self.profile['n_pos']} 个唯一视频 · 覆盖演员 {self.profile['actors_covered']} 位"
         )
 
     # ── AI 参与分类 ──
@@ -399,12 +405,19 @@ class ProfilePage(QWidget):
 
     def _render_profile(self) -> None:
         p = self.profile
+        files = p.get("physical_videos", p.get("total", 0))
+        entries = p.get("library_entries", files)
+        self.count_explanation.setText(
+            f"库条目 {entries} · 唯一视频路径 {files} · 喜好正样本 {p['n_pos']}。\n"
+            "正样本包括观看/收藏行为或明确标记喜欢的主视频；同一视频路径的别名合并计一次，"
+            "仅标记保留不代表喜欢。"
+        )
         self._rec_pool = p.get("rec_candidates") or []
         self.btn_rec_shuffle.setEnabled(bool(self._rec_pool))
         self._clear_metric_row()
         for index, (label, val) in enumerate(
             [
-                ("看过作品", p["n_pos"]),
+                ("喜好正样本", p["n_pos"]),
                 ("收藏", p["n_fav"]),
                 ("看完", p["n_played"]),
                 ("覆盖演员", p["actors_covered"]),

@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 
 from config import DATA_DIR, ToolkitConfig
 from ui import theme
-from ui.widgets import DragDropListWidget, InfoCard, LogPanel
+from ui.widgets import DragDropListWidget, InfoCard, LogPanel, FileInputActions
 from utils.merge import (
     check_merge_compat,
     display_number_for_group,
@@ -249,6 +249,7 @@ class MergePage(QWidget):
         layout.addWidget(hint)
 
         layout.addWidget(QLabel("待扫描目录/文件 (支持拖入):"))
+        layout.addWidget(FileInputActions(self, self._on_files_dropped))
         self.file_list = DragDropListWidget()
         self.file_list.setMaximumHeight(90)
         self.file_list.files_dropped.connect(self._on_files_dropped)
@@ -483,6 +484,8 @@ class MergePage(QWidget):
 
     # ── 事件 ──
     def _on_files_dropped(self, paths) -> None:
+        if busy(self):
+            return
         for p in paths:
             self.file_list.add_item(os.path.basename(p), p)
 

@@ -19,7 +19,13 @@ from PySide6.QtWidgets import (
 )
 
 from config import ToolkitConfig
-from ui.widgets import DragDropTableWidget, InfoCard
+from ui.widgets import (
+    DragDropTableWidget,
+    InfoCard,
+    FileInputActions,
+    accept_url_drag,
+    receive_url_drop,
+)
 from utils.naming import is_uncensored_filename
 
 
@@ -105,6 +111,7 @@ class CensorshipPage(QWidget):
         title = QLabel("文件名分类：推测有码 / 无码")
         title.setProperty("cssClass", "page-title")
         layout.addWidget(title)
+        layout.addWidget(FileInputActions(self, self._start_scan_worker))
 
         hint = InfoCard(
             "拖拽视频文件或包含视频的文件夹到下方表格区域，自动按文件名关键词分类。\n"
@@ -146,6 +153,7 @@ class CensorshipPage(QWidget):
         btn_row.addWidget(clear_btn)
         layout.addLayout(btn_row)
         for table in (self.table_censored, self.table_uncensored):
+            table.files_dropped.connect(self._start_scan_worker)
             table.model().rowsRemoved.connect(self._sync_known)
 
     def _sync_known(self, *args):
@@ -156,30 +164,14 @@ class CensorshipPage(QWidget):
 
     # ── 拖拽事件 ──
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
+        accept_url_drag(self, event)
 
     def dropEvent(self, event):
-        try:
-            paths = []
-            for url in event.mimeData().urls():
-                p = os.path.normpath(url.toLocalFile())
-                if p and os.path.exists(p):
-                    paths.append(p)
-            if not paths:
-                event.ignore()
-                return
-            event.acceptProposedAction()
-            # 延迟到拖拽结束后启动扫描，避免在 drop 回调内创建/启动线程触发 Qt 崩溃
-            from PySide6.QtCore import QTimer
-
-            QTimer.singleShot(0, self, lambda: self._start_scan_worker(paths))
-        except Exception:
-            event.ignore()
+        receive_url_drop(self, event, self._start_scan_worker)
 
     def _start_scan_worker(self, paths: list[str]) -> None:
+        if busy(self):
+            return
         if self._worker and self._worker.isRunning():
             self._stats_label.setText("扫描进行中，请等待完成后再添加")
             return

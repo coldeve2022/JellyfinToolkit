@@ -78,6 +78,12 @@ class Item:
     height: Optional[int] = None
     duration: Optional[float] = None
     bitrate: Optional[int] = None
+    extra_type: Optional[object] = None
+    is_virtual: bool = False
+    is_deleted: bool = False
+    location_type: str = ""
+    primary_version_id: Optional[str] = None
+    raw_type: Optional[str] = None          # authoritative source Type; type_cn alone is display-only
 
     @property
     def size_mb(self) -> Optional[float]:
@@ -146,7 +152,7 @@ def classify_bucket(name: str, path: str, num: Optional[str], type_full: str) ->
     low = f"{name} {path}".lower()
     typ = type_full.split(".")[-1].lower() if type_full else ""
 
-    if "trailer" in typ or "/trailer" in low or name.lower().startswith("trailer"):
+    if typ == "trailer" or (typ not in {"movie", "episode", "musicvideo"} and is_junk_attachment_path(path)):
         return BUCKET_TRAILER, False
 
     if any(marker in low for marker in HENTAI_MARKERS):
@@ -525,7 +531,8 @@ _JF_IMAGE_SCREENSHOT = 5
 _JF_IMAGE_FANART = 2
 
 
-def load_primary_covers(db_path: str, log: Optional[Callable[[str], None]] = None) -> dict[str, str]:
+def load_primary_covers(db_path: str, log: Optional[Callable[[str], None]] = None,
+                        item_ids=None, should_stop=None) -> dict[str, str]:
     """从 jellyfin.db 的 BaseItemImageInfos 加载每部作品的封面路径。
 
     优先级：主封面(ImageType=0) > 视频帧截图(ImageType=5) > 背景图(ImageType=2)。
@@ -535,6 +542,8 @@ def load_primary_covers(db_path: str, log: Optional[Callable[[str], None]] = Non
     Args:
         db_path: jellyfin.db 路径
         log: 可选日志回调
+        item_ids: 可选正片 ID 集合；None 保持全库兼容行为，空集合不探测封面
+        should_stop: 取消时抛 LibraryCollectionCancelled，不发布半份映射
     Returns:
         {item_id: 封面本地路径}，仅含文件确实存在的条目
     """
@@ -543,6 +552,10 @@ def load_primary_covers(db_path: str, log: Optional[Callable[[str], None]] = Non
             log(msg)
 
     result: dict[str, str] = {}
+    _check_cancel(should_stop)
+    wanted = list(dict.fromkeys(item_ids)) if item_ids is not None else None
+    if wanted == []:
+        return result
     db_path = Path(db_path)
     if not db_path.exists():
         return result
@@ -553,24 +566,32 @@ def load_primary_covers(db_path: str, log: Optional[Callable[[str], None]] = Non
     c = conn.cursor()
     try:
         c.execute("PRAGMA query_only=ON")
-        rows = c.execute(
-            "SELECT ItemId, Path, ImageType FROM BaseItemImageInfos "
-            "WHERE ImageType IN (?, ?, ?) AND Path IS NOT NULL AND Path != '' "
-            "ORDER BY CASE ImageType WHEN ? THEN 0 WHEN ? THEN 1 WHEN ? THEN 2 ELSE 3 END",
-            (_JF_IMAGE_PRIMARY, _JF_IMAGE_SCREENSHOT, _JF_IMAGE_FANART,
-             _JF_IMAGE_PRIMARY, _JF_IMAGE_SCREENSHOT, _JF_IMAGE_FANART),
-        ).fetchall()
-        _log(f"读取封面映射（主封面/截图/背景）：{len(rows)} 条")
-        for item_id, path, image_type in rows:
-            if path.startswith("http://") or path.startswith("https://"):
-                continue
-            if item_id in result:
-                continue
-            # 去掉 DB 里可能残留的引号/空白，再校验存在性
-            p = str(path).strip().strip('"').strip("'")
-            if p and os.path.isfile(p):
-                result[item_id] = p
+        batches = [None] if wanted is None else [wanted[i:i + 400] for i in range(0, len(wanted), 400)]
+        exists_cache, read = {}, 0
+        for batch in batches:
+            _check_cancel(should_stop)
+            sql = ("SELECT ItemId, Path, ImageType FROM BaseItemImageInfos "
+                   "WHERE ImageType IN (?, ?, ?) AND Path IS NOT NULL AND Path != '' ")
+            params = [_JF_IMAGE_PRIMARY, _JF_IMAGE_SCREENSHOT, _JF_IMAGE_FANART]
+            if batch is not None:
+                sql += "AND ItemId IN (" + ",".join("?" for _ in batch) + ") "
+                params.extend(batch)
+            sql += "ORDER BY CASE ImageType WHEN ? THEN 0 WHEN ? THEN 1 WHEN ? THEN 2 ELSE 3 END"
+            params.extend((_JF_IMAGE_PRIMARY, _JF_IMAGE_SCREENSHOT, _JF_IMAGE_FANART))
+            for item_id, path, image_type in c.execute(sql, params):
+                _check_cancel(should_stop)
+                read += 1
+                if path.startswith(("http://", "https://")) or item_id in result:
+                    continue
+                p = str(path).strip().strip('"').strip("'")
+                if p and p not in exists_cache:
+                    exists_cache[p] = os.path.isfile(p)
+                if p and exists_cache[p]:
+                    result[item_id] = p
+        _log(f"读取正片封面映射（主封面/截图/背景）：{read} 条，检查 {len(exists_cache)} 个不同路径")
         _log(f"  -> 有效封面 {len(result)} 条")
+    except LibraryCollectionCancelled:
+        raise
     except Exception as e:  # noqa: BLE001
         _log(f"主封面读取失败：{e}")
     finally:
@@ -595,6 +616,11 @@ def build_item(
     nfo_fallback: bool = True,
     listing_cache: Optional[dict] = None,
     media_facts: Optional[dict] = None,
+    extra_type=None,
+    is_virtual=False,
+    is_deleted=False,
+    location_type="",
+    primary_version_id=None,
 ) -> Item:
     """把"各数据源给出的原始字段"归一成 ``Item``。
 
@@ -658,6 +684,12 @@ def build_item(
         height=(media_facts or {}).get("height"),
         duration=(media_facts or {}).get("duration"),
         bitrate=(media_facts or {}).get("bitrate"),
+        extra_type=extra_type,
+        is_virtual=is_virtual,
+        is_deleted=is_deleted,
+        location_type=location_type or "",
+        primary_version_id=_guid_str(primary_version_id) or None,
+        raw_type=type_full or None,
     )
     for key, value in (behavior or {}).items():
         if hasattr(item, key):
@@ -697,8 +729,12 @@ def _collect_ef(
     try:
         # 1. 视频条目
         _log("读取视频条目...")
+        available = _column_names(conn, "BaseItems")
+        optional_fields = ("ExtraType", "IsVirtualItem", "PrimaryVersionId", "IsDeleted")
+        optional_select = ", ".join(name if name.lower() in available else "NULL" for name in optional_fields)
         c.execute(
             "SELECT Id, Name, Path, ProductionYear, Genres, Tags, Studios, Size, Type "
+            + ", " + optional_select + " "
             "FROM BaseItems WHERE IsFolder=0 AND MediaType='Video'"
         )
         rows = c.fetchall()
@@ -736,9 +772,22 @@ def _collect_ef(
     finally:
         conn.close()
 
-    # 4. 主封面映射：Jellyfin ImageType=0 (Primary 海报) —— 复用纯函数，逻辑统一、可单测
+    # 4. 先按纯元数据筛主片，再探测封面；不能为已排除的数万附件做文件系统访问。
+    from utils.media_filter import MediaFilter
+    exclude = [k.lower() for k in (exclude_keywords or []) if k]
+    selection = MediaFilter()
+    eligible_ids = set()
+    for row in rows:
+        _check_cancel(should_stop)
+        iid, _name, path, _year, _genres, _tags, _studios, _size, typ, extra, virtual, _primary, deleted = row
+        if exclude and any(k in (path or "").lower() for k in exclude):
+            continue
+        if selection.reason(path, type_full=typ, extra_type=extra, is_virtual=virtual, is_deleted=deleted) is None:
+            eligible_ids.add(iid)
     try:
-        cover_map = load_primary_covers(str(db_path), log=_log)
+        cover_map = load_primary_covers(str(db_path), log=_log, item_ids=eligible_ids, should_stop=should_stop)
+    except LibraryCollectionCancelled:
+        raise
     except Exception as e:  # noqa: BLE001
         _log(f"主封面读取失败：{e}")
         cover_map = {}
@@ -749,11 +798,16 @@ def _collect_ef(
     skipped = 0
     # 同一目录里的条目共用一份列举结果（库在网络盘上时这是扫描速度的关键）
     listing_cache: dict = {}
-    for i, (item_id, name, path, year, genres, tags, studios, size, type_full) in enumerate(rows):
+    selector = MediaFilter(listing_cache=listing_cache)
+    for i, row in enumerate(rows):
+        item_id, name, path, year, genres, tags, studios, size, type_full, extra, virtual, primary, deleted = row
         _check_cancel(should_stop)
         path = path or ""
         if exclude and any(k in path.lower() for k in exclude):
             skipped += 1
+            continue
+        if not selector.accept(path, item_id=item_id, type_full=type_full, extra_type=extra,
+                               is_virtual=virtual, is_deleted=deleted):
             continue
         items.append(build_item(
             item_id=item_id, name=name, path=path, type_full=type_full,
@@ -768,13 +822,15 @@ def _collect_ef(
                 "behavior_user_id": _guid_str(selected_user) if known and selected_user is not None else "",
                 "source_identity": "db:" + os.path.normcase(str(db_path.resolve()))},
             listing_cache=listing_cache,
+            extra_type=extra, is_virtual=virtual, is_deleted=deleted,
+            primary_version_id=primary,
         ))
         if progress and total:
             progress(int((i + 1) / total * 100))
 
     _check_cancel(should_stop)
     _log(f"✅ 采集完成：{len(items)} 部（按范围排除 {skipped} 条）")
-    return items
+    return selector.collection(items)
 
 
 # 传统架构里 type 列的取值形如 "MediaBrowser.Controller.Entities.Movies.Movie"，
@@ -821,7 +877,8 @@ def _collect_legacy(
             raise ValueError(
                 f"该文件不是 Emby / Jellyfin≤10.10 的库（缺少 TypedBaseItems.guid）：{db_path}")
 
-        wanted = ["guid", "type", "data", "path", "name", "isfolder"]
+        wanted = ["guid", "type", "data", "path", "name", "isfolder", "extratype",
+                  "isvirtualitem", "primaryversionid", "isdeleted"]
         sel = [w for w in wanted if w in cols]
         sql = f"SELECT {', '.join(sel)} FROM TypedBaseItems"
         if "isfolder" in cols:
@@ -873,6 +930,8 @@ def _collect_legacy(
     skipped = 0
     no_tags = 0
     listing_cache: dict = {}
+    from utils.media_filter import MediaFilter
+    selector = MediaFilter(listing_cache=listing_cache)
     for i, row in enumerate(rows):
         _check_cancel(should_stop)
         item_id = _guid_str(row[pos["guid"]])
@@ -894,6 +953,18 @@ def _collect_legacy(
                                      else str(raw_data))
             except (ValueError, TypeError):
                 payload = None
+
+        def metadata(column, field):
+            value = row[pos[column]] if column in pos else None
+            return value if value is not None else _json_field(payload, field)
+        extra = metadata("extratype", "ExtraType")
+        virtual = metadata("isvirtualitem", "IsVirtualItem")
+        deleted = metadata("isdeleted", "IsDeleted")
+        primary = metadata("primaryversionid", "PrimaryVersionId")
+        location = _json_field(payload, "LocationType")
+        if not selector.accept(path, item_id=item_id, type_full=type_full, extra_type=extra,
+                               is_virtual=virtual, is_deleted=deleted, location_type=location):
+            continue
 
         genres_list = _as_list(_json_field(payload, "Genres"))
         tags_list = _as_list(_json_field(payload, "Tags"))
@@ -921,6 +992,8 @@ def _collect_legacy(
                 "behavior_user_id": _guid_str(selected_user) if known and selected_user is not None else "",
                 "source_identity": "db:" + os.path.normcase(str(db_path.resolve()))},
             listing_cache=listing_cache,
+            extra_type=extra, is_virtual=virtual, is_deleted=deleted,
+            location_type=location, primary_version_id=primary,
         ))
         if progress and total:
             progress(int((i + 1) / total * 100))
@@ -929,7 +1002,7 @@ def _collect_legacy(
     if no_tags:
         _log(f"  · 其中 {no_tags} 条在库文件里没有标签，已尝试用同目录 .nfo 兜底")
     _log(f"✅ 采集完成：{len(items)} 部（按范围排除 {skipped} 条）")
-    return items
+    return selector.collection(items)
 
 
 def collect_library(
@@ -963,6 +1036,8 @@ def collect_library(
 
 def summarize(items: list[Item]) -> dict:
     """从采集结果计算概览统计（仪表盘用，纯函数可测）。"""
+    from utils.media_filter import filter_media
+    items = filter_media(items, check_local_missing=False)
     total = len(items)
     by_bucket = Counter(it.bucket for it in items)
     fav = sum(1 for it in items if it.is_favorite)
@@ -983,13 +1058,15 @@ def summarize(items: list[Item]) -> dict:
     fav_actors = Counter(a for it in items if it.is_favorite for a in it.actors if a)
 
     # 重复（同番号 >= 2，排除 trailer/other）
-    from utils.scoring import dedup_groups
-    duplicate_groups = dedup_groups(items)
+    from utils.scoring import dedup_candidate_groups
+    duplicate_groups = dedup_candidate_groups(items)
     dup_groups = {g["num"]: g["items"] for g in duplicate_groups}
     cd_groups = sum(g["all_cd"] for g in duplicate_groups)
     true_dup_candidates = len(duplicate_groups) - cd_groups
 
+    from utils.media_filter import count_media
     return {
+        **count_media(items),
         "total": total,
         "by_bucket": dict(by_bucket),
         "favorite": fav,

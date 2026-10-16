@@ -235,6 +235,8 @@ def collect_library_api(
     skipped = 0
     seen = 0
     listing_cache: dict = {}
+    from utils.media_filter import MediaFilter
+    selector = MediaFilter(listing_cache=listing_cache)
     for page in _iter_pages(base, api_key, user_id, log=_log, should_stop=should_stop):
         if should_stop and should_stop():
             break
@@ -248,6 +250,10 @@ def collect_library_api(
                 continue
             name = str(raw.get("Name") or "")
             type_full = str(raw.get("Type") or "")
+            if not selector.accept(path, item_id=str(raw.get("Id") or ""), type_full=type_full,
+                                   extra_type=raw.get("ExtraType"), is_virtual=raw.get("IsVirtualItem"),
+                                   is_deleted=raw.get("IsDeleted"), location_type=raw.get("LocationType")):
+                continue
             year = raw.get("ProductionYear")
             try:
                 year = int(year) if year is not None else None
@@ -268,6 +274,9 @@ def collect_library_api(
                                              "source_identity": "server:" + server_identity(base)},
                 listing_cache=listing_cache,
                 media_facts=_media_facts_of(raw),
+                extra_type=raw.get("ExtraType"), is_virtual=raw.get("IsVirtualItem"),
+                is_deleted=raw.get("IsDeleted"), location_type=raw.get("LocationType"),
+                primary_version_id=raw.get("PrimaryVersionId"),
             ))
             if progress and seen:
                 progress(min(99, seen))
@@ -278,7 +287,7 @@ def collect_library_api(
     _log(f"✅ API 采集完成：{len(items)} 部（按范围排除 {skipped} 条）")
     if progress:
         progress(100)
-    return items, kind
+    return selector.collection(items), kind
 
 
 def describe_source(server: str, api_key: str = "", declared_kind: str = KIND_AUTO) -> str:

@@ -16,6 +16,8 @@ def score_snapshot(items, cfg, labels=None, *, th_keep=None, th_delete=None):
     """Return a coherent result/profile from one source, label, config and cache version."""
     from config import DATA_DIR
     from utils import scoring, scoring_v2
+    from utils.media_filter import filter_media
+    items = filter_media(items, check_local_missing=False)
     configured_context = state_context(cfg)
     context = state_context(cfg, items)
     # Feedback supplied before auto-detection belongs to an unknown/old identity, not this viewer.
@@ -50,7 +52,9 @@ def score_snapshot(items, cfg, labels=None, *, th_keep=None, th_delete=None):
             result.reason = "旧反馈待确认：保守保留该实体；未用于当前用户画像"
     if legacy_protection:
         warnings.append(f"{len(legacy_protection)}项旧保留反馈待确认，当前仅保护删除，不训练画像")
-    return {"items": list(items), "results": results, "counts": engine.decision_counts(results),
+    from utils.media_filter import LibraryItems
+    snapshot_items = LibraryItems(items, getattr(items, "collection_stats", {}))
+    return {"items": snapshot_items, "results": results, "counts": engine.decision_counts(results),
             "labels": labels, "profile": build_profile(items, labels, results),
             "source_context": context, "fingerprint": fingerprint, "warnings": warnings,
             "resolved_user_id": user_id, "resolved_source_identity": source_identity,

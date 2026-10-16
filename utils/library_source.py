@@ -256,6 +256,7 @@ def collect(
     if should_stop and should_stop():
         raise CollectionCancelled("采集已取消；部分结果不会用于全库统计或删除建议")
     mappings = _get(value, "library_path_mappings", [])
+    listing_cache = {}
     for it in items:
         original = it.path
         mapped = map_media_path(original, mappings)
@@ -264,8 +265,9 @@ def collect(
             it.path = mapped
             if not it.cover or not os.path.isfile(it.cover):
                 from utils.library import find_cover
-                it.cover = find_cover(mapped, it.num, it.cd_index)
-    return items
+                it.cover = find_cover(mapped, it.num, it.cd_index, cache=listing_cache)
+    from utils.media_filter import filter_media
+    return filter_media(items, log=log, should_stop=should_stop, listing_cache=listing_cache)
 
 
 __all__ = [
