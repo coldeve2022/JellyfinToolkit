@@ -363,18 +363,89 @@ def test_ai_adoption_is_explicit_and_undoable(qapp, cfg, monkeypatch):
 
 
 def test_task_center_restores_actual_quarantined_fixture(qapp, qtbot, cfg, tmp_path, monkeypatch):
+    import ui.pages.tasks as tasks_module
     from utils.trash import trash_file
     from ui.pages.tasks import TaskCenterPage
-    from ui.services import busy
+    from ui.services import TaskManager, busy
 
     source = tmp_path / "test.mp4"
     source.write_bytes(b"fixture-media")
     ok, _ = trash_file(str(source))
     assert ok and not source.exists()
+
+    trace = []
+    real_start_task = tasks_module.start_task
+
+    def spy_start_task(owner, worker, title=None, mutating=None):
+        result = real_start_task(owner, worker, title, mutating)
+        trace.append(
+            (
+                "start_task",
+                type(worker).__name__,
+                result,
+                bool(getattr(worker, "_stopped", None)),
+                worker.isRunning(),
+                worker.isFinished(),
+            )
+        )
+        return result
+
+    monkeypatch.setattr(tasks_module, "start_task", spy_start_task)
+
+    real_submit = TaskManager.submit
+
+    def spy_submit(self, worker, owner, title, mutating=False, resources=()):
+        result = real_submit(self, worker, owner, title, mutating, resources)
+        trace.append(("submit", type(worker).__name__, result))
+        return result
+
+    monkeypatch.setattr(TaskManager, "submit", spy_submit)
+
     page = TaskCenterPage(cfg)
+    renders = []
+    real_render = page._render_backups
+
+    def spy_render(entries):
+        renders.append(len(entries))
+        real_render(entries)
+
+    page._render_backups = spy_render
     page._load_backups()
-    qtbot.waitUntil(lambda: not busy(page), timeout=3000)
-    qtbot.waitUntil(lambda: page.backups.rowCount() > 0, timeout=3000)
+
+    def snapshot():  # 诊断用：超时时把现场打出来
+        worker = getattr(page, "_worker", None)
+        active = []
+        for entry in TaskManager.instance()._active.values():
+            try:
+                alive = entry["worker"].isRunning()
+            except RuntimeError:
+                alive = "C++已销毁"
+            active.append((entry["record"]["title"], entry["record"]["status"], alive))
+        try:
+            from utils.file_ops import OperationJournal
+            from utils.trash import list_quarantine
+
+            journal = (
+                f"quarantine={len(list_quarantine())} "
+                f"all={[(r['kind'], r['state']) for r in OperationJournal().all()]}"
+            )
+        except Exception as exc:
+            journal = f"读取失败:{type(exc).__name__}:{exc}"
+        return (
+            f"rows={page.backups.rowCount()} busy={busy(page)} "
+            f"worker_attr={type(worker).__name__ if worker is not None else None} "
+            f"active={active} trace={trace} renders={renders} {journal} "
+            f"details={page.details.toPlainText()[:200]!r}"
+        )
+
+    try:
+        qtbot.waitUntil(lambda: not busy(page), timeout=3000)
+    except Exception as exc:
+        raise AssertionError(f"页面一直 busy：{snapshot()}") from exc
+    try:
+        qtbot.waitUntil(lambda: page.backups.rowCount() > 0, timeout=3000)
+    except Exception as exc:
+        raise AssertionError(f"备份行数一直为 0：{snapshot()}") from exc
     matching = [
         row
         for row in range(page.backups.rowCount())
