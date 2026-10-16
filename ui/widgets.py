@@ -208,12 +208,14 @@ class DragDropListWidget(QListWidget):
         self.setDragDropMode(QAbstractItemView.DragDrop)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        self._adding_batch = False
         self.model().rowsInserted.connect(self._notify_paths)
         self.model().rowsRemoved.connect(self._notify_paths)
         self.model().modelReset.connect(self._notify_paths)
 
     def _notify_paths(self, *args) -> None:
-        self.paths_changed.emit(self.get_all_paths())
+        if not self._adding_batch:
+            self.paths_changed.emit(self.get_all_paths())
 
     # ── 拖拽 ──
     def startDrag(self, supportedActions):
@@ -282,6 +284,29 @@ class DragDropListWidget(QListWidget):
     def get_all_paths(self) -> list[str]:
         """获取列表中所有项的完整路径。"""
         return [self.item(i).data(Qt.UserRole) for i in range(self.count())]
+
+    def add_items(self, entries) -> None:
+        """Append a batch with one deduplication pass and one queue notification."""
+        existing = set(self.get_all_paths())
+        changed = False
+        updates_enabled = self.updatesEnabled()
+        self._adding_batch = True
+        self.setUpdatesEnabled(False)
+        try:
+            for text, path in entries:
+                if path in existing:
+                    continue
+                existing.add(path)
+                item = QListWidgetItem(text)
+                item.setData(Qt.UserRole, path)
+                item.setToolTip(path)
+                self.addItem(item)
+                changed = True
+        finally:
+            self._adding_batch = False
+            self.setUpdatesEnabled(updates_enabled)
+        if changed:
+            self._notify_paths()
 
 
 # ───────────────── 可拖拽表格（有码检测专用） ─────────────────

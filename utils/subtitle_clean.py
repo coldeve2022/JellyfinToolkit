@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -456,7 +457,49 @@ def clean_file(
     return removed, True
 
 
-def find_subtitles(video_path, formats=("srt",), output_dir: Optional[str] = None) -> list:
+class SubtitleIndex:
+    """One operation's directory snapshots; discard before checking changed files.
+
+    Index dot-delimited stems so language variants need no per-video directory
+    walk or linear search. scandir usually supplies file type without a stat.
+    """
+
+    def __init__(self, should_stop=None):
+        self._folders = {}
+        self._should_stop = should_stop or (lambda: False)
+
+    def matches(self, folder, stem, formats):
+        if self._should_stop():
+            raise InterruptedError("字幕扫描已取消")
+        key = os.path.normcase(os.path.abspath(folder))
+        if key not in self._folders:
+            names = {}
+            try:
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        if self._should_stop():
+                            raise InterruptedError("字幕扫描已取消")
+                        path = Path(entry.path)
+                        ext = path.suffix.lower().lstrip(".")
+                        if not ext:
+                            continue
+                        try:
+                            if not entry.is_file():
+                                continue
+                        except OSError:
+                            continue
+                        name = path.stem
+                        prefixes = [name[:i] for i, char in enumerate(name) if char == "."]
+                        for prefix in [name, *prefixes]:
+                            names.setdefault(prefix, []).append(path)
+            except OSError as exc:
+                if isinstance(exc, InterruptedError):
+                    raise
+            self._folders[key] = names
+        return [p for p in self._folders[key].get(stem, ()) if p.suffix.lower().lstrip(".") in formats]
+
+
+def find_subtitles(video_path, formats=("srt",), output_dir: Optional[str] = None, *, index=None) -> list:
     """找某个视频对应的字幕文件（用于判断"这条到底有没有/生成了没有"）。
 
     匹配**两种命名**，与 :func:`utils.merge_archive.iter_sidecars` 保持同一套规则：
@@ -494,22 +537,10 @@ def find_subtitles(video_path, formats=("srt",), output_dir: Optional[str] = Non
 
         folders.insert(0, Path(str(output_dir)) / source_output_key(video_path))
 
+    index = index if index is not None else SubtitleIndex()
     out, seen = [], set()
     for folder in folders:
-        try:
-            entries = list(folder.iterdir())
-        except OSError:
-            continue  # 目录不存在/无权限：跳过，不中断
-        for f in entries:
-            if not f.is_file():
-                continue
-            if f.suffix.lower().lstrip(".") not in want:
-                continue
-            name = f.stem
-            # 同名，或 `<视频名>.<任意语言/来源标记>` —— 后者是关键，
-            # 别在这里枚举语言代码
-            if name != stem and not name.startswith(stem + "."):
-                continue
+        for f in index.matches(folder, stem, want):
             key = str(f).lower()
             if key not in seen:
                 seen.add(key)

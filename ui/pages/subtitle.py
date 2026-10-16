@@ -32,7 +32,7 @@ from workers.scanner import FileScannerWorker
 
 
 class SubtitlePage(QWidget):
-    """扫描视频目录，检测缺少同名字幕文件的视频。支持断点续传。"""
+    """后台扫描视频目录，检测缺少同名或带语言标记字幕的视频。"""
 
     def __init__(self, cfg: ToolkitConfig, parent=None):
         super().__init__(parent)
@@ -69,7 +69,7 @@ class SubtitlePage(QWidget):
         hint = InfoCard(
             "拖拽视频文件夹到下方列表，点击「开始扫描」查找缺少字幕的视频。\n"
             "支持 .srt / .vtt / .ass 字幕格式，可设置最小文件大小过滤。\n"
-            "扫描状态自动保存，下次扫描自动跳过已检查文件。"
+            "目录和结果自动保存；每次扫描重新核对，识别新增或删除的字幕。"
         )
         layout.addWidget(hint)
 
@@ -134,12 +134,17 @@ class SubtitlePage(QWidget):
 
     def _refresh_missing(self):
         formats = [str(e).lstrip(".") for e in self.cfg.subtitle_extensions]
-        for idx in range(self.result_list.count() - 1, -1, -1):
-            path = self.result_list.item(idx).data(256)
-            if not os.path.exists(path) or subtitle_clean.find_subtitles(
-                path, formats, self.cfg.whisper_output_dir or None
+        index = subtitle_clean.SubtitleIndex()
+        paths = self.result_list.get_all_paths()
+        remaining = []
+        for path in paths:
+            if os.path.exists(path) and not subtitle_clean.find_subtitles(
+                path, formats, self.cfg.whisper_output_dir or None, index=index
             ):
-                self.result_list.takeItem(idx)
+                remaining.append(path)
+        if remaining != paths:
+            self.result_list.clear()
+            self._on_missing_batch(remaining)
 
     def _send_to_generator(self):
         if busy(self):
@@ -189,11 +194,14 @@ class SubtitlePage(QWidget):
         if busy(self):
             return
         dirs = self.dir_list.get_all_paths()
-        self._refresh_missing()
-        self._checked.clear()  # recheck mutable file/config facts; duplicate results remain deduplicated
         if not dirs:
             QMessageBox.warning(self, "提示", "请先添加或拖入视频文件夹！")
             return
+
+        self._checked.clear()
+        self.result_list.clear()
+        self.progress.setValue(0)
+        self.status_label.setText("正在枚举视频文件…")
 
         self.btn_start.setEnabled(False)
         self.btn_pause.setEnabled(True)
@@ -207,10 +215,12 @@ class SubtitlePage(QWidget):
             exts,
             min_bytes,
             checked_files=self._checked,
+            subtitle_formats=self.cfg.subtitle_extensions or [".srt"],
+            subtitle_output_dir=self.cfg.whisper_output_dir or None,
         )
         self._worker.skipped.connect(self._on_skipped)
         self._worker.progress.connect(self._on_progress)
-        self._worker.file_found.connect(self._on_file_found)
+        self._worker.missing_batch.connect(self._on_missing_batch)
         self._worker.finished.connect(self._on_finished)
         start_task(self, self._worker)
 
@@ -240,6 +250,9 @@ class SubtitlePage(QWidget):
         if subtitle_clean.find_subtitles(filepath, formats, self.cfg.whisper_output_dir or None):
             return  # 有字幕，跳过
         self.result_list.add_item(filename, filepath)
+
+    def _on_missing_batch(self, paths):
+        self.result_list.add_items((os.path.basename(path), path) for path in paths)
 
     def _on_finished(self, _files: list, checked: list) -> None:
         self._checked.update(checked)
@@ -299,9 +312,9 @@ class SubtitlePage(QWidget):
                     self._directories.add(d)
                     self.dir_list.add_item(os.path.basename(d) or d, d)
             self._checked = set(state.get("checked_files", []))
-            for fp in state.get("missing", []):
-                if os.path.exists(fp):
-                    self.result_list.add_item(os.path.basename(fp), fp)
+            self.result_list.add_items(
+                (os.path.basename(fp), fp) for fp in state.get("missing", []) if os.path.exists(fp)
+            )
             if self._directories:
                 self.status_label.setText("已恢复上次扫描状态")
         except (OSError, ValueError, KeyError, TypeError):
