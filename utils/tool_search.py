@@ -72,24 +72,27 @@ def exe_in_dir(directory, exe_names: Iterable[str], max_depth: int = 1) -> Optio
         return base
     if not base.is_dir():
         return None
-    names = [n.lower() for n in exe_names]
+    names = {n.lower() for n in exe_names}
 
     def _look(d: Path) -> Optional[Path]:
         try:
-            entries = list(d.iterdir())
+            with os.scandir(d) as entries:
+                for entry in entries:
+                    # Match names first. A media directory may contain tens of
+                    # thousands of videos; none need a separate file stat.
+                    if entry.name.lower() in names and entry.is_file():
+                        return Path(entry.path)
         except OSError:
             return None
-        for entry in entries:
-            if entry.is_file() and entry.name.lower() in names:
-                return entry
         return None
 
     hit = _look(base)
     if hit or max_depth <= 0:
         return hit
     try:
-        children = [c for c in base.iterdir()
-                    if c.is_dir() and c.name.lower() not in SKIP_DIR_NAMES]
+        with os.scandir(base) as entries:
+            children = [Path(entry.path) for entry in entries
+                        if entry.name.lower() not in SKIP_DIR_NAMES and entry.is_dir()]
     except OSError:
         return None
     for child in children:
