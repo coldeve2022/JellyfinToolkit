@@ -7,7 +7,7 @@ import json
 import uuid
 from datetime import datetime
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -276,18 +276,23 @@ class TaskManager(QObject):
         footer = getattr(owner, "_action_footer", None)
         if footer is not None:
             candidates += footer.findChildren(QObject)
+        # Save each widget's LOCAL state before disabling any ancestor.  Using
+        # isEnabled() after disabling a table captures False for its headers,
+        # then permanently disables them when the task restores the controls.
+        # WA_ForceDisabled also distinguishes an explicitly disabled control
+        # from one merely inheriting a disabled page/container.
         for control in candidates:
             if isinstance(control, QPushButton) and not any(
                 token in control.text() for token in ("停止", "暂停", "继续")
             ):
-                buttons[control] = control.isEnabled()
-                control.setEnabled(False)
+                buttons[control] = not control.testAttribute(Qt.WA_ForceDisabled)
             if isinstance(
                 control,
                 (QAbstractItemView, QCheckBox, QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox),
             ):
-                controls[control] = control.isEnabled()
-                control.setEnabled(False)
+                controls[control] = not control.testAttribute(Qt.WA_ForceDisabled)
+        for control in [*buttons, *controls]:
+            control.setEnabled(False)
         # Snapshot mutable configuration and request payloads before running.
         for attr in ("cfg", "_cfg", "source", "labels", "items", "_options"):
             value = getattr(worker, attr, None)

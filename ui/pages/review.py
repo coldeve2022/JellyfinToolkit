@@ -23,26 +23,20 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QLabel,
     QPushButton,
-    QProgressBar,
     QFrame,
     QMessageBox,
-    QGroupBox,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
     QAbstractItemView,
-    QTabWidget,
-    QStackedWidget,
-    QScrollArea,
-    QLineEdit,
-    QComboBox,
-    QListWidget,
+    QProgressBar,
     QListWidgetItem,
 )
 
 from config import DATA_DIR, ToolkitConfig
 from ui import theme
-from ui.widgets import LogPanel, CoverThumb
+from ui.widgets import CoverThumb
+from utils.metadata_labels import normalize_metadata_labels
 from utils import scoring
 from utils.deck_state import DeckState, ORDER_RANDOM, ORDER_SCORE
 from utils.labels import LabelStore
@@ -123,198 +117,12 @@ class ReviewPage(QWidget):
         self.labels = self.store.all()
 
     def _setup_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 20, 20, 20)
-        root.setSpacing(14)
-
-        title = QLabel("快速打标")
-        title.setProperty("cssClass", "page-title")
-        root.addWidget(title)
-
-        hint = QLabel(
-            "在所选媒体库内，按标签和搜索筛选可能喜欢、建议删除及待复核作品；人工反馈会更新当前范围的画像。\n"
-            "快捷键：→ 喜欢/保留　|　← 不喜欢　|　↓ 暂时跳过　|　空格打开文件夹　|　Ctrl+Z 撤销。"
-        )
-        hint.setProperty("cssClass", "subtitle")
-        root.addWidget(hint)
-
-        act = QHBoxLayout()
-        self.btn_analyze = QPushButton("🚀 开始分析")
-        self.btn_analyze.setProperty("cssClass", "accent")
-        self.btn_analyze.clicked.connect(self._start)
-        act.addWidget(self.btn_analyze)
-        self.btn_undo = QPushButton("撤销 (Ctrl+Z)")
-        self.btn_undo.clicked.connect(self._undo)
-        act.addWidget(self.btn_undo)
-        act.addStretch()
-        self.progress = QProgressBar()
-        self.progress.setFixedWidth(260)
-        self.progress.setValue(0)
-        act.addWidget(self.progress)
-        root.addLayout(act)
-
-        # 排序模式 + 跳过(搁置)恢复
-        order_row = QHBoxLayout()
-        self._order_btn = QPushButton()
-        self._order_btn.clicked.connect(self._toggle_order)
-        order_row.addWidget(self._order_btn)
-        self._restore_skipped_btn = QPushButton("♻️ 恢复跳过的")
-        self._restore_skipped_btn.setToolTip("把之前「跳过/搁置」的作品重新纳回队列，可再次浏览。")
-        self._restore_skipped_btn.clicked.connect(self._restore_skipped)
-        order_row.addWidget(self._restore_skipped_btn)
-        order_row.addStretch()
-        self._order_label = QLabel("")
-        self._order_label.setWordWrap(True)
-        self._order_label.setProperty("cssClass", "text-muted")
-        order_row.addWidget(self._order_label)
-        root.addLayout(order_row)
-        self._sync_order_ui()
-
-        self.counts_label = QLabel("")
-        self.counts_label.setWordWrap(True)
-        root.addWidget(self.counts_label)
-
-        filters = QHBoxLayout()
-        self.filter_text = QLineEdit()
-        self.filter_text.setPlaceholderText("搜索名称 / 番号 / 演员 / 标签 / 类型 / 路径 / 理由（空格分词，全匹配）")
-        filters.addWidget(self.filter_text, 1)
-        self.filter_bucket = QComboBox()
-        self.filter_bucket.addItem("全部分类", "")
-        filters.addWidget(self.filter_bucket)
-        self.filter_mode = QComboBox()
-        self.filter_mode.addItems(["标签/类型：全部满足 AND", "标签/类型：任一满足 OR"])
-        filters.addWidget(self.filter_mode)
-        reset = QPushButton("清除筛选")
-        reset.clicked.connect(self._clear_filters)
-        filters.addWidget(reset)
-        root.addLayout(filters)
-        facet_row = QHBoxLayout()
-        self.facet_search = QLineEdit()
-        self.facet_search.setPlaceholderText("查找标签/类型选项…")
-        self.facet_search.setMaximumWidth(210)
-        facet_row.addWidget(self.facet_search)
-        self.filter_facets = QListWidget()
-        self.filter_facets.setMaximumHeight(76)
-        self.filter_facets.setToolTip("可勾选多个。标签来自 Tags；类型来自 Genres；括号为当前分析范围作品数。")
-        facet_row.addWidget(self.filter_facets, 1)
-        root.addLayout(facet_row)
-        self.filter_counts = QLabel("筛选后 / 分类总数：尚未分析")
-        self.filter_counts.setWordWrap(True)
-        root.addWidget(self.filter_counts)
-        self.filter_text.textChanged.connect(self._apply_filters)
-        self.filter_bucket.currentIndexChanged.connect(self._apply_filters)
-        self.filter_mode.currentIndexChanged.connect(self._apply_filters)
-        self.filter_facets.itemChanged.connect(self._facets_changed)
-        self.facet_search.textChanged.connect(self._search_facets)
-
-        # 全局工具栏（AI 复核 + 视图切换；作用于下面的列表 tab）
-        tool2 = QHBoxLayout()
-        self.btn_ai_like = QPushButton("🤖 AI 复核·可能喜欢")
-        self.btn_ai_like.clicked.connect(lambda: self._ai_recheck("like"))
-        self.btn_ai_del = QPushButton("🤖 AI 复核·建议删除")
-        self.btn_ai_del.clicked.connect(lambda: self._ai_recheck("delete"))
-        tool2.addWidget(self.btn_ai_like)
-        tool2.addWidget(self.btn_ai_del)
-        tool2.addStretch()
-        self.btn_view = QPushButton("☷ 卡片视图")
-        self.btn_view.clicked.connect(self._toggle_view)
-        self.btn_ai_review = QPushButton("🤖 AI 批量预判待复核")
-        self.btn_ai_review.setToolTip(
-            "让 AI 分批判断待复核作品 KEEP/DELETE；判 DELETE 的写入删除暂存(需到删除页确认)，大幅减少人工。"
-        )
-        self.btn_ai_review.clicked.connect(self._ai_review_and_mark)
-        tool2.addWidget(self.btn_ai_review)
-        self.btn_ai_score = QPushButton("🧮 AI 语义打分")
-        self.btn_ai_score.setToolTip(
-            "对边界(待复核)作品做 AI 内容相似度打分并存缓存，"
-            "下次重排自动与规则命中度融合(算法一部分)。连不上本地 LLM 时自动退回纯规则。"
-        )
-        self.btn_ai_score.clicked.connect(self._ai_score_all)
-        tool2.addWidget(self.btn_ai_score)
-        ai_tools = QWidget()
-        ai_tools.setLayout(tool2)
-        self.ai_tools_toggle = QPushButton("AI 辅助工具（复核 / 批量预判 / 语义打分） ▸")
-        self.ai_tools_toggle.setCheckable(True)
-        self.ai_tools_toggle.toggled.connect(ai_tools.setVisible)
-        tools_header = QHBoxLayout()
-        tools_header.addWidget(self.ai_tools_toggle)
-        tools_header.addWidget(self.btn_view)
-        tools_header.addStretch()
-        root.addLayout(tools_header)
-        root.addWidget(ai_tools)
-        ai_tools.hide()
-
-        # 主区：单一 tabs 占满（①待复核快判 独立栏目，②③④ 三个列表占满宽度）
-        self.main_tabs = QTabWidget()
-        rev_tab = QWidget()
-        rl = QVBoxLayout(rev_tab)
-        rl.addWidget(
-            QLabel(
-                "待复核 · 卡片快判（右箭头=喜欢/保留，左箭头=不喜欢，↓跳过，空格打开文件，Ctrl+Z 撤销）"
-            )
-        )
-        self.card = QFrame()
-        self.card.setProperty("cssClass", "panel-card")
-        self.card_lay = QVBoxLayout(self.card)
-        self.card_lay.setContentsMargins(18, 18, 18, 18)
-        rl.addWidget(self.card, 1)
-        self.main_tabs.addTab(rev_tab, "① 待复核·快判")
-
-        self.tab_like = self._make_table(["番号", "名称", "命中度", "理由", "标签 / 类型 / 演员"])
-        self.tab_del = self._make_table(["番号", "名称", "命中度", "理由", "标签 / 类型 / 演员"])
-        self.tab_done = self._make_table(["番号", "名称", "打标", "大小"])
-        self._list_stack: dict = {}  # key -> QStackedWidget（0表格 / 1卡片）
-        self._list_cardlay: dict = {}  # key -> 卡片容器 layout
-        for key, table, name in [
-            ("like", self.tab_like, "② 可能喜欢"),
-            ("del", self.tab_del, "③ 建议删除"),
-            ("done", self.tab_done, "④ 已打标"),
-        ]:
-            container = QWidget()
-            cl = QVBoxLayout(container)
-            cl.setContentsMargins(0, 0, 0, 0)
-            stack = QStackedWidget()
-            stack.addWidget(table)
-            card_scroll = QScrollArea()
-            card_scroll.setWidgetResizable(True)
-            card_scroll.setFrameShape(QFrame.NoFrame)
-            cc = QWidget()
-            ccl = QVBoxLayout(cc)
-            ccl.setSpacing(8)
-            card_scroll.setWidget(cc)
-            stack.addWidget(card_scroll)
-            cl.addWidget(stack, 1)
-            self._list_stack[key] = stack
-            self._list_cardlay[key] = ccl
-            self.main_tabs.addTab(container, name)
-        ai_tab = QWidget()
-        ai_layout = QVBoxLayout(ai_tab)
-        ai_layout.addWidget(
-            QLabel("机器建议尚未改变人工标签。核对理由后勾选采纳，之后仍须确认删除计划。")
-        )
-        self.ai_suggestions = self._make_table(["采纳", "作品", "AI建议", "依据", "标签/类型/演员"])
-        ai_layout.addWidget(self.ai_suggestions, 1)
-        adopt = QPushButton("采纳勾选的 AI 建议…")
-        adopt.clicked.connect(self._adopt_ai_suggestions)
-        ai_layout.addWidget(adopt)
-        undo_ai = QPushButton("撤销上次AI采纳")
-        undo_ai.clicked.connect(self._undo_ai_adoption)
-        ai_layout.addWidget(undo_ai)
-        self.main_tabs.addTab(ai_tab, "AI建议·人工采纳")
-        root.addWidget(self.main_tabs, 1)
-
-        g = QGroupBox("日志")
-        gl = QVBoxLayout(g)
-        self.log = LogPanel()
-        self.log.setMaximumHeight(90)
-        gl.addWidget(self.log)
-        root.addWidget(g)
-
-        self._clear_card()
-        self._render_counts(None)
+        from ui.review_workspace import build_review_workspace
+        build_review_workspace(self)
 
     def _make_table(self, headers: list) -> QTableWidget:
-        t = QTableWidget(0, len(headers))
+        from ui.review_workspace import ResultTable
+        t = ResultTable(0, len(headers))
         t.setHorizontalHeaderLabels(headers)
         h = t.horizontalHeader()
         # 全部 Interactive + 固定初始宽：拖任意一列只改该列，不带动其它列。
@@ -368,6 +176,8 @@ class ReviewPage(QWidget):
             label = "标签" if facet[0] == "tag" else "类型"
             cell = QListWidgetItem(f"{label}: {facet[1]} ({count})")
             cell.setData(Qt.UserRole, facet)
+            cell.setData(Qt.UserRole + 10, count)
+            cell.setToolTip(f"{label}: {facet[1]} · {count} 部作品")
             cell.setFlags(cell.flags() | Qt.ItemIsUserCheckable)
             cell.setCheckState(Qt.Checked if facet in self._metadata_facets else Qt.Unchecked)
             self.filter_facets.addItem(cell)
@@ -434,6 +244,7 @@ class ReviewPage(QWidget):
                 match = bool(cell) and self._matches_filters(cell.data(ROLE_ITEM_ID), extra)
                 table.setRowHidden(row, not match)
                 visible += int(match)
+            table.show_empty_state(visible == 0, filtered=table.rowCount() > 0)
             parts.append(f"{title}: {visible} / {table.rowCount()}")
         anchor = self.deck_ids[self.pos] if self.deck_ids and self.pos < len(self.deck_ids) else None
         self._rebuild_deck(anchor)
@@ -441,7 +252,14 @@ class ReviewPage(QWidget):
                            and r.item.id not in self.labels and r.item.id not in self._skipped
                            for r in self.results)
         parts.insert(0, f"待复核: {len(self.deck_ids)} / {review_total}")
-        self.filter_counts.setText("筛选后 / 分类总数 ｜ " + " ｜ ".join(parts))
+        summary = "筛选后 / 分类总数 ｜ " + " ｜ ".join(parts)
+        self.filter_counts.setText(summary)
+        self.filter_counts.setToolTip(summary)
+        self.filter_toggle.setText(f"标签筛选 ({len(self._metadata_facets)})" if self._metadata_facets else "标签筛选")
+        selected_text = "、".join(sorted(value for _, value in self._metadata_facets))
+        self.facet_status.setText(f"已选 {len(self._metadata_facets)} 项 · 再次点击可取消"
+                                  if self._metadata_facets else "点击标签选中，再次点击取消")
+        self.facet_status.setToolTip(selected_text)
         for key, stack in self._list_stack.items():
             if stack.currentIndex() == 1:
                 self._rebuild_cards(key)
@@ -1171,6 +989,10 @@ class ReviewPage(QWidget):
         return detail
 
     def _fill_tables(self) -> None:
+        # Normalize restored snapshots too, before scoring evidence and facets.
+        for it in [*self.items, *(r.item for r in self.results)]:
+            it.tags = normalize_metadata_labels(it.tags)
+            it.genres = normalize_metadata_labels(it.genres)
         self._prepare_evidence()
         self._index_filters()
         self._updating_tables = True
@@ -1483,21 +1305,13 @@ class ReviewPage(QWidget):
                 f"已人工打标: {len(self.labels)} ｜ 待复核: {len(self.deck_ids)}"
                 f" ｜ 跳过(搁置): {len(self._skipped)}"
             )
+            self.counts_label.setToolTip(self.counts_label.text())
             return
-        success = theme.color("success")
-        warning = theme.color("warning")
-        danger = theme.color("danger")
-        accent = theme.color("accent")
-        s = (
-            f"<b>已保留(看过/收藏):</b> <span style='color:{success}'> {counts.get('keep', 0)}</span>"
-            f"　<b>可能喜欢(未看):</b> <span style='color:{success}'> {counts.get('like', 0)}</span>"
-            f"　<b>建议删除:</b> <span style='color:{danger}'> {counts.get('delete', 0)}</span>"
-            f"　<b>待复核:</b> <span style='color:{warning}'> {counts.get('review', 0)}</span>"
-            f"　<b>已人工打标:</b> <span style='color:{accent}'> {len(self.labels)}</span>"
-            f"　<b>卡片队列:</b> {len(self.deck_ids)}"
-            f"　<b>跳过(搁置):</b> {len(self._skipped)}"
-        )
-        self.counts_label.setText(s)
+        text = (f"已保留 {counts.get('keep', 0)}　可能喜欢 {counts.get('like', 0)}"
+                f"　建议删除 {counts.get('delete', 0)}　待复核 {counts.get('review', 0)}"
+                f"　人工打标 {len(self.labels)}　跳过 {len(self._skipped)}")
+        self.counts_label.setText(text)
+        self.counts_label.setToolTip(text)
 
     def apply_theme(self) -> None:
         """主题切换后重渲染动态色部分。"""
@@ -1508,7 +1322,7 @@ class ReviewPage(QWidget):
     # ── 键盘 ──
     def keyPressEvent(self, event):
         if self.focusWidget() in (self.filter_text, self.facet_search, self.filter_bucket,
-                                  self.filter_mode, self.filter_facets, self.tab_like,
+                                  self.filter_mode, self.facet_selection, self.filter_facets, self.tab_like,
                                   self.tab_del, self.tab_done, self.ai_suggestions):
             super().keyPressEvent(event)
             return

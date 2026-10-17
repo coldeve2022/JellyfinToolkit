@@ -311,7 +311,7 @@ class MainWindow(QMainWindow):
             )
 
     def register_page(self, page: QWidget) -> None:
-        """向堆叠组件注册功能页面（自动套一层滚动区）。
+        """注册页面；快速打标使用内部滚动工作区，其余表单套外层滚动区。
 
         为什么要滚动区：默认窗口只有 1100x720，左边栏固定占掉约 200px，
         内容区实际不到 900px。密集的参数行（一行 4~6 个控件）在这个宽度下
@@ -319,24 +319,29 @@ class MainWindow(QMainWindow):
         控件互相叠压。套上滚动区之后，内容按自己的最小宽度排版，
         窗口不够宽就出现滚动条，控件不再被挤压。
 
-        注意 ``stack`` 里放的是滚动区而不是页面本身，所以另外用 ``_pages``
+        快速打标的结果表/标签/卡片自行滚动，不能再套外层滚动或搬走工具栏。
+        注意 ``stack`` 里放的是容器而不是页面本身，所以另外用 ``_pages``
         记住真实页面 —— ``closeEvent`` 要按页面调 ``shutdown()``。
         """
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setWidget(page)
+        workspace = type(page).__module__ == "ui.pages.review"
+        scroll = None
+        if not workspace:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            scroll.setWidget(page)
         self._pages.append(page)
         if hasattr(page, "cfg"):
             page._state_context = state_context(page.cfg)
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(scroll, 1)
-        compact_forms(page)
-        collapse_advanced(page)
-        dock_actions(page, layout)
+        layout.addWidget(page if workspace else scroll, 1)
+        if not workspace:
+            compact_forms(page)
+            collapse_advanced(page)
+            dock_actions(page, layout)
         self.stack.addWidget(container)
         self._update_scope_pages()
 

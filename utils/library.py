@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from utils.nfo_source import read_nfo_features, read_nfo_title
+from utils.metadata_labels import normalize_metadata_labels
 
 
 class LibraryCollectionCancelled(Exception):
@@ -636,8 +637,8 @@ def build_item(
     """
     path = path or ""
     name = name or ""
-    genres_list = _as_list(genres)
-    tags_list = _as_list(tags)
+    genres_list = normalize_metadata_labels(genres)
+    tags_list = normalize_metadata_labels(tags)
     studios_list = _as_list(studios)
 
     filename = split_path_name(path)
@@ -658,7 +659,7 @@ def build_item(
         # 库里没有任何标签时，用视频旁刮削 .nfo 兜底（防同步缺失导致"无特征"）
         n_tags, _n_genres, n_studios = read_nfo_features(path)
         if n_tags:
-            tags_list = n_tags
+            tags_list = normalize_metadata_labels(n_tags)
         if n_studios and not studios_list:
             studios_list = n_studios
 
@@ -969,8 +970,8 @@ def _collect_legacy(
                                is_virtual=virtual, is_deleted=deleted, location_type=location):
             continue
 
-        genres_list = _as_list(_json_field(payload, "Genres"))
-        tags_list = _as_list(_json_field(payload, "Tags"))
+        genres_list = normalize_metadata_labels(_json_field(payload, "Genres"))
+        tags_list = normalize_metadata_labels(_json_field(payload, "Tags"))
         studios_list = _as_list(_json_field(payload, "Studios"))
         year = _json_field(payload, "ProductionYear")
         try:
