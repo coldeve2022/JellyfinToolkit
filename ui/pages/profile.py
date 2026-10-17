@@ -34,7 +34,8 @@ from PySide6.QtWidgets import (
 
 from config import DATA_DIR, ToolkitConfig
 from ui import theme
-from ui.widgets import LogPanel, HBarChart
+from ui.widgets import LogPanel, HBarChart, make_number_item
+from ui.table_tools import TableSearch
 from utils import profile as profile_mod
 from ui.services import analysis_worker, accept_snapshot
 from workers.scorer import AnalyzeWorker
@@ -195,6 +196,8 @@ class ProfilePage(QWidget):
         self.ai_report.setReadOnly(True)
         tabs.addTab(self.ai_report, "AI 深度分析报告")
         tabs.setDocumentMode(True)
+        self.table_search = TableSearch([self.tab_tags, self.tab_years, self.tab_neg])
+        root.addWidget(self.table_search)
         root.addWidget(tabs, 1)
 
         g = QGroupBox("日志")
@@ -228,7 +231,8 @@ class ProfilePage(QWidget):
         h = t.horizontalHeader()
         # 全 Interactive + 固定初始宽：拖任意列只改该列，不带动其它列（去掉 Stretch 联动）
         h.setSectionResizeMode(QHeaderView.Interactive)
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 名称/键列自适应
+        h.setSectionsMovable(True)
+        h.setSortIndicatorShown(True)
         h.setDefaultSectionSize(120)
         h.setMinimumSectionSize(70)
         h.setStretchLastSection(False)
@@ -469,9 +473,15 @@ class ProfilePage(QWidget):
                 r = table.rowCount()
                 table.insertRow(r)
                 for c in range(header_n):
-                    v = str(row[c]) if c < len(row) else ""
-                    table.setItem(r, c, QTableWidgetItem(v if v else "—"))  # 缺失显示占位，不空白
+                    raw = row[c] if c < len(row) else ""
+                    v = str(raw)
+                    try:
+                        item = make_number_item(v, float(raw))
+                    except (ValueError, TypeError):
+                        item = QTableWidgetItem(v if v else "—")
+                    table.setItem(r, c, item)
             table.setSortingEnabled(True)
+            self.table_search.apply()
 
         fill_table(
             self.tab_tags,
@@ -582,6 +592,10 @@ class ProfilePage(QWidget):
     def on_context_changed(self):
         self.profile = {}
         self._fingerprint = ""
+        self.ai_report.clear()
+        self.table_search.input.clear()
+        if hasattr(self, "count_explanation"):
+            self.count_explanation.setText("分析范围已变化，请重新生成当前范围的画像。")
         self._empty()
         self.btn_ai.setEnabled(False)
         self.btn_ai_taste.setEnabled(False)

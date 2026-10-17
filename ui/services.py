@@ -44,6 +44,8 @@ def _snapshot_key(cfg):
             "jellyfin_user_id",
             "jellyfin_db_path",
             "library_path_mappings",
+            "library_scope_ids",
+            "library_scope_paths",
             "exclude_path_keywords",
             "jellyfin_api_key",
             "ai_base_url",
@@ -71,7 +73,7 @@ def accept_snapshot(owner, data):
     if getattr(owner, "_snapshot_request_key", _snapshot_key(owner.cfg)) != _snapshot_key(
         owner.cfg
     ):
-        data["error"] = "任务期间媒体库或观看用户发生变化，旧结果已丢弃，请重新扫描。"
+        data["error"] = "任务期间媒体库、分析范围或观看用户发生变化，旧结果已丢弃，请重新扫描。"
         return False
     from utils.state_context import bind_resolved_context
     from utils.labels import LabelStore
@@ -579,7 +581,7 @@ def refresh_configuration(page):
         if hasattr(page, "on_context_changed"):
             page.on_context_changed()
         if hasattr(page, "_clear_card"):
-            page._clear_card("连接或观看用户已变更，请重新分析。")
+            page._clear_card("媒体库、分析范围或观看用户已变更，请重新分析。")
         if hasattr(page, "_render_table"):
             page._render_table()
         if hasattr(page, "_render_tree"):

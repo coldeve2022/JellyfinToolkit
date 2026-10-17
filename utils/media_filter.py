@@ -148,7 +148,8 @@ def filter_media(items, *, log=None, should_stop=None, check_local_missing=True,
     result = selector.collection(kept)
     if log:
         removed = result.collection_stats["raw_video_entries"] - len(result)
-        log(f"正片采集：原始视频记录 {result.collection_stats['raw_video_entries']} 条，排除附属/虚拟/已删除等 {removed} 条，保留 {len(result)} 条库记录")
+        scoped = result.collection_stats.get("excluded_scope", 0)
+        log(f"正片采集：原始视频记录 {result.collection_stats['raw_video_entries']} 条，分析范围外 {scoped} 条，排除附属/虚拟/已删除等 {max(0, removed - scoped)} 条，保留 {len(result)} 条库记录")
     return result
 
 

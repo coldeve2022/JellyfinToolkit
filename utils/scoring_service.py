@@ -17,6 +17,8 @@ def score_snapshot(items, cfg, labels=None, *, th_keep=None, th_delete=None):
     from config import DATA_DIR
     from utils import scoring, scoring_v2
     from utils.media_filter import filter_media
+    from utils.library_scope import apply_scope
+    items = apply_scope(items, cfg)
     items = filter_media(items, check_local_missing=False)
     configured_context = state_context(cfg)
     context = state_context(cfg, items)
@@ -45,7 +47,7 @@ def score_snapshot(items, cfg, labels=None, *, th_keep=None, th_delete=None):
     if engine is scoring_v2:
         kwargs["ai_scores"] = semantic
     results = engine.rank_items(items, labels, **kwargs)
-    legacy_protection = legacy_protection_labels(DATA_DIR / "smart.db", items, labels)
+    legacy_protection = legacy_protection_labels(DATA_DIR / "smart.db", items, labels, cfg=cfg)
     for result in results:
         if result.item.id in legacy_protection and result.decision == scoring.DEC_DELETE:
             result.decision = scoring.DEC_KEEP

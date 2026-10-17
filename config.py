@@ -44,6 +44,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "jellyfin_data_dir": "",
     "jellyfin_user_id": "",
     "library_path_mappings": [],
+    "library_scope_ids": [],
+    "library_scope_paths": [],
+    "library_scope_confirmed": False,
+    "library_scope_catalog": [],
+    "library_scope_source": "",
     "uncensored_keywords": [
         "fc2", "1pondo", "carib", "10mu", "pacopaco", "heydouga",
         "tokyo hot", "tokyohot", "heyzo", "muramura", "luxu", "gachinco",
@@ -265,6 +270,8 @@ def _coerce_config(data: dict) -> dict:
             continue
         if key == "whisper_merge_segments":
             out[key] = value if isinstance(value, bool) else None
+        elif key == "library_scope_catalog":
+            out[key] = [entry for entry in value if isinstance(entry, dict) and isinstance(entry.get("id"), str) and isinstance(entry.get("name"), str) and isinstance(entry.get("paths"), list)] if isinstance(value, list) else []
         elif key == "library_path_mappings":
             out[key] = [
                 {"remote": str(entry["remote"]).strip(), "local": str(entry["local"]).strip()}
@@ -347,6 +354,11 @@ class ToolkitConfig:
     jellyfin_data_dir: str = DEFAULT_CONFIG["jellyfin_data_dir"]
     jellyfin_user_id: str = DEFAULT_CONFIG["jellyfin_user_id"]
     library_path_mappings: List[dict] = field(default_factory=list)
+    library_scope_ids: List[str] = field(default_factory=list)
+    library_scope_paths: List[str] = field(default_factory=list)
+    library_scope_confirmed: bool = False
+    library_scope_catalog: List[dict] = field(default_factory=list)
+    library_scope_source: str = ""
     uncensored_keywords: List[str] = field(default_factory=lambda: list(DEFAULT_CONFIG["uncensored_keywords"]))
     subtitle_extensions: List[str] = field(default_factory=lambda: list(DEFAULT_CONFIG["subtitle_extensions"]))
     video_extensions: List[str] = field(default_factory=lambda: list(DEFAULT_CONFIG["video_extensions"]))

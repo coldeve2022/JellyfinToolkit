@@ -53,6 +53,26 @@ def _req(method: str, url: str, api_key: str, timeout: int = 30):
         raise LibraryApiError(str(e)[:140]) from e
 
 
+def list_virtual_folders(server, api_key, should_stop=None):
+    """Read authoritative Jellyfin/Emby virtual libraries, GET only."""
+    from utils.library_scope import _paths
+    _check_cancel(should_stop)
+    _code, data = _req('GET', normalize_server_url(server) + '/Library/VirtualFolders', api_key, timeout=30)
+    _check_cancel(should_stop)
+    if not isinstance(data, list):
+        raise LibraryApiError('服务器未返回有效媒体库列表')
+    result = []
+    for row in data:
+        _check_cancel(should_stop)
+        if not isinstance(row, dict):
+            continue
+        roots = _paths(row.get('Locations')) or _paths((row.get('LibraryOptions') or {}).get('PathInfos'))
+        native = str(row.get('ItemId') or row.get('Id') or '')
+        if roots and native:
+            result.append({'id': native, 'name': str(row.get('Name') or native), 'paths': roots})
+    return result
+
+
 def list_users(server: str, api_key: str) -> list[dict]:
     """Read selectable watching accounts. No credentials in returned data."""
     _code, data = _req("GET", f"{normalize_server_url(server)}/Users", api_key, timeout=15)

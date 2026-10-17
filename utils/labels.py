@@ -13,12 +13,25 @@ from utils.scoring import LABEL_DELETE, LABEL_DISLIKE, LABEL_LIKE, LABLE_KEEP, L
 ALL_LABELS = (LABLE_KEEP, LABEL_LIKE, LABEL_DISLIKE, LABEL_DELETE, LABEL_REVIEW)
 
 
-def legacy_protection_labels(path, items, labels=None):
+def _legacy_feedback(path, cfg=None, items=None):
+    """Keep old feedback readable without importing it into the active namespace."""
+    legacy = LabelStore(path).all()
+    if cfg is not None:
+        from utils.state_context import source_viewer_context, state_context
+        previous_context = source_viewer_context(cfg, items)
+        if previous_context != state_context(cfg, items):
+            # Confirmed source/viewer feedback takes precedence over the oldest raw table.
+            legacy.update(LabelStore(path, context=previous_context).all())
+    return legacy
+
+
+def legacy_protection_labels(path, items, labels=None, cfg=None):
     """Unconfirmed old positive feedback protects entities but never teaches a new viewer."""
     from utils.scoring import POSITIVE_LABELS, entity_key
     labels = labels or {}
-    legacy = LabelStore(path).all()
-    protected = {entity_key(it.path) for it in items if legacy.get(it.id) in POSITIVE_LABELS}
+    legacy = _legacy_feedback(path, cfg, items)
+    protected = {entity_key(it.path) for it in items
+                 if legacy.get(it.id) in POSITIVE_LABELS and entity_key(it.path)}
     return {it.id: LABLE_KEEP for it in items
             if it.id not in labels and (legacy.get(it.id) in POSITIVE_LABELS
                                       or entity_key(it.path) in protected)}
@@ -38,7 +51,8 @@ def _migration_context(cfg, items):
 def preview_legacy_labels(path, cfg, items):
     """Review only old records matching a confirmed current snapshot, without copying them."""
     context = _migration_context(cfg, items)
-    current, legacy = LabelStore(path, context=context).all(), LabelStore(path).all()
+    current = LabelStore(path, context=context).all()
+    legacy = _legacy_feedback(path, cfg, items)
     seen, preview = set(), []
     for it in items:
         if it.id not in current and it.id in legacy and it.id not in seen:

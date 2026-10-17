@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from config import DATA_DIR, ToolkitConfig
 from ui import theme
 from ui.widgets import LogPanel, DragDropListWidget, CoverThumbDelegate
+from ui.table_tools import TableSearch, PathNumberItem
 from utils import scoring
 from utils.labels import LabelStore
 from utils.trash import DeleteJournal
@@ -95,7 +96,7 @@ class DeletePage(QWidget):
         self.btn_del_sel = QPushButton("🗑️ 归档当前列表选中项")
         self.btn_del_sel.clicked.connect(lambda: self._trash(selected_only=True))
         act.addWidget(self.btn_del_sel)
-        self.btn_del_all = QPushButton("🗑️ 归档当前列表全部项")
+        self.btn_del_all = QPushButton("🗑️ 归档当前筛选可见项")
         self.btn_del_all.clicked.connect(lambda: self._trash(selected_only=False))
         act.addWidget(self.btn_del_all)
         self.btn_sel_all = QPushButton("✅ 全选")
@@ -128,7 +129,7 @@ class DeletePage(QWidget):
         # 全 Interactive + 固定初始宽：拖任意列只改该列（去掉 Stretch 联动）
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(QHeaderView.Interactive)
-        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        h.setSectionsMovable(True)
         h.setDefaultSectionSize(120)
         h.setMinimumSectionSize(70)
         h.setStretchLastSection(False)
@@ -141,6 +142,8 @@ class DeletePage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setSortingEnabled(True)
         self.table.setItemDelegateForColumn(0, CoverThumbDelegate(self.table))
+        self.table_search = TableSearch([self.table])
+        root.addWidget(self.table_search)
         tabs.addTab(self.table, "建议删除清单")
 
         # 手动添加
@@ -320,6 +323,8 @@ class DeletePage(QWidget):
             targets = [(path, None) for path in paths]
         elif selected_only:
             for row in {item.row() for item in self.table.selectedItems()}:
+                if self.table.isRowHidden(row):
+                    continue
                 item = self.table.item(row, 0)
                 path = item.data(Qt.UserRole) if item else None
                 if path:
@@ -330,6 +335,11 @@ class DeletePage(QWidget):
                     targets.append((path, size))
         else:
             targets = [(entry["path"], entry["size"]) for entry in self._delete_rows]
+            if self.table_search.input.text().strip():
+                visible = {self.table.item(row, 0).data(Qt.UserRole)
+                           for row in range(self.table.rowCount())
+                           if not self.table.isRowHidden(row) and self.table.item(row, 0)}
+                targets = [(path, size) for path, size in targets if path in visible]
         protected = {
             row["path"]
             for row in self._delete_rows
@@ -512,11 +522,19 @@ class DeletePage(QWidget):
             self.table.setItem(r, 0, cover_it)
             vals = [d["num"], d["name"], d["hit"], d["reason"], _size_str(d["size"])]
             for c, v in enumerate(vals, start=1):
-                it = QTableWidgetItem(str(v))
-                it.setData(Qt.UserRole, d["path"])
+                if c in (3, 5):
+                    try:
+                        number = float(str(d["hit"]).rstrip("%")) if c == 3 else d["size"]
+                    except (ValueError, TypeError):
+                        number = 0
+                    it = PathNumberItem(v, number, d["path"])
+                else:
+                    it = QTableWidgetItem(str(v))
+                    it.setData(Qt.UserRole, d["path"])
                 it.setToolTip(d["path"])
                 self.table.setItem(r, c, it)
         self.table.setSortingEnabled(True)
+        self.table_search.apply()
         total = sum(d["size"] or 0 for d in self._delete_rows)
         self.summary.setText(
             f"建议删除 {len(self._delete_rows)} 条（约 {_size_str(total)}）"
@@ -535,3 +553,10 @@ class DeletePage(QWidget):
 
     def shutdown(self) -> None:
         stop_page(self)
+
+    def on_context_changed(self):
+        self._ai_keep_nums = set()
+        self._ai_override_paths = set()
+        self._manual_paths.clear()
+        self.manual_list.clear()
+        self._render_table()

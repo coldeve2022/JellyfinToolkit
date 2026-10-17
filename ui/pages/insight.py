@@ -32,6 +32,7 @@ from ui.widgets import (
     VBarChart,
 )
 from workers.ingest import IngestWorker
+from ui.table_tools import TableSearch
 from ui.services import accept_snapshot
 
 BUCKET_LABEL = {
@@ -73,7 +74,7 @@ class InsightPage(QWidget):
         hint = QLabel(
             "只读读取媒体库（Jellyfin / Emby 均可），统计主视频条目、行为信号与分布。\n"
             "数据来源在设置页选择：库文件直读，或走服务器 API。\n"
-            "如需排除某些目录（例如动漫库），可在设置页的「清理排除目录关键词」里填写。"
+            "分析范围由窗口顶部的「选择媒体库 / 目录」统一指定，电影与动漫可分别分析。"
             "本页不会修改任何数据。"
         )
         hint.setProperty("cssClass", "subtitle")
@@ -147,7 +148,7 @@ class InsightPage(QWidget):
         # 全 Interactive + 固定初始宽：拖任意列只改该列（去掉 Stretch 联动）
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(QHeaderView.Interactive)
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        h.setSectionsMovable(True)
         h.setSectionResizeMode(1, QHeaderView.Interactive)
         h.setDefaultSectionSize(120)
         h.setMinimumSectionSize(70)
@@ -157,6 +158,8 @@ class InsightPage(QWidget):
         self.table.setEditTriggers(self.table.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(self.table.SelectionBehavior.SelectRows)
         self.table.setSortingEnabled(True)
+        self.table_search = TableSearch([self.table])
+        dg.addWidget(self.table_search)
         self.table.setItemDelegateForColumn(3, TableBarDelegate(self.table))
         dg.addWidget(self.table)
         layout.addWidget(dist_group)
@@ -282,8 +285,10 @@ class InsightPage(QWidget):
         files = s.get("file_count", entries)
         works = s.get("work_count", files)
         filtered = s.get("filtered_out", 0)
+        outside = s.get("collection_stats", {}).get("excluded_scope", 0)
         self.count_explanation.setText(
-            f"库条目 {entries} · 唯一视频路径 {files} · 作品分组 {works} · 已排除附属等条目 {filtered}。\n"
+            f"库条目 {entries} · 唯一视频路径 {files} · 作品分组 {works}"
+            f" · 分析范围外 {outside} · 已排除附属等条目 {max(0, filtered - outside)}。\n"
             "同一文件的多个库记录不等于多部电影；分卷、不同版本可属于同一作品分组，"
             "无法识别作品关系的文件独立计组。路径去重不等于磁盘文件盘点；收藏、观看及下方分布按主视频条目统计。"
         )
@@ -340,6 +345,8 @@ class InsightPage(QWidget):
 
     def _apply_filter(self, _=None) -> None:
         f = self.filter_combo.currentText()
+        header = self.table.horizontalHeader()
+        column, order = header.sortIndicatorSection(), header.sortIndicatorOrder()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         maxn = (
@@ -361,7 +368,9 @@ class InsightPage(QWidget):
             for col, it in ((0, ci), (1, t1), (2, ni), (3, pi)):
                 self.table.setItem(r, col, it)
         self.table.setSortingEnabled(True)
-        self.table.sortItems(2, Qt.DescendingOrder)
+        if column >= 0:
+            self.table.sortItems(column, order)
+        self.table_search.apply()
 
     def shutdown(self) -> None:
         stop_page(self)
@@ -371,3 +380,7 @@ class InsightPage(QWidget):
         self._all_rows = []
         self.table.setRowCount(0)
         self._clear_metrics()
+        self.count_explanation.setText("分析范围已变化，请重新扫描；旧统计不用于当前范围。")
+        self.donut.set_data([])
+        self.year_bar.set_data([])
+        self.table_search.input.clear()

@@ -34,6 +34,10 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QStackedWidget,
     QScrollArea,
+    QLineEdit,
+    QComboBox,
+    QListWidget,
+    QListWidgetItem,
 )
 
 from config import DATA_DIR, ToolkitConfig
@@ -71,6 +75,7 @@ class NumItem(QTableWidgetItem):
 
 _NUM_RE = _re_num.compile(r"^[-\d.]+(?:\s*(?:%|MB|GB|TB))?$")
 ROLE_PATH = Qt.UserRole + 1  # 文件路径专用角色（UserRole 留给数值排序）
+ROLE_ITEM_ID = Qt.UserRole + 2  # 身份与路径/排序值分离，重复路径也能安全操作
 
 
 class ReviewPage(QWidget):
@@ -106,6 +111,8 @@ class ReviewPage(QWidget):
         self._ai_review_marks: list = []
         self._ai_review_idx = 0
         self._ai_suggestions = {}
+        self._metadata_facets = set()
+        self._filter_index = {}
 
         self._setup_ui()
         self.setFocusPolicy(Qt.StrongFocus)
@@ -125,11 +132,8 @@ class ReviewPage(QWidget):
         root.addWidget(title)
 
         hint = QLabel(
-            "系统已对未看作品自动分层：可能喜欢 / 建议删除 / 待复核。\n"
-            "下方卡片只处理「待复核」（边界与信息不足的）。\n"
-            "鼠标操作：点赞(=喜欢/保留)　|　点踩(=不喜欢/建议删)　|　跳过=暂时搁置(下次不再重复出现)\n"
-            "键盘：→ 喜欢/保留　|　← 不喜欢(建议删)　|　↓ 跳过待定 |　空格=打开文件夹 |　Ctrl+Z 撤销。"
-            "每判一条全库自动重排。"
+            "在所选媒体库内，按标签和搜索筛选可能喜欢、建议删除及待复核作品；人工反馈会更新当前范围的画像。\n"
+            "快捷键：→ 喜欢/保留　|　← 不喜欢　|　↓ 暂时跳过　|　空格打开文件夹　|　Ctrl+Z 撤销。"
         )
         hint.setProperty("cssClass", "subtitle")
         root.addWidget(hint)
@@ -170,6 +174,39 @@ class ReviewPage(QWidget):
         self.counts_label.setWordWrap(True)
         root.addWidget(self.counts_label)
 
+        filters = QHBoxLayout()
+        self.filter_text = QLineEdit()
+        self.filter_text.setPlaceholderText("搜索名称 / 番号 / 演员 / 标签 / 类型 / 路径 / 理由（空格分词，全匹配）")
+        filters.addWidget(self.filter_text, 1)
+        self.filter_bucket = QComboBox()
+        self.filter_bucket.addItem("全部分类", "")
+        filters.addWidget(self.filter_bucket)
+        self.filter_mode = QComboBox()
+        self.filter_mode.addItems(["标签/类型：全部满足 AND", "标签/类型：任一满足 OR"])
+        filters.addWidget(self.filter_mode)
+        reset = QPushButton("清除筛选")
+        reset.clicked.connect(self._clear_filters)
+        filters.addWidget(reset)
+        root.addLayout(filters)
+        facet_row = QHBoxLayout()
+        self.facet_search = QLineEdit()
+        self.facet_search.setPlaceholderText("查找标签/类型选项…")
+        self.facet_search.setMaximumWidth(210)
+        facet_row.addWidget(self.facet_search)
+        self.filter_facets = QListWidget()
+        self.filter_facets.setMaximumHeight(76)
+        self.filter_facets.setToolTip("可勾选多个。标签来自 Tags；类型来自 Genres；括号为当前分析范围作品数。")
+        facet_row.addWidget(self.filter_facets, 1)
+        root.addLayout(facet_row)
+        self.filter_counts = QLabel("筛选后 / 分类总数：尚未分析")
+        self.filter_counts.setWordWrap(True)
+        root.addWidget(self.filter_counts)
+        self.filter_text.textChanged.connect(self._apply_filters)
+        self.filter_bucket.currentIndexChanged.connect(self._apply_filters)
+        self.filter_mode.currentIndexChanged.connect(self._apply_filters)
+        self.filter_facets.itemChanged.connect(self._facets_changed)
+        self.facet_search.textChanged.connect(self._search_facets)
+
         # 全局工具栏（AI 复核 + 视图切换；作用于下面的列表 tab）
         tool2 = QHBoxLayout()
         self.btn_ai_like = QPushButton("🤖 AI 复核·可能喜欢")
@@ -181,7 +218,6 @@ class ReviewPage(QWidget):
         tool2.addStretch()
         self.btn_view = QPushButton("☷ 卡片视图")
         self.btn_view.clicked.connect(self._toggle_view)
-        tool2.addWidget(self.btn_view)
         self.btn_ai_review = QPushButton("🤖 AI 批量预判待复核")
         self.btn_ai_review.setToolTip(
             "让 AI 分批判断待复核作品 KEEP/DELETE；判 DELETE 的写入删除暂存(需到删除页确认)，大幅减少人工。"
@@ -195,7 +231,18 @@ class ReviewPage(QWidget):
         )
         self.btn_ai_score.clicked.connect(self._ai_score_all)
         tool2.addWidget(self.btn_ai_score)
-        root.addLayout(tool2)
+        ai_tools = QWidget()
+        ai_tools.setLayout(tool2)
+        self.ai_tools_toggle = QPushButton("AI 辅助工具（复核 / 批量预判 / 语义打分） ▸")
+        self.ai_tools_toggle.setCheckable(True)
+        self.ai_tools_toggle.toggled.connect(ai_tools.setVisible)
+        tools_header = QHBoxLayout()
+        tools_header.addWidget(self.ai_tools_toggle)
+        tools_header.addWidget(self.btn_view)
+        tools_header.addStretch()
+        root.addLayout(tools_header)
+        root.addWidget(ai_tools)
+        ai_tools.hide()
 
         # 主区：单一 tabs 占满（①待复核快判 独立栏目，②③④ 三个列表占满宽度）
         self.main_tabs = QTabWidget()
@@ -213,8 +260,8 @@ class ReviewPage(QWidget):
         rl.addWidget(self.card, 1)
         self.main_tabs.addTab(rev_tab, "① 待复核·快判")
 
-        self.tab_like = self._make_table(["番号", "名称", "命中度", "理由", "标签/演员"])
-        self.tab_del = self._make_table(["番号", "名称", "命中度", "理由", "标签/演员"])
+        self.tab_like = self._make_table(["番号", "名称", "命中度", "理由", "标签 / 类型 / 演员"])
+        self.tab_del = self._make_table(["番号", "名称", "命中度", "理由", "标签 / 类型 / 演员"])
         self.tab_done = self._make_table(["番号", "名称", "打标", "大小"])
         self._list_stack: dict = {}  # key -> QStackedWidget（0表格 / 1卡片）
         self._list_cardlay: dict = {}  # key -> 卡片容器 layout
@@ -245,9 +292,7 @@ class ReviewPage(QWidget):
         ai_layout.addWidget(
             QLabel("机器建议尚未改变人工标签。核对理由后勾选采纳，之后仍须确认删除计划。")
         )
-        self.ai_suggestions = QTableWidget(0, 4)
-        self.ai_suggestions.setHorizontalHeaderLabels(["采纳", "作品", "AI建议", "依据"])
-        self.ai_suggestions.horizontalHeader().setStretchLastSection(True)
+        self.ai_suggestions = self._make_table(["采纳", "作品", "AI建议", "依据", "标签/类型/演员"])
         ai_layout.addWidget(self.ai_suggestions, 1)
         adopt = QPushButton("采纳勾选的 AI 建议…")
         adopt.clicked.connect(self._adopt_ai_suggestions)
@@ -275,19 +320,137 @@ class ReviewPage(QWidget):
         # 全部 Interactive + 固定初始宽：拖任意一列只改该列，不带动其它列。
         # 不用 Stretch/stretchLastSection（伸缩列会导致"调一列其余跟着动"）。
         h.setSectionResizeMode(QHeaderView.Interactive)
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 番号
+        h.setSectionsMovable(True)
         h.setDefaultSectionSize(130)
         h.setMinimumSectionSize(80)
         h.setStretchLastSection(False)
         if t.columnCount() > 1:
-            t.setColumnWidth(1, 420)  # 名称列给较宽初始（可再手动拖）
+            t.setColumnWidth(1, 300)
+        if t.columnCount() == 5:
+            for column, width in enumerate((130, 300, 100, 330, 240)):
+                t.setColumnWidth(column, width)
         t.verticalHeader().setVisible(False)
         t.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
         t.setSelectionBehavior(QAbstractItemView.SelectRows)
         t.setSortingEnabled(True)
+        t.model().layoutChanged.connect(self._apply_filters)
         t.itemDoubleClicked.connect(self._open_row_file)
         return t
+
+    def _index_filters(self):
+        """Cache searchable metadata once per snapshot, never per keystroke."""
+        from collections import Counter
+
+        reasons = {r.item.id: str(getattr(r, "reason", "") or "") for r in self.results}
+        counts = Counter()
+        self._filter_index = {}
+        for it in self.items:
+            facets = {(kind, str(value)) for kind, values in
+                      (("tag", it.tags), ("genre", it.genres)) for value in values if str(value).strip()}
+            counts.update(facets)
+            text = " ".join(str(v) for v in
+                            [it.id, it.name, it.num or "", it.path, it.bucket, it.year or "",
+                             *it.tags, *it.genres, *it.actors, *it.studios, reasons.get(it.id, "")])
+            self._filter_index[it.id] = (text.casefold(), it.bucket, facets)
+        previous = self.filter_bucket.currentData()
+        self.filter_bucket.blockSignals(True)
+        self.filter_bucket.clear()
+        self.filter_bucket.addItem("全部分类", "")
+        for bucket in sorted({it.bucket for it in self.items}):
+            self.filter_bucket.addItem(bucket, bucket)
+        self.filter_bucket.setCurrentIndex(max(0, self.filter_bucket.findData(previous)))
+        self.filter_bucket.blockSignals(False)
+        self.filter_facets.blockSignals(True)
+        self.filter_facets.clear()
+        self._metadata_facets.intersection_update(counts)
+        for facet, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            label = "标签" if facet[0] == "tag" else "类型"
+            cell = QListWidgetItem(f"{label}: {facet[1]} ({count})")
+            cell.setData(Qt.UserRole, facet)
+            cell.setFlags(cell.flags() | Qt.ItemIsUserCheckable)
+            cell.setCheckState(Qt.Checked if facet in self._metadata_facets else Qt.Unchecked)
+            self.filter_facets.addItem(cell)
+        self.filter_facets.blockSignals(False)
+        self._search_facets()
+
+    def _search_facets(self, *_):
+        query = self.facet_search.text().strip().casefold()
+        for index in range(self.filter_facets.count()):
+            cell = self.filter_facets.item(index)
+            cell.setHidden(query not in cell.text().casefold())
+
+    def _facets_changed(self, *_):
+        self._metadata_facets = {
+            tuple(self.filter_facets.item(i).data(Qt.UserRole))
+            for i in range(self.filter_facets.count())
+            if self.filter_facets.item(i).checkState() == Qt.Checked
+        }
+        self._apply_filters()
+
+    def _set_metadata_facets(self, facets):
+        self._metadata_facets = set(facets)
+        self.filter_facets.blockSignals(True)
+        for i in range(self.filter_facets.count()):
+            cell = self.filter_facets.item(i)
+            cell.setCheckState(Qt.Checked if tuple(cell.data(Qt.UserRole)) in facets else Qt.Unchecked)
+        self.filter_facets.blockSignals(False)
+        self._apply_filters()
+
+    def _clear_filters(self):
+        self.filter_text.clear()
+        self.filter_bucket.setCurrentIndex(0)
+        self.facet_search.clear()
+        self._set_metadata_facets(set())
+
+    def _matches_filters(self, item_id, extra_text=""):
+        # Queue-only unit callers construct this page without its QWidget UI.
+        if "_filter_index" not in self.__dict__ or not self._filter_index:
+            return True
+        indexed = self._filter_index.get(item_id)
+        if indexed is None:
+            return False
+        text, bucket, facets = indexed
+        wanted_bucket = self.filter_bucket.currentData()
+        if wanted_bucket and bucket != wanted_bucket:
+            return False
+        wanted = self._metadata_facets
+        if wanted and not (wanted <= facets if self.filter_mode.currentIndex() == 0 else wanted & facets):
+            return False
+        corpus = text + " " + extra_text.casefold()
+        return all(word in corpus for word in self.filter_text.text().casefold().split())
+
+    def _apply_filters(self, *_):
+        if "ai_suggestions" not in self.__dict__ or getattr(self, "_updating_tables", False):
+            return
+        parts = []
+        for table, title in ((self.tab_like, "可能喜欢"), (self.tab_del, "建议删除"),
+                             (self.tab_done, "已打标"), (self.ai_suggestions, "AI建议")):
+            visible = 0
+            for row in range(table.rowCount()):
+                cell = table.item(row, 0)
+                extra = " ".join(table.item(row, c).text() for c in range(table.columnCount())
+                                 if table.item(row, c))
+                match = bool(cell) and self._matches_filters(cell.data(ROLE_ITEM_ID), extra)
+                table.setRowHidden(row, not match)
+                visible += int(match)
+            parts.append(f"{title}: {visible} / {table.rowCount()}")
+        anchor = self.deck_ids[self.pos] if self.deck_ids and self.pos < len(self.deck_ids) else None
+        self._rebuild_deck(anchor)
+        review_total = sum(r.decision == scoring.DEC_REVIEW and not r.is_seen
+                           and r.item.id not in self.labels and r.item.id not in self._skipped
+                           for r in self.results)
+        parts.insert(0, f"待复核: {len(self.deck_ids)} / {review_total}")
+        self.filter_counts.setText("筛选后 / 分类总数 ｜ " + " ｜ ".join(parts))
+        for key, stack in self._list_stack.items():
+            if stack.currentIndex() == 1:
+                self._rebuild_cards(key)
+
+    @staticmethod
+    def _selected_item_ids(table):
+        return [table.item(row, 0).data(ROLE_ITEM_ID)
+                for row in sorted({index.row() for index in table.selectedIndexes()})
+                if not table.isRowHidden(row) and table.item(row, 0)]
 
     # ── 分析 ──
     def _start(self) -> None:
@@ -375,6 +538,7 @@ class ReviewPage(QWidget):
             and not r.is_seen
             and r.item.id not in seen_labeled
             and r.item.id not in self._skipped  # 跳过(搁置)的不再出现
+            and self._matches_filters(r.item.id)
         ]
         if self._order_mode == ORDER_RANDOM:
             import random as _r
@@ -398,7 +562,7 @@ class ReviewPage(QWidget):
     def _show_current(self) -> None:
         idx = self._current_index()
         if idx < 0:
-            self._clear_card("🎉 待复核队列已清空！可在右侧表格查看自动分类结果。")
+            self._clear_card("当前筛选下没有待复核作品。可清除筛选，或切换到其他分类查看结果。")
             return
         sid = self.deck_ids[idx]
         r = next(x for x in self.results if x.item.id == sid)
@@ -869,6 +1033,7 @@ class ReviewPage(QWidget):
         )
         if verdict == "DELETE" and item_id not in self._ai_review_marks:
             self._ai_review_marks.append(item_id)
+        self.ai_suggestions.setSortingEnabled(False)
         self.ai_suggestions.setRowCount(0)
         by_id = {item.id: item for item in self.items}
         for sid, suggestion in self._ai_suggestions.items():
@@ -878,19 +1043,30 @@ class ReviewPage(QWidget):
             check.setFlags(check.flags() | Qt.ItemIsUserCheckable)
             check.setCheckState(Qt.Unchecked)
             check.setData(Qt.UserRole, sid)
+            check.setData(ROLE_ITEM_ID, sid)
+            check.setData(ROLE_PATH, by_id[sid].path)
             self.ai_suggestions.setItem(row, 0, check)
             for col, text in enumerate(
-                (by_id[sid].name, suggestion["verdict"], suggestion.get("reason", "")), start=1
+                (by_id[sid].name, suggestion["verdict"], suggestion.get("reason", ""), self._feat_summary(by_id[sid])), start=1
             ):
                 item = QTableWidgetItem(str(text))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setData(ROLE_ITEM_ID, sid)
+                item.setData(ROLE_PATH, by_id[sid].path)
+                item.setToolTip(f"{suggestion.get('reason', '')}\n{self._feat_summary(by_id[sid])}\n{by_id[sid].path}")
                 self.ai_suggestions.setItem(row, col, item)
+        self.ai_suggestions.setSortingEnabled(True)
+        if set(self._filter_index) != {it.id for it in self.items}:
+            self._index_filters()
+        self._apply_filters()
 
     def _adopt_ai_suggestions(self):
         if busy(self):
             return
         selected = []
         for row in range(self.ai_suggestions.rowCount()):
+            if self.ai_suggestions.isRowHidden(row):
+                continue
             item = self.ai_suggestions.item(row, 0)
             if item.checkState() == Qt.Checked:
                 suggestion = self._ai_suggestions[item.data(Qt.UserRole)]
@@ -949,39 +1125,71 @@ class ReviewPage(QWidget):
     # ── 表格 ──
     @staticmethod
     def _feat_summary(it):
-        a = ", ".join(str(x) for x in it.actors[:3]) if it.actors else ""
-        s = ", ".join(str(x) for x in it.studios[:2]) if it.studios else ""
-        g = ", ".join(str(x) for x in it.genres[:2]) if it.genres else ""
-        t = ", ".join(str(x) for x in it.tags[:5]) if it.tags else ""
+        a = ", ".join(str(x) for x in it.actors) if it.actors else ""
+        s = ", ".join(str(x) for x in it.studios) if it.studios else ""
+        g = ", ".join(str(x) for x in it.genres) if it.genres else ""
+        t = ", ".join(str(x) for x in it.tags) if it.tags else ""
         if not (a or s or g or t):
             return "无任何元数据（仅标题，无演员/厂商/类型/标签——只能凭标题/大小判断）"
         parts = []
+        if t:
+            parts.append(f"标签:{t}")
+        if g:
+            parts.append(f"类型:{g}")
         if a:
             parts.append(f"演员:{a}")
         if s:
             parts.append(f"厂商:{s}")
-        if g:
-            parts.append(f"类型:{g}")
-        if t:
-            parts.append(f"标签:{t}")
         return " ｜ ".join(parts)
 
+    def _prepare_evidence(self):
+        """Display actual overlaps against the same cleaned, bucket-scoped profiles.
+
+        These contextual overlaps supplement the original scorer reason; they do
+        not recompute the score or claim an overlap alone caused the verdict.
+        """
+        self._profile_overlaps = {}
+        for bucket in {it.bucket for it in self.items}:
+            items = [it for it in self.items if it.bucket == bucket]
+            features = {it.id: scoring.item_features(it) for it in items}
+            liked, disliked = scoring._build_feature_sets_from_map(
+                items, self.labels, features, idf=scoring.idf_weights(features))
+            for it in items:
+                parts = []
+                for title, wanted in (("喜欢特征重合", liked), ("不喜欢特征重合", disliked)):
+                    matches = [f"{scoring.KIND_CN[kind]}:{value}" for kind, value in features[it.id]
+                               if kind in ("actor", "tag", "genre") and (kind, value) in wanted]
+                    parts.append(f"{title}：{'、'.join(matches) if matches else '无'}")
+                self._profile_overlaps[it.id] = "当前同分类画像 · " + "；".join(parts)
+
+    def _reason_details(self, result):
+        original = result.reason or "评分器未提供具体依据；请人工核对"
+        overlap = getattr(self, "_profile_overlaps", {}).get(result.item.id, "")
+        detail = f"{original} ｜ 内容命中度 {result.s_content:.1%}"
+        if overlap:
+            detail += " ｜ " + overlap
+        return detail
+
     def _fill_tables(self) -> None:
+        self._prepare_evidence()
+        self._index_filters()
+        self._updating_tables = True
         like_rows, del_rows, done_rows = [], [], []
 
         for r in self.results:
             it = r.item
             mb = f"{it.size_mb} MB" if it.size_mb else ""
             if r.item.id in self.labels:
-                done_rows.append((it.num or "", it.name, self.labels[r.item.id], mb, it.path))
+                done_rows.append((it.num or "", it.name, self.labels[r.item.id], mb, it.id, it.path))
             elif r.decision == scoring.DEC_LIKE and not r.is_seen:
                 like_rows.append(
                     (
                         it.num or "",
                         it.name,
                         f"{r.s_content:.0%}",
-                        r.reason,
+                        self._reason_details(r),
                         self._feat_summary(it),
+                        it.id,
                         it.path,
                     )
                 )
@@ -992,8 +1200,9 @@ class ReviewPage(QWidget):
                         it.num or "",
                         it.name,
                         f"{r.s_content:.0%}",
-                        r.reason,
+                        self._reason_details(r),
                         self._feat_summary(it),
+                        it.id,
                         it.path,
                     )
                 )
@@ -1004,18 +1213,21 @@ class ReviewPage(QWidget):
         self._tab_rows = {"like": like_rows, "del": del_rows, "done": done_rows}
         # 路径 → 封面 映射（卡片视图缩略图用）
         self._tab_covers = {it.path: it.cover for it in self.items if it.cover}
-        for key, stack in self._list_stack.items():
-            if stack.currentIndex() == 1:
-                self._rebuild_cards(key)
+        self._updating_tables = False
+        self._apply_filters()
 
     def _set_table(self, table: QTableWidget, rows: list) -> None:
         # 必须先关排序再填充：排序开启时逐行 setItem 会因首列排序移行，导致错位/空白
         table.setSortingEnabled(False)
         table.setRowCount(0)
         ncols = table.columnCount()
+        by_id = {it.id: it for it in self.items}
         for row in rows:
             r = table.rowCount()
             table.insertRow(r)
+            item_id = row[-2] if len(row) >= ncols + 2 else None
+            source = by_id.get(item_id)
+            metadata = self._feat_summary(source) if source else ""
             for c in range(ncols):
                 v = row[c] if c < len(row) else ""
                 s = str(v) if str(v) else "—"
@@ -1029,7 +1241,8 @@ class ReviewPage(QWidget):
                 else:
                     item = QTableWidgetItem(s)
                 item.setData(ROLE_PATH, row[-1])  # 文件路径（自定义角色，不占 UserRole）
-                item.setToolTip(str(row[-1]))
+                item.setData(ROLE_ITEM_ID, item_id)
+                item.setToolTip("\n".join([str(v), metadata, str(row[-1])]))
                 table.setItem(r, c, item)
         table.setSortingEnabled(True)
 
@@ -1060,6 +1273,7 @@ class ReviewPage(QWidget):
         lay = self._list_cardlay[key]
         self._clear_layout(lay)
         rows = (getattr(self, "_tab_rows", {}) or {}).get(key, []) or []
+        rows = [row for row in rows if self._matches_filters(row[-2], " ".join(map(str, row)))]
         if not rows:
             lbl = QLabel("当前分类无数据。")
             lbl.setProperty("cssClass", "text-muted")
@@ -1093,6 +1307,12 @@ class ReviewPage(QWidget):
         detail = QLabel(str(meta3))
         detail.setWordWrap(True)
         lay.addWidget(detail)
+        item_id = row[-2]
+        source = next((it for it in self.items if it.id == item_id), None)
+        if source:
+            metadata = QLabel(self._feat_summary(source))
+            metadata.setWordWrap(True)
+            lay.addWidget(metadata)
         card.setToolTip("双击打开文件所在位置" if path else "")
         if path:
 
@@ -1175,7 +1395,9 @@ class ReviewPage(QWidget):
             ("标签", it.tags),
         ]:
             if vals:
-                v = QLabel(f"{label}: {', '.join(str(x) for x in vals[:8])}")
+                suffix = f" …（共 {len(vals)} 项，悬停查看全部）" if len(vals) > 8 else ""
+                v = QLabel(f"{label}: {', '.join(str(x) for x in vals[:8])}{suffix}")
+                v.setToolTip(f"{label}: {', '.join(str(x) for x in vals)}")
                 v.setWordWrap(True)
                 detail.addWidget(v)
 
@@ -1196,7 +1418,7 @@ class ReviewPage(QWidget):
             detail.addWidget(bar)
 
         col = theme.color(DEC_COLOR_KEY.get(r.decision, "text_secondary"))
-        reason = QLabel(f"依据：{r.reason or '无'}")
+        reason = QLabel(f"依据：{self._reason_details(r)}")
         reason.setStyleSheet(f"font-size:12px; color:{theme.color('text_muted')};")
         reason.setWordWrap(True)
         detail.addWidget(reason)
@@ -1285,6 +1507,11 @@ class ReviewPage(QWidget):
 
     # ── 键盘 ──
     def keyPressEvent(self, event):
+        if self.focusWidget() in (self.filter_text, self.facet_search, self.filter_bucket,
+                                  self.filter_mode, self.filter_facets, self.tab_like,
+                                  self.tab_del, self.tab_done, self.ai_suggestions):
+            super().keyPressEvent(event)
+            return
         if busy(self):
             event.ignore()
             return
@@ -1329,3 +1556,6 @@ class ReviewPage(QWidget):
         self._ai_review_pool = []
         self._label_anchor = None
         self.ai_suggestions.setRowCount(0)
+        self._filter_index = {}
+        self._profile_overlaps = {}
+        self._clear_filters()

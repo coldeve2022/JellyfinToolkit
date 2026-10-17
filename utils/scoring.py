@@ -305,6 +305,19 @@ def dedup_loser_ids(items: list[Item], labels: Optional[dict] = None) -> set[str
             if not any(it.id == iid and entity_key(it.path) in protected for it in items)}
 
 
+def _dedup_membership(item):
+    """Exact known memberships are conservative boundaries; unknown items stay legacy."""
+    return tuple(sorted({str(value) for value in (getattr(item, "library_ids", None) or [])
+                         if value}))
+
+
+def _dedup_group_id(num, group):
+    import hashlib
+    import json
+    identity = [num, _dedup_membership(group[0])]
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+
+
 def _dedup_groups_raw(items: list[Item], *, probe_entities=True):
     """按番号分组（不含 trailer/other/附属文件），仅返回 >=2 的组。
 
@@ -312,7 +325,7 @@ def _dedup_groups_raw(items: list[Item], *, probe_entities=True):
     不应作为"同一番号的版本"参与去重比较（否则会把 Jellyfin 生成的片头/背景
     当成某个版本的"重复项"而误删正片）。
     """
-    groups: dict[str, list[Item]] = defaultdict(list)
+    groups: dict[tuple, list[Item]] = defaultdict(list)
     seen_entities: set = set()
     for it in items:
         if is_junk_item(it):
@@ -326,13 +339,14 @@ def _dedup_groups_raw(items: list[Item], *, probe_entities=True):
             if key in seen_entities:
                 continue
             seen_entities.add(key)
-            groups[it.num].append(it)
-    return [(num, grp) for num, grp in groups.items() if len(grp) >= 2]
+            groups[(it.num, _dedup_membership(it))].append(it)
+    return [(num, grp) for (num, _membership), grp in groups.items() if len(grp) >= 2]
 
 
 def dedup_candidate_groups(items: list[Item]) -> list[dict]:
     """Metadata-only overview counts: same candidate/CD rules, no probes or deletion choices."""
-    return [{"num": num, "items": group, "losers": set(), "all_cd": all(it.is_cd for it in group)}
+    return [{"num": num, "group_id": _dedup_group_id(num, group),
+             "items": group, "losers": set(), "all_cd": all(it.is_cd for it in group)}
             for num, group in _dedup_groups_raw(items, probe_entities=False)]
 
 
@@ -349,6 +363,7 @@ def dedup_groups(items: list[Item], labels: Optional[dict] = None) -> list[dict]
     for num, grp in _dedup_groups_raw(items):
         out.append({
             "num": num,
+            "group_id": _dedup_group_id(num, grp),
             "items": grp,
             "losers": {iid for iid in group_losers(grp, labels)
                        if not any(it.id == iid and entity_key(it.path) in protected for it in grp)},

@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import re
+import sqlite3
 from typing import Callable, Optional
 
 from utils.library import (
@@ -227,6 +228,24 @@ def server_kind(value) -> str:
     return guess_kind_from_path(opts.get("path", ""))
 
 
+def discover_scopes(value, log=None, should_stop=None):
+    """Read selectable library roots. Run on a worker; no catalog cache is trusted."""
+    from utils.library import _check_cancel
+    from utils.library_scope import discover_db_scopes, scope_id
+    from utils.library_api import list_virtual_folders
+    from utils.media_server import server_identity
+    _check_cancel(should_stop)
+    kind, opts = resolve(value, log=log)
+    try:
+        if kind == SOURCE_DB:
+            return discover_db_scopes(opts['path'], _get(value, 'jellyfin_data_dir', ''), should_stop)
+        rows = list_virtual_folders(opts['server'], opts['key'], should_stop=should_stop)
+        source = 'server:' + server_identity(opts['server'])
+        return [{'id': scope_id(source, row['id']), 'name': row['name'], 'paths': row['paths']} for row in rows]
+    except (LibraryApiError, OSError, ValueError, sqlite3.Error) as exc:
+        raise SourceUnavailable('无法读取媒体库范围，请检查数据源并重新选择：' + str(exc)) from exc
+
+
 def collect(
     value,
     log: Optional[Callable[[str], None]] = None,
@@ -255,6 +274,19 @@ def collect(
             raise SourceUnavailable(str(e)) from e
     if should_stop and should_stop():
         raise CollectionCancelled("采集已取消；部分结果不会用于全库统计或删除建议")
+    from utils.library_scope import filter_scopes, normalize_scope_path
+    selected = _get(value, 'library_scope_ids', []) or []
+    roots = _get(value, 'library_scope_paths', []) or []
+    if (not isinstance(selected, list) or not isinstance(roots, list)
+            or any(not isinstance(sid, str) or not sid.strip() for sid in selected)):
+        raise SourceUnavailable('媒体库范围配置无效，请重新选择')
+    if any(not isinstance(root, str) or not normalize_scope_path(root) for root in roots):
+        raise SourceUnavailable('媒体库目录必须为绝对服务器路径且不能包含 ..，请重新选择')
+    catalog = discover_scopes(value, log=log, should_stop=should_stop) if selected or (_get(value, 'library_scope_confirmed', False) and not roots) else []
+    missing = set(selected) - {scope['id'] for scope in catalog}
+    if missing:
+        raise SourceUnavailable('已选择的媒体库不存在或当前数据源不可访问，请重新选择媒体库范围')
+    items = filter_scopes(items, catalog, selected, roots, should_stop=should_stop)
     mappings = _get(value, "library_path_mappings", [])
     listing_cache = {}
     for it in items:
@@ -273,5 +305,5 @@ def collect(
 __all__ = [
     "SourceUnavailable",
     "SOURCE_AUTO", "SOURCE_DB", "SOURCE_API", "SOURCE_CHOICES",
-    "collect", "describe", "resolve", "server_kind", "normalize_source",
+    "collect", "discover_scopes", "describe", "resolve", "server_kind", "normalize_source",
 ]

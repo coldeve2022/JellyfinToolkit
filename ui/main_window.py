@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from PySide6.QtWidgets import (
     QScrollArea,
     QMainWindow,
@@ -23,6 +25,7 @@ from ui.services import (
     stop_page,
     refresh_configuration,
     state_context,
+    busy,
 )
 from ui.layout import compact_forms, dock_actions, collapse_advanced
 
@@ -118,6 +121,8 @@ class MainWindow(QMainWindow):
         self.ffmpeg_path = resolve_tool("ffmpeg")
 
         self._setup_ui()
+        self._last_config_values = asdict(self.cfg)
+        self._last_config_context = state_context(self.cfg)
         self.apply_stylesheet()
 
         self._nav_buttons[0].set_active(True)
@@ -239,7 +244,15 @@ class MainWindow(QMainWindow):
         root.addWidget(sidebar)
 
         self.stack = QStackedWidget()
-        root.addWidget(self.stack)
+        main_content = QWidget()
+        content_layout = QVBoxLayout(main_content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        from ui.scope_selector import ScopeBar
+
+        self.scope_bar = ScopeBar(self.cfg, self)
+        content_layout.addWidget(self.scope_bar)
+        content_layout.addWidget(self.stack, 1)
+        root.addWidget(main_content, 1)
         #: 真实的功能页面（stack 里放的是套了滚动区的容器，见 register_page）
         self._pages: list = []
 
@@ -250,12 +263,35 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(idx)
 
     def _config_changed(self):
+        current, context = asdict(self.cfg), state_context(self.cfg)
+        previous = self._last_config_values
+        if current == previous and context == self._last_config_context:
+            return
+        scope_only = all(value == previous.get(key) for key, value in current.items()
+                         if not key.startswith("library_scope_"))
+        self._last_config_values, self._last_config_context = current, context
         for page in self._pages:
+            module = type(page).__module__.rsplit(".", 1)[-1]
+            if scope_only and module not in {"insight", "profile", "review", "delete", "dedup", "automation"}:
+                continue
             changed = getattr(page, "on_config_changed", None)
             if callable(changed):
                 changed()
             elif hasattr(page, "cfg"):
                 refresh_configuration(page)
+        self._update_scope_pages()
+
+    def _update_scope_pages(self):
+        ready = self.scope_bar.selection_ready()
+        for page in self._pages:
+            module = type(page).__module__.rsplit(".", 1)[-1]
+            if module in {"insight", "profile", "review", "delete", "dedup", "automation"}:
+                page.setEnabled(ready)
+                footer = getattr(page, "_action_footer", None)
+                if footer is not None:
+                    footer.setEnabled(ready)
+            elif module in {"subtitle_gen", "lada"}:
+                page.btn_scan.setEnabled(ready and not busy(page))
 
     def _task_summary(self):
         manager = TaskManager.instance()
@@ -302,6 +338,7 @@ class MainWindow(QMainWindow):
         collapse_advanced(page)
         dock_actions(page, layout)
         self.stack.addWidget(container)
+        self._update_scope_pages()
 
     def closeEvent(self, event):
         """保存配置并停止所有后台线程，避免 "QThread destroyed while running" 崩溃。"""

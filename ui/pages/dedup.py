@@ -94,6 +94,7 @@ class DedupPage(QWidget):
         events.labels_changed.connect(self._refresh_labels)
 
     def _refresh_labels(self):
+        self._ai_predictions = {}
         self.store = LabelStore(DATA_DIR / "smart.db", context=state_context(self.cfg))
         self.labels = self.store.all()
 
@@ -193,10 +194,11 @@ class DedupPage(QWidget):
         if "error" in data:
             QMessageBox.warning(self, "错误", str(data["error"]))
             return
+        self._ai_predictions = {}
         from utils.labels import legacy_protection_labels
 
         self._legacy_protection = legacy_protection_labels(
-            DATA_DIR / "smart.db", data["items"], self.labels
+            DATA_DIR / "smart.db", data["items"], self.labels, cfg=self.cfg
         )
         self.groups = scoring.dedup_groups(
             data["items"], labels={**self._legacy_protection, **self.labels}
@@ -299,7 +301,9 @@ class DedupPage(QWidget):
         self._in_check_sync = True  # 填充期间屏蔽勾选联动
         try:
             for g in self.groups:
-                grp_item = QTreeWidgetItem([f"{g['num']}  ({len(g['items'])}个版本)", "", "", ""])
+                names = sorted({name for item in g["items"] for name in getattr(item, "library_names", [])})
+                scope = " ｜ " + " / ".join(names) if names else ""
+                grp_item = QTreeWidgetItem([f"{g['num']}  ({len(g['items'])}个版本){scope}", "", "", ""])
                 if g["all_cd"]:
                     # 全 CD 分卷组：保护，移除"全选"勾选框（避免误删分卷）。
                     # QTreeWidgetItem 默认 flags 就含 ItemIsUserCheckable（实测），必须显式移除。
@@ -471,7 +475,7 @@ class DedupPage(QWidget):
             return
         payload = [
             {
-                "num": g["num"],
+                "num": g.get("group_id") or g["num"],
                 "items": [
                     {
                         "id": it.id,
@@ -500,13 +504,16 @@ class DedupPage(QWidget):
         self.log.log(str(s)[:160])
 
     def _collect_ai_prediction(self, data):
-        group = next((group for group in self.groups if group["num"] == data.get("num")), None)
-        if group is None:
+        candidates = [group for group in self.groups
+                      if (group.get("group_id") or group["num"]) == data.get("num")
+                      or group["num"] == data.get("num")]
+        if len(candidates) != 1:
             return
+        group = candidates[0]
         valid = {item.id for item in group["items"]}
         keeps, deletes = set(data.get("keep_ids") or []), set(data.get("delete_ids") or [])
         if keeps and keeps <= valid and deletes <= valid and not (keeps & deletes):
-            self._ai_predictions[group["num"]] = dict(data)
+            self._ai_predictions[group.get("group_id") or group["num"]] = dict(data)
             self.log.log_info(group["num"] + "：" + str(data.get("reason", "")))
 
     def _apply_ai_predictions(self):
@@ -536,7 +543,7 @@ class DedupPage(QWidget):
         self.tree.blockSignals(True)
         try:
             for idx, group in enumerate(self.groups):
-                prediction = self._ai_predictions.get(group["num"])
+                prediction = self._ai_predictions.get(group.get("group_id") or group["num"])
                 if prediction is None or group["all_cd"]:
                     continue
                 top = self.tree.topLevelItem(idx)
@@ -575,3 +582,8 @@ class DedupPage(QWidget):
 
     def shutdown(self) -> None:
         stop_page(self)
+
+    def on_context_changed(self):
+        self._ai_predictions = {}
+        self._legacy_protection = {}
+        self._item2id = {}

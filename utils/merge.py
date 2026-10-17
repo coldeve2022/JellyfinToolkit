@@ -279,7 +279,11 @@ def parse_part_index(stem: str, number: str) -> tuple:
 
 
 def group_by_number(paths) -> tuple:
-    """按番号分组。返回 (groups: {norm_number: [PartFile]}, unrecognized: [path])。"""
+    """Group numbers within one source folder; ambiguous cross-folder numbers are skipped.
+
+    Keep the public {normalized_number: parts} shape. Skipped collisions join the
+    unrecognized queue so callers cannot accidentally merge different libraries.
+    """
     groups = defaultdict(list)
     unrecognized = []
     for p in paths:
@@ -302,6 +306,12 @@ def group_by_number(paths) -> tuple:
             variants=variants,
         )
         groups[normalize_number(number)].append(pf)
+    for number, parts in list(groups.items()):
+        parents = {os.path.normcase(os.path.realpath(os.path.dirname(part.path)))
+                   for part in parts}
+        if len(parents) > 1:
+            unrecognized.extend(part.path for part in parts)
+            del groups[number]
     return dict(groups), unrecognized
 
 
@@ -947,9 +957,18 @@ def build_merge_plan(
 
 def _plan_stats(plans: list, unrecognized: list) -> dict:
     counts = Counter(g.status for g in plans)
+    cross_folder = [path for path in unrecognized
+                    if extract_number_ext(os.path.splitext(os.path.basename(path))[0])
+                    or extract_number_ext(os.path.basename(path))]
     return {
         "total_groups": len(plans),
         "unrecognized": len(unrecognized),
+        "cross_folder_skipped": len(cross_folder),
+        "cross_folder_skipped_paths": cross_folder,
+        "cross_folder_skip_reason": (
+            "同一番号出现在不同来源目录，无法确认属于同一作品，已跳过跨目录合并；"
+            "请仅选择同一目录内的分集后重新扫描。" if cross_folder else ""
+        ),
         "ready": counts.get("ready", 0),
         "needs_review": counts.get("needs_review", 0),
         "skip_variant": counts.get("skip_variant", 0),

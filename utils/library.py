@@ -85,6 +85,9 @@ class Item:
     primary_version_id: Optional[str] = None
     raw_type: Optional[str] = None          # authoritative source Type; type_cn alone is display-only
 
+    library_ids: list[str] = field(default_factory=list)
+    library_names: list[str] = field(default_factory=list)
+
     @property
     def size_mb(self) -> Optional[float]:
         if self.size is None:

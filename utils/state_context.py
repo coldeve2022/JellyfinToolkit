@@ -49,12 +49,28 @@ def resolved_identity(items, cfg):
     return user, source
 
 
-def state_context(cfg, items=None) -> str:
-    """Stable actual source/viewer namespace. No network calls, no credential serialization."""
+def _viewer_identity(cfg, items=None):
     user, source = resolved_identity(items, cfg) if items else (
         str(_get(cfg, "jellyfin_user_id") or ""), _configured_source(cfg))
     user = user.replace("-", "").lower()
-    return hashlib.sha256(json.dumps([source, user], ensure_ascii=False).encode()).hexdigest()
+    return [source, user]
+
+
+def source_viewer_context(cfg, items=None):
+    """Previous namespace for explicit feedback migration, never AI fallback."""
+    return hashlib.sha256(json.dumps(_viewer_identity(cfg, items), ensure_ascii=False).encode()).hexdigest()
+
+
+def state_context(cfg, items=None) -> str:
+    """Stable source/viewer/selection namespace; no network or credential serialization."""
+    from utils.library_scope import normalize_scope_path
+
+    ids = sorted({str(value) for value in (_get(cfg, "library_scope_ids", []) or [])})
+    paths = sorted({normalize_scope_path(value) for value in (_get(cfg, "library_scope_paths", []) or [])})
+    identity = _viewer_identity(cfg, items)
+    if ids or paths:
+        identity.append({"library_ids": ids, "paths": paths})
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
 
 
 def bind_resolved_context(cfg, snapshot):
@@ -84,7 +100,8 @@ def score_fingerprint(items, labels, cfg) -> str:
             "id", "name", "path", "source_path", "year", "genres", "tags", "studios", "actors",
             "size", "num", "is_cd", "cd_index", "bucket", "is_uncensored", "is_favorite",
             "play_count", "is_played", "has_progress", "rating", "behavior_known",
-            "width", "height", "duration", "bitrate", "behavior_user_id", "source_identity")}
+            "width", "height", "duration", "bitrate", "behavior_user_id", "source_identity",
+            "library_ids", "library_names")}
         try:
             stat = Path(it.path).stat()
             record["file"] = [stat.st_size, stat.st_mtime_ns]

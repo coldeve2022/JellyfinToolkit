@@ -592,7 +592,10 @@ class MergePage(QWidget):
         from collections import Counter
 
         counts = Counter(g.status for g in self._plan.groups)
+        prior_scope_stats = {key: value for key, value in self._plan.stats.items()
+                             if key.startswith("cross_folder_")}
         self._plan.stats = {
+            **prior_scope_stats,
             "total_groups": len(self._plan.groups),
             "unrecognized": len(self._plan.unrecognized),
             "ready": counts.get("ready", 0),
@@ -607,8 +610,11 @@ class MergePage(QWidget):
         self.summary_label.setText(
             f"共 {s['total_groups']} 个番号分组｜可合并 {s['ready']}｜待确认 {s['needs_review']}"
             f"｜冲突 {s['conflict']}｜多版本 {s['skip_variant']}｜重复 {s['skip_duplicate']}"
-            f"｜未识别 {s['unrecognized']}｜单文件已略过 {s['skip']}"
+            f"｜未识别 {s['unrecognized'] - s.get('cross_folder_skipped', 0)}"
+            f"｜跨目录同番号已跳过 {s.get('cross_folder_skipped', 0)}"
+            f"｜单文件已略过 {s['skip']}"
         )
+        self.summary_label.setToolTip(s.get("cross_folder_skip_reason", ""))
 
     def _on_filter_changed(self) -> None:
         data = self.combo_filter.currentData()
