@@ -37,6 +37,7 @@ from config import DATA_DIR, ToolkitConfig
 from ui import theme
 from ui.widgets import CoverThumb
 from utils.metadata_labels import normalize_metadata_labels
+from utils.review_facets import FacetIndex, label_key
 from utils import scoring
 from utils.deck_state import DeckState, ORDER_RANDOM, ORDER_SCORE
 from utils.labels import LabelStore
@@ -107,6 +108,12 @@ class ReviewPage(QWidget):
         self._ai_suggestions = {}
         self._metadata_facets = set()
         self._filter_index = {}
+        self._facet_index = FacetIndex([])
+        self._facet_page_state = {}
+        self._facet_tab = 0
+        self._facet_order = ()
+        self._facet_cells = {}
+        self._facet_options = {}
 
         self._setup_ui()
         self.setFocusPolicy(Qt.StrongFocus)
@@ -148,19 +155,15 @@ class ReviewPage(QWidget):
 
     def _index_filters(self):
         """Cache searchable metadata once per snapshot, never per keystroke."""
-        from collections import Counter
-
         reasons = {r.item.id: str(getattr(r, "reason", "") or "") for r in self.results}
-        counts = Counter()
+        self._facet_index = FacetIndex(self.items)
         self._filter_index = {}
         for it in self.items:
-            facets = {(kind, str(value)) for kind, values in
-                      (("tag", it.tags), ("genre", it.genres)) for value in values if str(value).strip()}
-            counts.update(facets)
+            facets = self._facet_index.by_item.get(it.id, set())
             text = " ".join(str(v) for v in
                             [it.id, it.name, it.num or "", it.path, it.bucket, it.year or "",
                              *it.tags, *it.genres, *it.actors, *it.studios, reasons.get(it.id, "")])
-            self._filter_index[it.id] = (text.casefold(), it.bucket, facets)
+            self._filter_index[it.id] = (label_key(text), it.bucket, facets)
         previous = self.filter_bucket.currentData()
         self.filter_bucket.blockSignals(True)
         self.filter_bucket.clear()
@@ -169,26 +172,130 @@ class ReviewPage(QWidget):
             self.filter_bucket.addItem(bucket, bucket)
         self.filter_bucket.setCurrentIndex(max(0, self.filter_bucket.findData(previous)))
         self.filter_bucket.blockSignals(False)
-        self.filter_facets.blockSignals(True)
-        self.filter_facets.clear()
-        self._metadata_facets.intersection_update(counts)
-        for facet, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            label = "标签" if facet[0] == "tag" else "类型"
-            cell = QListWidgetItem(f"{label}: {facet[1]} ({count})")
-            cell.setData(Qt.UserRole, facet)
-            cell.setData(Qt.UserRole + 10, count)
-            cell.setToolTip(f"{label}: {facet[1]} · {count} 部作品")
-            cell.setFlags(cell.flags() | Qt.ItemIsUserCheckable)
-            cell.setCheckState(Qt.Checked if facet in self._metadata_facets else Qt.Unchecked)
-            self.filter_facets.addItem(cell)
-        self.filter_facets.blockSignals(False)
+        # Facet dictionaries are built later from actual rows of the active tab.
+
+    def _save_facet_state(self):
+        self._facet_page_state[self._facet_tab] = {
+            "selected": set(self._metadata_facets), "mode": self.filter_mode.currentIndex(),
+            "single": self.facet_selection.currentIndex(), "group": self.facet_group.currentIndex(),
+            "search": self.facet_search.text(), "sort": self.facet_sort.currentIndex(),
+        }
+
+    def _page_facets(self, page_index):
+        if page_index is None or page_index == self._facet_tab:
+            return self._metadata_facets, self.filter_mode.currentIndex()
+        state = self._facet_page_state.get(page_index, {})
+        return state.get("selected", set()), state.get("mode", 0)
+
+    def _facet_tab_changed(self, index):
+        self._save_facet_state()
+        self._facet_tab = index
+        state = self._facet_page_state.get(index, {})
+        self._metadata_facets = set(state.get("selected", ()))
+        for widget, value in ((self.filter_mode, state.get("mode", 0)),
+                              (self.facet_selection, state.get("single", 1)),
+                              (self.facet_group, state.get("group", 0)),
+                              (self.facet_sort, state.get("sort", 0))):
+            widget.blockSignals(True)
+            widget.setCurrentIndex(value)
+            widget.blockSignals(False)
+        self.facet_search.blockSignals(True)
+        self.facet_search.setText(state.get("search", ""))
+        self.facet_search.blockSignals(False)
+        self.filter_facets.single_choice = self.facet_selection.currentIndex() == 0
+        self._apply_filters()
+
+    def _base_facet_ids(self):
+        if self._facet_tab == 0:
+            ids = {r.item.id for r in self.results if r.decision == scoring.DEC_REVIEW
+                   and not r.is_seen and r.item.id not in self.labels and r.item.id not in self._skipped}
+            return {sid for sid in ids if self._matches_filters(sid, include_facets=False)}
+        table = (self.tab_like, self.tab_del, self.tab_done, self.ai_suggestions)[self._facet_tab - 1]
+        ids = set()
+        for row in range(table.rowCount()):
+            cell = table.item(row, 0)
+            extra = " ".join(table.item(row, c).text() for c in range(table.columnCount()) if table.item(row, c))
+            if cell and self._matches_filters(cell.data(ROLE_ITEM_ID), extra, include_facets=False):
+                ids.add(cell.data(ROLE_ITEM_ID))
+        return ids
+
+    def _refresh_facets(self):
+        base_ids = self._base_facet_ids()
+        options = self._facet_index.options(base_ids, self._metadata_facets,
+                    'AND' if self.filter_mode.currentIndex() == 0 else 'OR',
+                    single=self.facet_selection.currentIndex() == 0)
+        if self.facet_sort.currentData() == 'name':
+            options.sort(key=lambda o: o.key[1])
+        elif self.facet_sort.currentData() == 'selected':
+            options.sort(key=lambda o: (o.key not in self._metadata_facets, -o.total, o.key))
+        self._facet_options = {o.key: o for o in options}
+        order = tuple(o.key for o in options)
+        cloud = self.filter_facets
+        scroll = cloud.verticalScrollBar().value()
+        cloud.blockSignals(True)
+        if order != self._facet_order:
+            cloud.clear()
+            self._facet_cells = {}
+            for option in options:
+                cell = QListWidgetItem()
+                cell.setData(Qt.UserRole, option.key)
+                cell.setFlags(cell.flags() | Qt.ItemIsUserCheckable)
+                cloud.addItem(cell)
+                self._facet_cells[option.key] = cell
+            self._facet_order = order
+        for option in options:
+            cell = self._facet_cells[option.key]
+            kind = "类型" if option.key[0] == 'genre' else "标签"
+            cell.setText(f"{kind}: {option.label} ({option.count})")
+            cell.setData(Qt.UserRole + 10, option.count)
+            cell.setData(Qt.UserRole + 11, option.label)
+            cell.setCheckState(Qt.Checked if option.key in self._metadata_facets else Qt.Unchecked)
+            variants = " / ".join(option.aliases)
+            cell.setToolTip(f"{kind}: {option.label}\n当前页基础作品：{option.total} 部\n"
+                            f"{'当前条件命中' if option.key in self._metadata_facets else '点击后命中'}：{option.count} 部\n原始写法：{variants}")
+        cloud.blockSignals(False)
+        self.selected_facets.blockSignals(True)
+        self.selected_facets.clear()
+        for key in sorted(self._metadata_facets):
+            option = self._facet_options[key]
+            cell = QListWidgetItem(option.label)
+            cell.setData(Qt.UserRole, key)
+            cell.setData(Qt.UserRole + 10, option.count)
+            cell.setData(Qt.UserRole + 11, option.label)
+            cell.setCheckState(Qt.Checked)
+            cell.setToolTip("点击取消：" + option.label)
+            self.selected_facets.addItem(cell)
+        self.selected_facets.blockSignals(False)
+        self.selected_facets.setVisible(bool(self._metadata_facets))
+        hits = self._facet_index.match(base_ids, self._metadata_facets,
+                                       'AND' if self.filter_mode.currentIndex() == 0 else 'OR')
+        title = self.main_tabs.tabText(self._facet_tab)
+        self.facet_context.setText(f"{title} · {len(hits)} / {len(base_ids)} 部")
+        self.facet_context.setToolTip("仅统计此结果页中符合搜索和分类的作品；标签数字表示点击后的命中数量。")
+        groups = {'content': 0, 'genre': 0, 'technical': 0}
+        for option in options:
+            if option.count > 0 or option.key in self._metadata_facets:
+                groups[option.group] += 1
+        for i, (name, group) in enumerate((("内容标签", 'content'), ("类型", 'genre'), ("技术/版本", 'technical'), ("全部", 'all'))):
+            self.facet_group.setItemText(i, f"{name} ({sum(groups.values()) if group == 'all' else groups[group]})")
         self._search_facets()
+        cloud.verticalScrollBar().setValue(scroll)
 
     def _search_facets(self, *_):
-        query = self.facet_search.text().strip().casefold()
-        for index in range(self.filter_facets.count()):
-            cell = self.filter_facets.item(index)
-            cell.setHidden(query not in cell.text().casefold())
+        query = label_key(self.facet_search.text()).split()
+        group = self.facet_group.currentData()
+        shown = 0
+        for key, cell in self._facet_cells.items():
+            option = self._facet_options[key]
+            text = label_key(' '.join([option.label, *option.aliases]))
+            # Searching includes all groups so a technical tag can always be found.
+            match = (bool(query) or group == 'all' or option.group == group)
+            match = match and all(word in text for word in query)
+            match = match and (option.count > 0 or key in self._metadata_facets)
+            cell.setHidden(not match)
+            shown += int(match)
+        self.facet_empty.setText("没有匹配的标签；可换分组、修改搜索或取消已选条件。")
+        self.facet_empty.setVisible(shown == 0)
 
     def _facets_changed(self, *_):
         self._metadata_facets = {
@@ -199,21 +306,20 @@ class ReviewPage(QWidget):
         self._apply_filters()
 
     def _set_metadata_facets(self, facets):
-        self._metadata_facets = set(facets)
-        self.filter_facets.blockSignals(True)
-        for i in range(self.filter_facets.count()):
-            cell = self.filter_facets.item(i)
-            cell.setCheckState(Qt.Checked if tuple(cell.data(Qt.UserRole)) in facets else Qt.Unchecked)
-        self.filter_facets.blockSignals(False)
+        self._metadata_facets = {(kind, label_key(value)) for kind, value in facets}
         self._apply_filters()
 
     def _clear_filters(self):
+        previous = getattr(self, '_updating_tables', False)
+        self._updating_tables = True
         self.filter_text.clear()
         self.filter_bucket.setCurrentIndex(0)
         self.facet_search.clear()
-        self._set_metadata_facets(set())
+        self._metadata_facets = set()
+        self._updating_tables = previous
+        self._apply_filters()
 
-    def _matches_filters(self, item_id, extra_text=""):
+    def _matches_filters(self, item_id, extra_text="", page_index=None, include_facets=True):
         # Queue-only unit callers construct this page without its QWidget UI.
         if "_filter_index" not in self.__dict__ or not self._filter_index:
             return True
@@ -224,24 +330,25 @@ class ReviewPage(QWidget):
         wanted_bucket = self.filter_bucket.currentData()
         if wanted_bucket and bucket != wanted_bucket:
             return False
-        wanted = self._metadata_facets
-        if wanted and not (wanted <= facets if self.filter_mode.currentIndex() == 0 else wanted & facets):
+        wanted, mode = self._page_facets(page_index)
+        if include_facets and wanted and not (wanted <= facets if mode == 0 else wanted & facets):
             return False
-        corpus = text + " " + extra_text.casefold()
-        return all(word in corpus for word in self.filter_text.text().casefold().split())
+        corpus = text + " " + label_key(extra_text)
+        return all(word in corpus for word in label_key(self.filter_text.text()).split())
 
     def _apply_filters(self, *_):
         if "ai_suggestions" not in self.__dict__ or getattr(self, "_updating_tables", False):
             return
+        self._save_facet_state()
         parts = []
-        for table, title in ((self.tab_like, "可能喜欢"), (self.tab_del, "建议删除"),
-                             (self.tab_done, "已打标"), (self.ai_suggestions, "AI建议")):
+        for page_index, (table, title) in enumerate(((self.tab_like, "可能喜欢"), (self.tab_del, "建议删除"),
+                             (self.tab_done, "已打标"), (self.ai_suggestions, "AI建议")), start=1):
             visible = 0
             for row in range(table.rowCount()):
                 cell = table.item(row, 0)
                 extra = " ".join(table.item(row, c).text() for c in range(table.columnCount())
                                  if table.item(row, c))
-                match = bool(cell) and self._matches_filters(cell.data(ROLE_ITEM_ID), extra)
+                match = bool(cell) and self._matches_filters(cell.data(ROLE_ITEM_ID), extra, page_index=page_index)
                 table.setRowHidden(row, not match)
                 visible += int(match)
             table.show_empty_state(visible == 0, filtered=table.rowCount() > 0)
@@ -256,9 +363,10 @@ class ReviewPage(QWidget):
         self.filter_counts.setText(summary)
         self.filter_counts.setToolTip(summary)
         self.filter_toggle.setText(f"标签筛选 ({len(self._metadata_facets)})" if self._metadata_facets else "标签筛选")
-        selected_text = "、".join(sorted(value for _, value in self._metadata_facets))
-        self.facet_status.setText(f"已选 {len(self._metadata_facets)} 项 · 再次点击可取消"
-                                  if self._metadata_facets else "点击标签选中，再次点击取消")
+        self._refresh_facets()
+        selected_text = "、".join(sorted(self._facet_index.labels.get(key, key[1]) for key in self._metadata_facets))
+        self.facet_status.setText(f"已选 {len(self._metadata_facets)} 项 · 上方标签可直接取消"
+                                  if self._metadata_facets else "数字=点击后命中数 · 点击可选/取消")
         self.facet_status.setToolTip(selected_text)
         for key, stack in self._list_stack.items():
             if stack.currentIndex() == 1:
@@ -356,7 +464,7 @@ class ReviewPage(QWidget):
             and not r.is_seen
             and r.item.id not in seen_labeled
             and r.item.id not in self._skipped  # 跳过(搁置)的不再出现
-            and self._matches_filters(r.item.id)
+            and self._matches_filters(r.item.id, page_index=0)
         ]
         if self._order_mode == ORDER_RANDOM:
             import random as _r
@@ -1095,7 +1203,7 @@ class ReviewPage(QWidget):
         lay = self._list_cardlay[key]
         self._clear_layout(lay)
         rows = (getattr(self, "_tab_rows", {}) or {}).get(key, []) or []
-        rows = [row for row in rows if self._matches_filters(row[-2], " ".join(map(str, row)))]
+        rows = [row for row in rows if self._matches_filters(row[-2], " ".join(map(str, row)), page_index={"like": 1, "del": 2, "done": 3}[key])]
         if not rows:
             lbl = QLabel("当前分类无数据。")
             lbl.setProperty("cssClass", "text-muted")
@@ -1322,7 +1430,8 @@ class ReviewPage(QWidget):
     # ── 键盘 ──
     def keyPressEvent(self, event):
         if self.focusWidget() in (self.filter_text, self.facet_search, self.filter_bucket,
-                                  self.filter_mode, self.facet_selection, self.filter_facets, self.tab_like,
+                                  self.filter_mode, self.facet_selection, self.filter_facets,
+                                  self.selected_facets, self.facet_group, self.facet_sort, self.tab_like,
                                   self.tab_del, self.tab_done, self.ai_suggestions):
             super().keyPressEvent(event)
             return
@@ -1330,6 +1439,14 @@ class ReviewPage(QWidget):
             event.ignore()
             return
         key = event.key()
+        if key == Qt.Key_Z and (event.modifiers() & Qt.ControlModifier):
+            self._undo()
+            return
+        if self.main_tabs.currentIndex() != 0:
+            # The review deck remains intact while another result page is active.
+            # Never apply its card shortcuts to an invisible work item.
+            super().keyPressEvent(event)
+            return
         if key == Qt.Key_Right:
             self._label("keep")
             return
@@ -1344,9 +1461,6 @@ class ReviewPage(QWidget):
             return
         if key == Qt.Key_Space and not (event.modifiers() & Qt.ControlModifier):
             self._open_current_folder()
-            return
-        if key == Qt.Key_Z and (event.modifiers() & Qt.ControlModifier):
-            self._undo()
             return
         super().keyPressEvent(event)
 
@@ -1371,5 +1485,7 @@ class ReviewPage(QWidget):
         self._label_anchor = None
         self.ai_suggestions.setRowCount(0)
         self._filter_index = {}
+        self._facet_index = FacetIndex([])
+        self._facet_page_state = {}
         self._profile_overlaps = {}
         self._clear_filters()

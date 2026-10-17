@@ -46,6 +46,8 @@ def test_numeric_sort_and_filter_preserve_selected_identity(page):
 
 
 def test_facets_distinguish_tag_and_genre_and_support_and_or(page):
+    # Facet selections now belong to the active result page.
+    page.main_tabs.setCurrentIndex(1)
     page._set_metadata_facets({('tag', '独有')})
     assert visible_ids(page.tab_like) == ['a']
     page._set_metadata_facets({('genre', '独有')})
@@ -57,7 +59,10 @@ def test_facets_distinguish_tag_and_genre_and_support_and_or(page):
     page.filter_bucket.setCurrentIndex(page.filter_bucket.findData('hentai'))
     assert visible_ids(page.tab_like) == ['b']
     assert page.deck_ids == []
-    assert any('标签: 独有 (1)' == page.filter_facets.item(i).text() for i in range(page.filter_facets.count()))
+    keys = {tuple(page.filter_facets.item(i).data(Qt.UserRole))
+            for i in range(page.filter_facets.count())}
+    assert ('genre', '独有') in keys
+    assert ('tag', '独有') not in keys  # Only Alpha has it; category now contains Beta.
 
 
 def test_ai_sort_filter_and_adoption_use_checked_visible_item_ids(page, monkeypatch):

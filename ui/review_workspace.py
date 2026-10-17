@@ -35,8 +35,9 @@ class ResultTable(QTableWidget):
 class PillDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         facet = index.data(Qt.UserRole)
-        label = (("类型 · " if facet[0] == "genre" else "") + facet[1]) if facet else index.data()
-        width = option.fontMetrics.horizontalAdvance(label + "  " + str(index.data(COUNT_ROLE) or "")) + 26
+        label = (("类型 · " if facet[0] == "genre" else "") + (index.data(Qt.UserRole + 11) or facet[1])) if facet else index.data()
+        count = index.data(COUNT_ROLE)
+        width = option.fontMetrics.horizontalAdvance(label + "  " + (str(count) if count is not None else "")) + 26
         return QSize(min(250, max(64, width)), max(28, option.fontMetrics.height() + 12))
 
     def paint(self, painter, option, index):
@@ -49,8 +50,8 @@ class PillDelegate(QStyledItemDelegate):
         painter.setPen(QPen(QColor(theme.color("accent" if checked else "border"))))
         painter.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
         facet = index.data(Qt.UserRole)
-        label = (("类型 · " if facet[0] == "genre" else "") + facet[1]) if facet else index.data()
-        count = str(index.data(COUNT_ROLE) or "")
+        label = (("类型 · " if facet[0] == "genre" else "") + (index.data(Qt.UserRole + 11) or facet[1])) if facet else index.data()
+        count = str(index.data(COUNT_ROLE)) if index.data(COUNT_ROLE) is not None else ""
         count_width = option.fontMetrics.horizontalAdvance(count) + 8
         text_rect = option.rect.adjusted(12, 0, -count_width - 10, 0)
         painter.setPen(QColor(theme.color("selection_text" if checked else "text_primary")))
@@ -203,11 +204,19 @@ def build_review_workspace(p):
     side = QVBoxLayout(p.filter_panel)
     side.setContentsMargins(8, 4, 0, 0)
     side.setSpacing(6)
-    side.addWidget(QLabel("内容标签 / 类型"))
+    p.facet_context = QLabel("当前结果页 · 尚未分析")
+    side.addWidget(p.facet_context)
     p.facet_search = QLineEdit()
-    p.facet_search.setPlaceholderText("查找标签或类型…")
+    p.facet_search.setPlaceholderText("搜索全部分组 · 空格分词…")
     p.facet_search.setClearButtonEnabled(True)
     side.addWidget(p.facet_search)
+    p.facet_group = QComboBox()
+    for name, value in (("内容标签", 'content'), ("类型", 'genre'), ("技术/版本", 'technical'), ("全部", 'all')):
+        p.facet_group.addItem(name, value)
+    p.facet_sort = QComboBox()
+    for name, value in (("常用优先", 'count'), ("名称排序", 'name'), ("已选优先", 'selected')):
+        p.facet_sort.addItem(name, value)
+    _row(side, p.facet_group, p.facet_sort)
     p.facet_selection = QComboBox()
     p.facet_selection.addItems(["单选标签", "多选标签"])
     p.facet_selection.setCurrentIndex(1)
@@ -222,8 +231,19 @@ def build_review_workspace(p):
     p.facet_status = QLabel("点击标签选中，再次点击取消")
     p.facet_status.setWordWrap(True)
     side.addWidget(p.facet_status)
+    p.selected_facets = FacetCloud()
+    p.selected_facets.setMaximumHeight(70)
+    p.selected_facets.setMinimumHeight(34)
+    p.selected_facets.hide()
+    p.selected_facets.itemChanged.connect(lambda cell: p._set_metadata_facets(
+        p._metadata_facets - {tuple(cell.data(Qt.UserRole))}))
+    side.addWidget(p.selected_facets)
     p.filter_facets = FacetCloud()
-    p.filter_facets.setToolTip("数量为当前媒体库分析范围内作品数。多选时可选择 AND / OR。")
+    p.filter_facets.setToolTip("仅来自当前结果页。数字为点击后的命中数；常用排序保持稳定。已选条件可在上方直接取消。")
+    p.facet_empty = QLabel()
+    p.facet_empty.setWordWrap(True)
+    p.facet_empty.hide()
+    side.addWidget(p.facet_empty)
     side.addWidget(p.filter_facets, 1)
     p.workspace_splitter.addWidget(p.filter_panel)
     p.workspace_splitter.setCollapsible(0, False)
@@ -238,6 +258,8 @@ def build_review_workspace(p):
         p.filter_facets.single_choice = index == 0
         if index == 0 and len(p._metadata_facets) > 1:
             p._set_metadata_facets({sorted(p._metadata_facets)[0]})
+        else:
+            p._apply_filters()
     p.facet_selection.currentIndexChanged.connect(selection_mode)
 
     pending = QScrollArea()
@@ -292,5 +314,8 @@ def build_review_workspace(p):
     p.filter_mode.currentIndexChanged.connect(p._apply_filters)
     p.filter_facets.itemChanged.connect(p._facets_changed)
     p.facet_search.textChanged.connect(p._search_facets)
+    p.facet_group.currentIndexChanged.connect(p._search_facets)
+    p.facet_sort.currentIndexChanged.connect(p._apply_filters)
+    p.main_tabs.currentChanged.connect(p._facet_tab_changed)
     p._clear_card()
     p._render_counts(None)
