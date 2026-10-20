@@ -138,7 +138,7 @@ class ScopeBar(QWidget):
         layout.addWidget(reload_button)
         layout.addWidget(QLabel("额外目录（源服务器路径，每行一项；包含全部子目录）："))
         self.path_edit = QPlainTextEdit("\n".join(self.cfg.library_scope_paths))
-        self.path_edit.setPlaceholderText("例如 /media/movies 或 D:\\电影\\某分类；按完整目录边界匹配")
+        self.path_edit.setPlaceholderText("例如 /media/movies 或 盘符:\\电影\\某分类；按完整目录边界匹配")
         self.path_edit.setMaximumHeight(100)
         layout.addWidget(self.path_edit)
         self.all_mode.toggled.connect(lambda checked: self.library_list.setEnabled(not checked))
