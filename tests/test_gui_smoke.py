@@ -113,25 +113,31 @@ def test_close_event_stops_all_workers(qapp, cfg):
 
 # ── 2. 有码检测页 ──────────────────────────────────────────
 def test_censorship_page_classifies(qapp, cfg, tmp_path):
-    from ui.pages.censorship import CensorshipPage, CensorshipScanWorker
+    """有码检测页：天生无码厂牌直接定无码，普通番号在没有画面证据时必须"未定"。"""
+    from ui.pages.censorship import CensorshipPage
+
+    # 关掉抽帧，只验证证据链与界面回填（画面检测另有独立用例）
+    cfg.censor_visual_enabled = False
+    cfg.censor_detectors = ["series.rules", "filename.rules"]
 
     page = CensorshipPage(cfg)
-    # fc2 命中默认的 uncensored_keywords；ABC-123 不命中 → 判为有码
     (tmp_path / "FC2-PPV-123456.mp4").write_bytes(b"\x00" * 100)
     (tmp_path / "ABC-123.mp4").write_bytes(b"\x00" * 100)
 
-    worker = CensorshipScanWorker(
-        [str(tmp_path)], set(cfg.video_extensions), cfg.uncensored_keywords)
-    worker.file_classified.connect(page._add_file)
-    worker.finished.connect(page._scan_done)
-    worker.start()
-    assert _wait_worker(worker)
+    page._start_scan([str(tmp_path)])
+    assert _wait_worker(page._worker)
+    qapp.processEvents()
 
-    assert page.table_uncensored.rowCount() == 1
-    assert page.table_censored.rowCount() == 1
-    page._clear_all()
-    assert page.table_uncensored.rowCount() == 0
-    assert page.table_censored.rowCount() == 0
+    states = {}
+    for row in range(page.table.rowCount()):
+        name = page.table.item(row, 0).text()
+        states[name] = page.table.item(row, 2).text()
+    assert states["FC2-PPV-123456.mp4"] == "无码"
+    assert states["ABC-123.mp4"] == "未定"
+
+    page._clear()
+    assert page.table.rowCount() == 0
+    assert page.queued_paths() == []
 
 
 # ── 3. 字幕缺失检测页（含断点续传） ─────────────────────────

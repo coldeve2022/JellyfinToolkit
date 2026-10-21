@@ -118,5 +118,30 @@
   "merge_dup_sim_threshold": 0.8,
   "merge_max_parts": 20,
   "merge_min_part_seconds": 3.0,
-  "merge_timeout_per_file": 3600
+  "merge_timeout_per_file": 3600,
+  "_comment_censor": "有码检测：检测器按名字启用，优先级写在 censor/registry.py 里。关掉视觉检测 = 只读元数据，秒出结果但无法证明文件里到底有没有码。",
+  "censor_detectors": [
+    "series.rules",
+    "filename.rules",
+    "nfo.tags",
+    "server.tags",
+    "visual.mosaic_cv"
+  ],
+  "censor_visual_enabled": true,
+  "_comment_censor_frames": "每部片抽多少帧。60 帧 / 3.6 小时片约 30 秒；调大更准也更慢。分析分辨率低于 720p 会让马赛克块缩到 8px 以下而漏检。",
+  "censor_frame_samples": 60,
+  "censor_candidates": 5,
+  "censor_sample_width": 960,
+  "censor_sample_height": 540,
+  "censor_workers": 4,
+  "_comment_censor_thresholds": "强的自动判有码，中的进人工复核队列。宁可多看一眼，不要给自信的错误结论。",
+  "censor_strong_score": 32.0,
+  "censor_review_score": 6.0,
+  "censor_window": 160,
+  "censor_stride": 120,
+  "censor_min_block": 6,
+  "censor_max_block": 56,
+  "censor_min_coverage": 0.6,
+  "censor_min_ratio": 3.0,
+  "censor_edge_threshold": 1.5
 }

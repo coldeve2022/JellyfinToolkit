@@ -80,7 +80,7 @@ PAGES = [
     ("subtitle", "SubtitlePage", "dir_list", "main"),
     ("subtitle_gen", "SubtitleGenPage", "list_files", "main"),
     ("lada", "LadaPage", "list_files", "main"),
-    ("censorship", "CensorshipPage", "table_censored", "main"),
+    ("censorship", "CensorshipPage", "table", "main"),
 ]
 
 
@@ -91,11 +91,11 @@ def make_page(module, name, cfg):
 
 
 def queue_paths(page, view):
+    # 有码检测页没有"队列控件"，它把提交的文件记在 queued_paths() 里
+    queued = getattr(page, "queued_paths", None)
+    if callable(queued):
+        return sorted(queued())
     widget = getattr(page, view)
-    if hasattr(widget, "gather_all_paths"):
-        return sorted(
-            page.table_censored.gather_all_paths() | page.table_uncensored.gather_all_paths()
-        )
     return widget.get_all_paths()
 
 

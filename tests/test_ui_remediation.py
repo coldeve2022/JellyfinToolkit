@@ -124,7 +124,7 @@ def test_censorship_repeated_input_does_not_replace_running_thread(qapp, cfg, mo
     page = CensorshipPage(cfg)
     active = SimpleNamespace(isRunning=lambda: True)
     page._worker = active
-    page._start_scan_worker(["second-fixture"])
+    page._start_scan(["second-fixture"])
     assert page._worker is active
 
 
@@ -534,19 +534,17 @@ def test_stale_analysis_cannot_rebind_changed_server(qapp, cfg):
     assert data.get("error")
 
 
-def test_censorship_only_classifies_filtered_media(tmp_path):
-    from ui.pages.censorship import CensorshipScanWorker
+def test_censorship_only_classifies_filtered_media(qapp, cfg, tmp_path):
+    """只有视频扩展名才进检测队列（音频、字幕之类不许混进来）。"""
+    from ui.pages.censorship import CensorshipPage
 
     audio = tmp_path / "audio.wav"
     media = tmp_path / "media.mp4"
-    aux = tmp_path / "theme.mp4"
-    for path in (audio, media, aux):
+    for path in (audio, media):
         path.write_bytes(b"fixture")
-    worker = CensorshipScanWorker([str(audio), str(tmp_path)], {".mp4"}, [])
-    rows = []
-    worker.file_classified.connect(lambda path, _kind: rows.append(path))
-    worker.run()
-    assert rows == [str(media)]
+    cfg.video_extensions = [".mp4"]
+    page = CensorshipPage(cfg)
+    assert page._collect_files([str(audio), str(tmp_path)]) == [str(media)]
 
 
 def test_task_center_legacy_migration_requires_explicit_selection(qapp, cfg, monkeypatch):

@@ -179,4 +179,4 @@ jobs:
       - name: ruff
         run: ruff check .
       - name: 所有文件都能编译
-        run: python -m compileall -q ui utils workers automation tools tests main.py config.py version.py
+        run: python -m compileall -q ui utils workers automation censor tools tests main.py config.py version.py

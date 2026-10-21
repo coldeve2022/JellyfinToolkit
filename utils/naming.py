@@ -7,6 +7,12 @@ from typing import Iterable, Optional
 def is_uncensored_filename(filename: str, keywords: Iterable[str] = ()) -> bool:
     """根据文件名判断是否为无码/破解版视频。
 
+    .. note::
+       这是**分桶用的粗判**（``utils/library.py`` 区分 JAV/普通影片），
+       不是"这部片有没有码"的结论。要给用户看结论请走 :mod:`censor` ——
+       文件名只能当弱证据，真正的判据是画面与作品级事实。
+
+
     判断规则（任一命中即为无码）：
     1. 文件名包含关键词列表中的任意一个（如 fc2 / tokyo hot / 无码 / uncensored）
     2. FC2 编号格式：fc2-ppv-123456 或 fc2 123456

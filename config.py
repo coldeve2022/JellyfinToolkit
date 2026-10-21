@@ -151,6 +151,36 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "lada_vram_gate": False,
     "lada_vram_high": 10.5,
     "lada_vram_low": 8.5,
+
+    # ── 有码检测：证据融合（见 censor/ 包）──────────────────────────
+    # 启用的检测器（按名字，来自 censor.registry）。顺序不重要，优先级写在注册表里
+    "censor_detectors": [
+        "series.rules", "filename.rules", "nfo.tags", "server.tags", "visual.mosaic_cv",
+    ],
+    # 关掉就不再抽帧，只用元数据（秒级出结果，但不能证明"文件里到底有没有码"）
+    "censor_visual_enabled": True,
+    # 每部片抽多少帧做画面检测。60 帧 / 3.6 小时片约 17 秒；调大更准也更慢
+    "censor_frame_samples": 60,
+    # 复核界面最多展示几帧候选
+    "censor_candidates": 5,
+    # 并行检测几部片。纯 I/O + numpy，4~6 一般能吃满机械盘带宽
+    "censor_workers": 4,
+    # 分析分辨率：960x540 是实测的性价比拐点（1280 的管道开销翻倍、精度提升有限）。
+    # 再往下调会让马赛克块缩到 8px 以下，直接漏检
+    "censor_sample_width": 960,
+    "censor_sample_height": 540,
+    # 网格检测参数：窗口边长 / 步长 / 块边长搜索范围
+    "censor_window": 160,
+    "censor_stride": 120,
+    "censor_min_block": 6,
+    "censor_max_block": 56,
+    "censor_edge_threshold": 1.5,
+    "censor_min_coverage": 0.6,
+    "censor_min_ratio": 3.0,
+    # 达到强阈值 → 自动判有码；达到复核阈值 → 进人工队列
+    # 只有分数很高的才自动判"有码"，其余一律进人工复核 —— 宁可多看一眼，不要误判
+    "censor_strong_score": 32.0,
+    "censor_review_score": 6.0,
 }
 
 PORTABLE_MARKER = "portable.txt"
@@ -309,6 +339,13 @@ def _coerce_config(data: dict) -> dict:
         "whisper_cleanup_similarity": (0.0, 1.0), "lada_parallel_workers": (1, 64),
         "lada_max_clip_length": (0, 1_000_000), "lada_vram_high": (0.1, 1024.0),
         "lada_vram_low": (0.0, 1024.0),
+        "censor_frame_samples": (6, 600), "censor_candidates": (1, 20),
+        "censor_workers": (1, 16),
+        "censor_sample_width": (320, 3840), "censor_sample_height": (180, 2160),
+        "censor_window": (48, 512), "censor_stride": (16, 512),
+        "censor_min_block": (4, 64), "censor_max_block": (8, 128),
+        "censor_min_coverage": (0.0, 1.0), "censor_min_ratio": (1.0, 1000.0),
+        "censor_strong_score": (1.0, 1000.0), "censor_review_score": (0.0, 1000.0),
     }
     for key, (low, high) in bounds.items():
         out[key] = max(low, min(high, out[key]))
@@ -433,6 +470,24 @@ class ToolkitConfig:
     lada_vram_gate: bool = DEFAULT_CONFIG["lada_vram_gate"]
     lada_vram_high: float = DEFAULT_CONFIG["lada_vram_high"]
     lada_vram_low: float = DEFAULT_CONFIG["lada_vram_low"]
+    # ── 有码检测 ──
+    censor_detectors: List[str] = field(
+        default_factory=lambda: list(DEFAULT_CONFIG["censor_detectors"]))
+    censor_visual_enabled: bool = DEFAULT_CONFIG["censor_visual_enabled"]
+    censor_frame_samples: int = DEFAULT_CONFIG["censor_frame_samples"]
+    censor_candidates: int = DEFAULT_CONFIG["censor_candidates"]
+    censor_workers: int = DEFAULT_CONFIG["censor_workers"]
+    censor_sample_width: int = DEFAULT_CONFIG["censor_sample_width"]
+    censor_sample_height: int = DEFAULT_CONFIG["censor_sample_height"]
+    censor_window: int = DEFAULT_CONFIG["censor_window"]
+    censor_stride: int = DEFAULT_CONFIG["censor_stride"]
+    censor_min_block: int = DEFAULT_CONFIG["censor_min_block"]
+    censor_max_block: int = DEFAULT_CONFIG["censor_max_block"]
+    censor_edge_threshold: float = DEFAULT_CONFIG["censor_edge_threshold"]
+    censor_min_coverage: float = DEFAULT_CONFIG["censor_min_coverage"]
+    censor_min_ratio: float = DEFAULT_CONFIG["censor_min_ratio"]
+    censor_strong_score: float = DEFAULT_CONFIG["censor_strong_score"]
+    censor_review_score: float = DEFAULT_CONFIG["censor_review_score"]
 
     # 非持久化：加载时的自愈提示，供界面显示一次
     load_notes: List[str] = field(default_factory=list, compare=False, repr=False)

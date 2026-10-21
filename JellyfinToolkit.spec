@@ -18,13 +18,14 @@ ROOT = Path(SPECPATH)  # noqa: F821 — PyInstaller 注入
 
 # 本工程使用到的自带模块（必须显式收集，避免被 optimize 掉）
 hidden = []
-for pkg in ("utils", "workers", "ui", "automation"):
+for pkg in ("utils", "workers", "ui", "automation", "censor"):
     hidden += collect_submodules(pkg)
 
 # 明确没用到、且体积很大的库 —— 剔掉能显著缩小体积与启动时间
 excludes = [
     "tkinter", "turtle", "idlelib", "lib2to3",
-    "numpy", "scipy", "pandas", "matplotlib", "PIL", "pillow",
+    # 注意：numpy 现在是**运行时依赖**（画面级检码），不能再排除
+    "scipy", "pandas", "matplotlib", "PIL", "pillow",
     "IPython", "jupyter", "notebook", "pytest", "pytest_qt",
     "pygame", "cv2", "torch", "tensorflow",
     # Qt 里没用到的重型模块
