@@ -254,6 +254,8 @@ class ConnectionCheck(QThread):
             "release_proxy": getattr(cfg, "release_proxy", "") or "",
             "release_cf_bypass_url": getattr(cfg, "release_cf_bypass_url", "") or "",
             "release_sources": ["javdb", "supjav"],
+            "release_supjav_engines": list(
+                getattr(cfg, "release_supjav_engines", ["bing", "duckduckgo"]) or []),
             # 测试要快：不重试、短超时、少请求
             "release_timeout": 15.0,
             "release_retries": 0,
@@ -320,18 +322,22 @@ class ConnectionCheck(QThread):
             except Exception as exc:  # noqa: BLE001 - 测试就该把原因显示出来
                 emit(False, f"JavDB 检索失败：{exc}", "站点改版或网络不稳定")
 
-        # 3) Supjav（破解版源，需要旁路）
+        # 3) Supjav（走站点索引，不碰它的 Cloudflare）
         if reachable:
+            source = SupjavSource(transport, self._cfg)
             try:
-                found = SupjavSource(transport, self._cfg).search(
-                    ReleaseQuery(number="NCRA-026"), limit=1)
-                emit(bool(found), f"Supjav 检索：命中 {len(found)} 条",
-                     "" if found else "拿到页面但没解析到条目，可能是选择器需要更新")
-            except TransportBlocked:
-                emit(False, "Supjav：被 Cloudflare 拦截",
-                     "配好上面的旁路地址才能抓这个站（JavDB / JavBus 不受影响）")
-            except Exception as exc:  # noqa: BLE001
-                emit(False, f"Supjav 检索失败：{exc}", "多半还是被拦，或站点不可达")
+                found = source.search(ReleaseQuery(number="NCRA-026"), limit=2)
+            except Exception as exc:  # noqa: BLE001 - 测试就把原因显示出来
+                emit(False, f"Supjav 索引检索失败：{exc}",
+                     "换一个搜索引擎（设置里 release_supjav_engines，例如只留 duckduckgo）")
+            else:
+                detail = "；".join(f"{k}: {v}" for k, v in source.status_detail.items())
+                if found:
+                    emit(True, f"Supjav 索引检索：命中 {len(found)} 条", detail)
+                else:
+                    emit(False, "Supjav 索引检索：没有命中",
+                         (detail + "；" if detail else "")
+                         + "索引里没有这个番号，不代表站上没有，只代表没被索引到")
 
         ok_count = sum(1 for value in checks if value)
         self.passed.emit(ok_count, len(checks))

@@ -195,6 +195,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "release_enabled": True,
     # 启用的检索源（注册名来自 censor/releases/__init__.py），按优先级排序
     "release_sources": ["javdb", "javbus", "supjav"],
+    # Supjav 走"站点索引"检索（它整站挂在 Cloudflare 后面，直连必被拦），
+    # 用搜索引擎的索引查 site:supjav.com <番号>。顺序即尝试顺序
+    "release_supjav_engines": ["bing", "duckduckgo"],
     # 检索走哪个代理。留空 = 自动（环境变量 → Windows 系统代理 → 直连）
     "release_proxy": "",
     # Cloudflare 旁路服务（FlareSolverr 兼容，形如 http://127.0.0.1:8000）。
@@ -537,6 +540,8 @@ class ToolkitConfig:
     release_enabled: bool = DEFAULT_CONFIG["release_enabled"]
     release_sources: List[str] = field(
         default_factory=lambda: list(DEFAULT_CONFIG["release_sources"]))
+    release_supjav_engines: List[str] = field(
+        default_factory=lambda: list(DEFAULT_CONFIG["release_supjav_engines"]))
     release_proxy: str = DEFAULT_CONFIG["release_proxy"]
     release_cf_bypass_url: str = DEFAULT_CONFIG["release_cf_bypass_url"]
     release_bypass_timeout: float = DEFAULT_CONFIG["release_bypass_timeout"]

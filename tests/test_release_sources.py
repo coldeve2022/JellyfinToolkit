@@ -149,28 +149,19 @@ def test_javbus_uc_flag_means_uncensored():
 
 
 # ── Supjav ─────────────────────────────────────────────────
+# 直连抓页面的实现已经废弃（整站 Cloudflare），现在走"站点索引"检索：
+# 解析与判定的用例在 tests/test_release_index.py。
 
-SUPJAV_PAGE = """
-<html><body>
-<a href="https://supjav.com/123456.html" title="x">
-  NCRA-026 【Decensored】Full version
-</a>
-<a href="https://supjav.com/123457.html">OTHER-001 ordinary title</a>
-</body></html>
-"""
+def test_supjav_no_longer_requests_the_site_directly():
+    """Supjav 不该再直连它自己的域名 —— 那只会拿到 403 挑战页。"""
+    transport = FakeTransport({"bing.com": "<html></html>"})
+    SupjavSource(transport, {"release_supjav_engines": ["bing"]}).search(
+        ReleaseQuery(number="NCRA-026"))
+    from urllib.parse import urlsplit
 
-
-def test_supjav_marks_decensored_as_soft_evidence():
-    source = SupjavSource(FakeTransport({"supjav": SUPJAV_PAGE}))
-    found = source.search(ReleaseQuery(number="NCRA-026"))
-    assert len(found) == 1
-    assert found[0].uncensored
-    assert found[0].uncensored_confidence < 0.8, "标题线索只能算软依据"
-
-
-def test_supjav_skips_unrelated_results():
-    source = SupjavSource(FakeTransport({"supjav": SUPJAV_PAGE}))
-    assert source.search(ReleaseQuery(number="ZZZZ-999")) == []
+    assert transport.calls, "应当发起索引查询"
+    hosts = [urlsplit(url).netloc for url in transport.calls]
+    assert all("supjav.com" not in host for host in hosts), hosts
 
 
 # ── 结论判定 ───────────────────────────────────────────────

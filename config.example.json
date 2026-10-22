@@ -156,6 +156,8 @@
   "release_enabled": true,
   "release_auto_lookup": true,
   "release_sources": ["javdb", "javbus", "supjav"],
+  "_comment_release_supjav": "Supjav 整站挂在 Cloudflare 后面，直连必被拦。这里走搜索引擎索引（site:supjav.com 番号）来查有无无码/破解条目，不需要浏览器旁路。顺序即尝试顺序。",
+  "release_supjav_engines": ["bing", "duckduckgo"],
   "_comment_release_proxy": "留空 = 自动（环境变量 → Windows 系统代理 → 直连）。若自动探测到的代理连不上站点，在这里显式填一个，例如 http://127.0.0.1:7897。",
   "release_proxy": "",
   "_comment_release_cf": "Cloudflare 旁路（FlareSolverr 兼容）。Supjav 整站挂在挑战后面，不配它只能得到「被拦截」。",

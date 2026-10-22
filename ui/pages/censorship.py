@@ -364,7 +364,10 @@ class CensorshipPage(QWidget):
             '默认复用通过文件身份、参数和算法版本校验的分析。\n'
             '复用不会自动确认结果：疑似项仍留待复核。历史快照须重新添加文件才校验当前版本。\n'
             '抽样低风险不证明全片没有像素化。Alt+1存在、Alt+2未见、Alt+3下一条。\n'
-            '更多菜单可恢复任务、选择延后视频、查看历史或忽略缓存重新分析。')
+            '更多菜单可恢复任务、选择延后视频、查看历史或忽略缓存重新分析。\n'
+            '「无码版」列来自联网检索：JavDB / JavBus 查官方无码与流出，Supjav 走搜索引擎索引\n'
+            '查破解版。结论分确有 / 疑似 / 未见 / 未查，未查会写明原因；筛选「只看有无码版」\n'
+            '可把没得换的片直接排除。检索方式与代理在「检查设置」里改。')
 
     def _reanalyze_visible(self):
         paths = [self.table.item(row,0).data(Qt.UserRole) for row in range(self.table.rowCount())
