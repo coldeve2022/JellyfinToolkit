@@ -1,0 +1,139 @@
+"""无码版本检索的界面接线用例 —— 不联网，直接喂报告。
+
+守的是这几件事：
+1. 表格多出「无码版」列，且无报告时显示「未查 / 无番号」；
+2. 报告按番号落到所有同番号的行上（同一部片的多份副本共用一条结果）；
+3. 筛选「只看有无码版」只留下确有/疑似；
+4. 面板能正确显示候选与按钮状态。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from censor import CensorState, VideoVerdict  # noqa: E402
+from censor.fusion import fuse  # noqa: E402
+from censor.models import Evidence, EvidenceSource  # noqa: E402
+from censor.releases.models import (  # noqa: E402
+    Availability, MagnetLink, ReleaseCandidate, ReleaseReport,
+)
+
+
+def _verdict(path: str, number: str, state=CensorState.CENSORED) -> VideoVerdict:
+    result = VideoVerdict(path=path, number=number)
+    result.verdict = fuse([Evidence(EvidenceSource.VISUAL, state, 0.9, "画面命中")])
+    return result
+
+
+def _report(number: str, availability: Availability, *, magnet=True) -> ReleaseReport:
+    candidate = ReleaseCandidate(
+        source="javdb", number=number, title=f"{number} 無碼流出",
+        page_url="https://javdb.com/v/xxx", maker="日本コンテンツ流通",
+        uncensored=availability is not Availability.NONE,
+        uncensored_reason="片商为无码厂牌",
+        uncensored_confidence=0.9 if availability is not Availability.NONE else 0.0,
+        magnets=(MagnetLink(uri="magnet:?xt=urn:btih:" + "b" * 40, size_mb=9000),)
+        if magnet else (),
+    )
+    return ReleaseReport(number=number, availability=availability,
+                         candidates=(candidate,), sources={"javdb": "命中 1 条"})
+
+
+@pytest.fixture()
+def cfg():
+    from config import ToolkitConfig
+
+    return ToolkitConfig.load()
+
+
+@pytest.fixture
+def page(qapp, cfg):
+    from ui.pages.censorship import CensorshipPage
+
+    cfg.release_auto_lookup = False      # 用例自己喂报告，别去联网
+    widget = CensorshipPage(cfg)
+    yield widget
+    widget.shutdown()
+
+
+def test_table_has_release_column(page):
+    from ui.pages.censorship import _COLUMNS
+
+    assert page.table.columnCount() == len(_COLUMNS)
+    assert _COLUMNS[-1] == "无码版"
+
+
+def test_release_cell_before_lookup(page):
+    page._on_item(_verdict(r"C:\tmp\ABC-123.mp4", "ABC-123"))
+    page._on_item(_verdict(r"C:\tmp\nonumber.mp4", ""))
+    cells = {page.table.item(r, 0).data(0): page.table.item(r, 7).text()
+             for r in range(page.table.rowCount())}
+    assert cells["ABC-123.mp4"] == "未查"
+    assert cells["nonumber.mp4"] == "无番号"
+
+
+def test_report_updates_all_rows_with_same_number(page):
+    page._on_item(_verdict(r"C:\tmp\a\ABC-123.mp4", "ABC-123"))
+    page._on_item(_verdict(r"C:\tmp\b\ABC-123-1080p.mp4", "ABC-123"))
+    page._on_release_report(_report("ABC-123", Availability.CONFIRMED))
+    texts = {page.table.item(r, 7).text() for r in range(page.table.rowCount())}
+    assert texts and all("确有" in text for text in texts), texts
+
+
+def test_filter_only_actionable(page):
+    page._on_item(_verdict(r"C:\tmp\A-1.mp4", "A-1"))
+    page._on_item(_verdict(r"C:\tmp\B-2.mp4", "B-2"))
+    page._on_release_report(_report("A-1", Availability.CONFIRMED))
+    page._on_release_report(_report("B-2", Availability.NONE))
+
+    page.combo_filter.setCurrentText("只看有无码版")
+    visible = {page.table.item(r, 0).data(0) for r in range(page.table.rowCount())
+               if not page.table.isRowHidden(r)}
+    assert visible == {"A-1.mp4"}
+
+
+def test_panel_shows_candidates_and_enables_download(page):
+    page._on_item(_verdict(r"C:\tmp\ABC-123.mp4", "ABC-123"))
+    page.table.selectRow(0)
+    page._on_row_selected()
+    page._on_release_report(_report("ABC-123", Availability.CONFIRMED))
+
+    assert "确有" in page.release_panel.lbl_summary.text()
+    assert page.release_panel.table.rowCount() == 1
+    assert page.release_panel.btn_open.isEnabled()
+    assert page.release_panel.btn_magnet.isEnabled()
+
+
+def test_panel_without_magnet_disables_copy(page):
+    page._on_item(_verdict(r"C:\tmp\ABC-123.mp4", "ABC-123"))
+    page.table.selectRow(0)
+    page._on_row_selected()
+    page._on_release_report(_report("ABC-123", Availability.CONFIRMED, magnet=False))
+
+    assert not page.release_panel.btn_magnet.isEnabled()
+    assert page.release_panel.btn_open.isEnabled()
+
+
+def test_unknown_report_carries_reason_in_cell(page):
+    report = ReleaseReport(number="ABC123", availability=Availability.UNKNOWN,
+                           note="站点被拦截，未能查证")
+    page._on_item(_verdict(r"C:\tmp\ABC-123.mp4", "ABC-123"))
+    page._on_release_report(report)
+    cell = page.table.item(0, 7).text()
+    assert "未查" in cell and "拦截" in cell, cell
+
+
+def test_uncensored_video_is_not_auto_queued(page):
+    """只查「有码」的片 —— 无码片没有替换意义，别浪费请求。"""
+    page._on_item(_verdict(r"C:\tmp\ABC-123.mp4", "ABC-123", CensorState.UNCENSORED))
+    # 直接检查排队逻辑（不跑计时器）
+    pending_before = list(page._lookup_pending)
+    for result in page._results.values():
+        page._maybe_queue_lookup(result)
+    assert page._lookup_pending == pending_before

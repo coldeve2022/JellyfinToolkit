@@ -35,6 +35,10 @@ def _never_stop() -> bool:
     return False
 
 
+def _no_progress(_stage: str, _done: int, _total: int) -> None:
+    pass
+
+
 @dataclass
 class ProbeContext:
     """一次检测所需的全部输入。**检测器只能读它，不能改全局状态。**"""
@@ -58,6 +62,7 @@ class ProbeContext:
     should_stop: Callable[[], bool] = _never_stop
     #: 进度/日志回调
     log: Callable[[str], None] = _noop
+    progress: Callable[[str, int, int], None] = _no_progress
     #: 检测器之间共享的临时数据（例如画面检测算出来的候选帧）
     shared: dict[str, Any] = field(default_factory=dict)
     #: 上一次缓存的结论（供"只补跑失败的检测器"用）
@@ -81,6 +86,8 @@ class BaseDetector:
 
     #: 注册表里的名字，也是配置里开关用的名字
     name: str = ""
+    version: str = "1"
+    capabilities: tuple[str, ...] = ()
     #: 界面显示名
     title: str = ""
 

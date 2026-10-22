@@ -1,8 +1,7 @@
-"""有码判定的领域模型。
+"""Evidence, processing status and pixelation candidates.
 
-**这一层不碰 Qt、不碰网络、不碰 ffmpeg**，只描述"证据长什么样、结论怎么表示"。
-这样无论后面接纯 CV、本地视觉模型、还是在线作品库，都往同一个模型里灌证据，
-UI 与缓存层完全不需要知道证据是哪来的。
+This module has no Qt, network, FFmpeg or NumPy dependency. Serialized state
+values remain compatible with historical caches; metadata is only a clue.
 """
 
 from __future__ import annotations
@@ -10,6 +9,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+
+
+class ProcessingStatus(str, Enum):
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    PARTIAL = "partial"
+
+    @property
+    def label(self) -> str:
+        return {"completed": "已完成", "cancelled": "已取消",
+                "failed": "失败", "partial": "部分完成"}[self.value]
 
 
 class CensorState(str, Enum):
@@ -57,6 +68,7 @@ class Evidence:
     state: CensorState
     confidence: float = 0.5
     detail: str = ""
+    review_required: Optional[bool] = None
 
     def __post_init__(self) -> None:
         self.confidence = max(0.0, min(float(self.confidence), self.source.ceiling))
@@ -73,8 +85,10 @@ class FrameCandidate:
     score: float                      # 网格分，越大越像马赛克
     block_size: int = 0               # 检测到的方块边长（像素）
     box: Optional[tuple[int, int, int, int]] = None  # 命中区域 x0,y0,x1,y1
-    skin_ratio: float = 0.0           # 肤色占比，用来排序"最可能露骨"
+    skin_ratio: float = 0.0           # 仅兼容旧缓存；通用检测不使用此字段
     thumb_path: str = ""              # 缩略图落盘路径（可为空）
+    frame_hash: str = ""              # 分析像素摘要；重复帧不构成独立证据
+    crop_path: str = ""
 
     @property
     def hms(self) -> str:
@@ -119,6 +133,16 @@ class VideoVerdict:
     visual_score: float = 0.0         # 画面检测的最高分（无画面检测时为 0）
     elapsed: float = 0.0              # 本片耗时（秒），用于估算整库时间
     error: str = ""
+    status: ProcessingStatus = ProcessingStatus.COMPLETED
+    sampled_frames: int = 0
+    analyzed_frames: int = 0
+    file_identity: str = ""
+    analysis_signature: str = ""
+    detector_runs: dict = field(default_factory=dict)
+    # Runtime provenance, deliberately not persisted as a file fact.
+    cache_hit: bool = False
+    from_history: bool = False
+    scheduling_note: str = ''
 
     @property
     def state(self) -> CensorState:

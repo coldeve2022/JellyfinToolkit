@@ -162,7 +162,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 每部片抽多少帧做画面检测。60 帧 / 3.6 小时片约 17 秒；调大更准也更慢
     "censor_frame_samples": 60,
     # 复核界面最多展示几帧候选
-    "censor_candidates": 5,
+    "censor_candidates": 18,
     # 并行检测几部片。纯 I/O + numpy，4~6 一般能吃满机械盘带宽
     "censor_workers": 4,
     # 分析分辨率：960x540 是实测的性价比拐点（1280 的管道开销翻倍、精度提升有限）。
@@ -171,16 +171,43 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "censor_sample_height": 540,
     # 网格检测参数：窗口边长 / 步长 / 块边长搜索范围
     "censor_window": 160,
+    "censor_windows": [80, 160, 240],
+    "censor_candidate_gap_seconds": 10.0,
+    "censor_sampling_timeout": 900.0,
+    "censor_min_step": 2.0,
+    "censor_row_step": 2,
+    "censor_min_chunks": 5,
+    "censor_ratio_cap": 40.0,
     "censor_stride": 120,
     "censor_min_block": 6,
     "censor_max_block": 56,
     "censor_edge_threshold": 1.5,
     "censor_min_coverage": 0.6,
+    "censor_min_phase_consistency": 0.7,
     "censor_min_ratio": 3.0,
     # 达到强阈值 → 自动判有码；达到复核阈值 → 进人工队列
     # 只有分数很高的才自动判"有码"，其余一律进人工复核 —— 宁可多看一眼，不要误判
     "censor_strong_score": 32.0,
     "censor_review_score": 6.0,
+
+    # ── 无码版本网络检索（见 censor/releases/）────────────────────────
+    # 总开关：关掉后【无码版本】列显示"未查"，扫描也不再自动去查
+    "release_enabled": True,
+    # 启用的检索源（注册名来自 censor/releases/__init__.py），按优先级排序
+    "release_sources": ["javdb", "javbus", "supjav"],
+    # 检索走哪个代理。留空 = 自动（环境变量 → Windows 系统代理 → 直连）
+    "release_proxy": "",
+    # Cloudflare 旁路服务（FlareSolverr 兼容，形如 http://127.0.0.1:8000）。
+    # 留空 = 不走旁路；Supjav 这类站必须配了它才抓得到
+    "release_cf_bypass_url": "",
+    "release_timeout": 20.0,          # 单次请求超时（秒）
+    "release_retries": 2,             # 同一线路重试次数（4xx 不重试）
+    "release_min_interval": 1.5,      # 同站两次请求最小间隔（秒），别把站点打挂
+    "release_max_requests": 40,       # 单次检索请求上限
+    "release_detail_limit": 4,        # 每个站点最多抓几个条目的详情
+    "release_cache_days": 7,          # 检索结果缓存天数
+    # 扫描判定为「有码」后自动去查无码版；关掉则只能手动点
+    "release_auto_lookup": True,
 }
 
 PORTABLE_MARKER = "portable.txt"
@@ -309,6 +336,9 @@ def _coerce_config(data: dict) -> dict:
                 and isinstance(entry.get("remote"), str) and entry["remote"].strip()
                 and isinstance(entry.get("local"), str) and entry["local"].strip()
             ] if isinstance(value, list) else []
+        elif key == 'censor_windows':
+            out[key] = sorted(set(x for x in value if isinstance(x, int)
+                                  and not isinstance(x, bool) and 16 <= x <= 512)) if isinstance(value, list) else list(default)
         elif isinstance(default, bool):
             out[key] = value if isinstance(value, bool) else default
         elif isinstance(default, int):
@@ -344,8 +374,16 @@ def _coerce_config(data: dict) -> dict:
         "censor_sample_width": (320, 3840), "censor_sample_height": (180, 2160),
         "censor_window": (48, 512), "censor_stride": (16, 512),
         "censor_min_block": (4, 64), "censor_max_block": (8, 128),
+        "censor_min_phase_consistency": (0.0, 1.0),
+        "release_timeout": (3.0, 300.0), "release_retries": (0, 5),
+        "release_min_interval": (0.0, 60.0), "release_max_requests": (1, 400),
+        "release_detail_limit": (1, 20), "release_cache_days": (0, 3650),
         "censor_min_coverage": (0.0, 1.0), "censor_min_ratio": (1.0, 1000.0),
         "censor_strong_score": (1.0, 1000.0), "censor_review_score": (0.0, 1000.0),
+        "censor_candidate_gap_seconds": (0.0, 86400.0),
+        "censor_sampling_timeout": (0.1, 86400.0),
+        "censor_min_step": (0.0, 255.0), "censor_row_step": (1, 32),
+        "censor_min_chunks": (4, 32), "censor_ratio_cap": (1.0, 1000.0),
     }
     for key, (low, high) in bounds.items():
         out[key] = max(low, min(high, out[key]))
@@ -480,10 +518,31 @@ class ToolkitConfig:
     censor_sample_width: int = DEFAULT_CONFIG["censor_sample_width"]
     censor_sample_height: int = DEFAULT_CONFIG["censor_sample_height"]
     censor_window: int = DEFAULT_CONFIG["censor_window"]
+    censor_windows: List[int] = field(default_factory=lambda: list(DEFAULT_CONFIG['censor_windows']))
+    censor_candidate_gap_seconds: float = DEFAULT_CONFIG['censor_candidate_gap_seconds']
+    censor_sampling_timeout: float = DEFAULT_CONFIG['censor_sampling_timeout']
+    censor_min_step: float = DEFAULT_CONFIG['censor_min_step']
+    censor_row_step: int = DEFAULT_CONFIG['censor_row_step']
+    censor_min_chunks: int = DEFAULT_CONFIG['censor_min_chunks']
+    censor_ratio_cap: float = DEFAULT_CONFIG['censor_ratio_cap']
     censor_stride: int = DEFAULT_CONFIG["censor_stride"]
     censor_min_block: int = DEFAULT_CONFIG["censor_min_block"]
     censor_max_block: int = DEFAULT_CONFIG["censor_max_block"]
     censor_edge_threshold: float = DEFAULT_CONFIG["censor_edge_threshold"]
+    censor_min_phase_consistency: float = DEFAULT_CONFIG["censor_min_phase_consistency"]
+    # ── 无码版本网络检索 ──
+    release_enabled: bool = DEFAULT_CONFIG["release_enabled"]
+    release_sources: List[str] = field(
+        default_factory=lambda: list(DEFAULT_CONFIG["release_sources"]))
+    release_proxy: str = DEFAULT_CONFIG["release_proxy"]
+    release_cf_bypass_url: str = DEFAULT_CONFIG["release_cf_bypass_url"]
+    release_timeout: float = DEFAULT_CONFIG["release_timeout"]
+    release_retries: int = DEFAULT_CONFIG["release_retries"]
+    release_min_interval: float = DEFAULT_CONFIG["release_min_interval"]
+    release_max_requests: int = DEFAULT_CONFIG["release_max_requests"]
+    release_detail_limit: int = DEFAULT_CONFIG["release_detail_limit"]
+    release_cache_days: int = DEFAULT_CONFIG["release_cache_days"]
+    release_auto_lookup: bool = DEFAULT_CONFIG["release_auto_lookup"]
     censor_min_coverage: float = DEFAULT_CONFIG["censor_min_coverage"]
     censor_min_ratio: float = DEFAULT_CONFIG["censor_min_ratio"]
     censor_strong_score: float = DEFAULT_CONFIG["censor_strong_score"]

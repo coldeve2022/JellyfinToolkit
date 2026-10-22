@@ -25,6 +25,10 @@ if str(ROOT) not in sys.path:
 import os  # noqa: E402
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 测试期间禁止任何联网检索：无码版本检索走的是真实站点，
+# 一旦某个用例触发它，CI 会卡在 20 秒超时上，且结果依赖外网。
+# 需要验证网络逻辑的用例请自行 monkeypatch.delenv 后再跑（见 test_release_transport）。
+os.environ.setdefault("JELLYFIN_TOOLKIT_OFFLINE", "1")
 if sys.platform == "win32":
     # 离屏模式下 Qt 找不到系统字体，中文会渲染成方块 —— 显式指到系统字体目录
     os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")

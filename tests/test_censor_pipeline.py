@@ -128,13 +128,13 @@ def _make_file(tmp_path: Path, name: str, payload: bytes = b"x" * 32) -> Path:
     return path
 
 
-def test_service_decides_uncensored_for_provider_series(tmp_path):
+def test_service_treats_provider_series_as_metadata_only(tmp_path):
     svc = CensorService(CFG, data_dir=tmp_path)
     result = svc.probe(_make_file(tmp_path, "heyzo-1234.mp4"),
                        CensorOptions(detect_visual=False))
-    assert result.state is CensorState.UNCENSORED
-    assert result.verdict.confidence >= 0.6
-    assert not result.verdict.needs_review
+    assert result.state is CensorState.UNKNOWN
+    assert result.verdict.confidence == 0
+    assert result.verdict.needs_review
     assert result.number == "HEYZO-1234"
 
 
@@ -178,8 +178,11 @@ def test_service_survives_broken_detector(tmp_path):
     try:
         svc = CensorService(CFG, data_dir=tmp_path)
         path = _make_file(tmp_path, "heyzo-1111.mp4")
-        result = svc.probe(path, CensorOptions(detect_visual=False))
-        assert result.state is CensorState.UNCENSORED     # 其它检测器照常工作
+        result = svc.probe(path, CensorOptions(detect_visual=False,
+                                             detectors=['test.boom', 'series.rules']))
+        assert result.state is CensorState.UNKNOWN
+        assert result.status.value == 'partial'
+        assert result.verdict.of(EvidenceSource.SERIES) is not None
         assert "test.boom" in result.error
     finally:
         detectors.discard(Boom.name)

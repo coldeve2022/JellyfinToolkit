@@ -575,7 +575,7 @@ FORBIDDEN_FILES = [
 ]
 
 SKIP_DIRS = {"build", "dist", "demo", "docs", "assets", ".git",
-             "__pycache__", ".pytest_cache", ".venv"}
+             "__pycache__", ".pytest_cache", ".venv", ".local"}
 
 # 本文件自身列举了这些关键词，扫描时要跳过，否则自己举报自己
 SELF = "test_portability.py"
@@ -600,8 +600,11 @@ def test_no_personal_paths_in_source():
 
 
 def test_no_personal_data_files_present():
-    """个人数据文件不得留在工作副本里。"""
-    offenders = [name for name in FORBIDDEN_FILES if (ROOT / name).exists()]
+    """个人数据不得纳入版本控制；正常本机运行可以产生被忽略的数据库。"""
+    result = subprocess.run(['git', 'ls-files', '-z'], cwd=ROOT,
+                            capture_output=True, check=True)
+    tracked = set(result.stdout.decode('utf-8').split('\0'))
+    offenders = [name for name in FORBIDDEN_FILES if name in tracked]
     assert not offenders, (
         "仓库里存在个人数据文件，必须删除后再提交：\n" + "\n".join(offenders))
 

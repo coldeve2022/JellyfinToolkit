@@ -39,9 +39,9 @@ def test_visual_beats_tag():
 
 def test_series_rules_decide_uncensored():
     verdict = fuse([ev(EvidenceSource.SERIES, CensorState.UNCENSORED, 0.8, "FC2")])
-    assert verdict.state is CensorState.UNCENSORED
-    assert verdict.confidence == 0.8
-    assert not verdict.needs_review
+    assert verdict.state is CensorState.UNKNOWN
+    assert verdict.confidence == 0
+    assert verdict.needs_review
 
 
 def test_weak_visual_hit_does_not_decide():
@@ -50,13 +50,13 @@ def test_weak_visual_hit_does_not_decide():
         ev(EvidenceSource.VISUAL, CensorState.CENSORED, 0.4, "弱命中"),
         ev(EvidenceSource.SERIES, CensorState.UNCENSORED, 0.8, "FC2"),
     ])
-    assert verdict.state is CensorState.UNCENSORED
+    assert verdict.state is CensorState.UNKNOWN
 
 
 def test_tag_only_uncensored_is_flagged_for_review():
     """这正是用户不信任的那一路：只凭标签给低置信度 + 强制复核。"""
     verdict = fuse([ev(EvidenceSource.SERVER_TAG, CensorState.UNCENSORED, 0.45, "标签:无码")])
-    assert verdict.state is CensorState.UNCENSORED
+    assert verdict.state is CensorState.UNKNOWN
     assert verdict.confidence <= 0.5
     assert verdict.needs_review
 
@@ -66,8 +66,8 @@ def test_tag_plus_quiet_visual_raises_confidence():
         ev(EvidenceSource.NFO, CensorState.UNCENSORED, 0.5, "NFO:无码"),
         ev(EvidenceSource.VISUAL, CensorState.UNKNOWN, 0.0, "未见网格"),
     ])
-    assert verdict.state is CensorState.UNCENSORED
-    assert verdict.confidence > 0.5
+    assert verdict.state is CensorState.UNKNOWN
+    assert verdict.confidence == 0
     assert verdict.needs_review
 
 
@@ -101,3 +101,13 @@ def test_explain_rows():
     verdict = fuse([ev(EvidenceSource.SERIES, CensorState.UNCENSORED, 0.8, "FC2")])
     rows = explain(verdict)
     assert rows and rows[0][0] == "series"
+
+
+def test_conflicting_visual_plugins_require_review():
+    verdict = fuse([
+        ev(EvidenceSource.VISUAL, CensorState.CENSORED, .85, 'grid'),
+        ev(EvidenceSource.VISUAL, CensorState.UNCENSORED, .95, 'other algorithm'),
+    ])
+    assert verdict.state is CensorState.UNKNOWN
+    assert verdict.needs_review
+    assert '冲突' in verdict.reason

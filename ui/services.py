@@ -282,6 +282,15 @@ class TaskManager(QObject):
         # WA_ForceDisabled also distinguishes an explicitly disabled control
         # from one merely inheriting a disabled page/container.
         for control in candidates:
+            # Pages may explicitly preserve read-only browsing during a task.
+            # Inherit the opt-in so table headers/scrollbars remain usable too.
+            ancestor = control
+            while ancestor is not None and ancestor is not owner:
+                if ancestor.property('taskInteractive'):
+                    break
+                ancestor = ancestor.parent()
+            if ancestor is not None and ancestor is not owner:
+                continue
             if isinstance(control, QPushButton) and not any(
                 token in control.text() for token in ("停止", "暂停", "继续")
             ):
@@ -316,9 +325,11 @@ class TaskManager(QObject):
             worker.result.connect(lambda *args, tid=task_id: self._result(tid, args))
         if hasattr(worker, "error"):
             worker.error.connect(lambda value, tid=task_id: self._error(tid, value))
-        if hasattr(worker, "progress"):
+        if hasattr(worker, 'task_status'):
+            worker.task_status.connect(lambda value, tid=task_id: self._task_status(tid, value))
+        elif hasattr(worker, "progress"):
             worker.progress.connect(lambda *args, tid=task_id: self._progress(tid, args))
-        if hasattr(worker, "log"):
+        if hasattr(worker, "log") and not hasattr(worker, 'task_status'):
             worker.log.connect(lambda value, tid=task_id: self._log(tid, value))
         worker.start()
         self.changed.emit()
@@ -358,6 +369,18 @@ class TaskManager(QObject):
         if task_id in self._active and args and isinstance(args[-1], (int, float)):
             self._active[task_id]["record"]["progress"] = max(0, min(100, int(args[-1])))
             self.changed.emit()
+
+    def _task_status(self, task_id, payload):
+        if task_id not in self._active or not isinstance(payload, dict):
+            return
+        record = self._active[task_id]['record']
+        record['detail'] = str(payload.get('detail', ''))
+        record['phase'] = str(payload.get('phase', ''))
+        record['indeterminate'] = payload.get('progress') is None
+        if not record['indeterminate']:
+            record['progress'] = max(0, min(100, int(payload['progress'])))
+        record['scan'] = payload
+        self.changed.emit()
 
     def _log(self, task_id, value):
         if task_id in self._active:

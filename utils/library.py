@@ -406,6 +406,16 @@ def is_junk_attachment_path(path: str, name: Optional[str] = None) -> bool:
     if not stem:
         return False
 
+    # Explicit attachment markers may precede technical suffixes. Avoid broad
+    # substring matching, which would hide titles such as Trailer Park Boys.
+    if re.search(r'(?:^|[\s._\-])(trailer|sample|teaser|promo|preview)'
+                 r'(?:[\s._\-]+(?:\d+[pi]?|x26[45]|h26[45]|hevc|avc|web|dl|aac))*$', stem, re.I):
+        return True
+    if re.match(r'^(?:预告片?|花絮|幕后|特典)[_.\-\s【\[]', stem):
+        return True
+    if re.search(r'[\[【](?:trailer|sample|teaser|promo|preview|预告片?|花絮)[\]】]', stem, re.I):
+        return True
+
     # 1) 整个文件名正好是附属名（含 fanart / fanart1 这类）
     if stem in AUX_AMBIGUOUS_STEMS or re.fullmatch(r"fanart\d*", stem):
         return True

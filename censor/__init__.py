@@ -18,7 +18,10 @@
 2. 在本文件 :func:`register_builtins` 里 ``detectors.add(...)`` 一行；
 3. 完。UI、缓存、融合都不用改。
 
-同理，将来接"无码资源检索源"就 ``sources.add(...)``。
+无码版本检索在 :mod:`censor.releases` 里，用同一张 ``sources`` 注册表：
+
+    from censor import releases          # 导入即注册 javdb / javbus / supjav
+    report = releases.ReleaseService(cfg).lookup("PIYO-170")
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from censor.numbering import MovieNumber, parse_from_path, parse_number
 from censor.registry import PluginSpec, Registry, detectors, sources
 from censor.service import CensorOptions, CensorService
 from censor.store import StoreStats, VerdictStore
+from censor import releases  # noqa: F401 - 导入即注册检索源
 
 __all__ = [
     "BaseDetector", "DetectorError", "ProbeContext",
@@ -41,7 +45,7 @@ __all__ = [
     "FusionPolicy", "fuse", "explain",
     "MovieNumber", "parse_from_path", "parse_number",
     "PluginSpec", "Registry", "detectors", "sources",
-    "register_builtins",
+    "register_builtins", "releases",
 ]
 
 

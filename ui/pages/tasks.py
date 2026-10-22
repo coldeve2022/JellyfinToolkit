@@ -57,7 +57,7 @@ class TaskCenterPage(QWidget):
         actions.addStretch()
         root.addLayout(actions)
         tabs = QTabWidget()
-        self.tasks = self._table(["任务", "状态", "进度", "开始", "结束"])
+        self.tasks = self._table(["任务", "状态", "进度", "开始", "结束", "当前阶段 / 明细"])
         self.backups = self._table(["动作", "状态", "原路径", "目标 / 备份", "记录时间"])
         tabs.addTab(self.tasks, "任务与历史")
         tabs.addTab(self.backups, "文件备份与删除恢复")
@@ -111,9 +111,10 @@ class TaskCenterPage(QWidget):
             values = [
                 record["title"],
                 STATUS.get(record["status"], record["status"]),
-                str(record["progress"]) + "%",
+                '发现/准备中' if record.get('indeterminate') else str(record["progress"]) + "%",
                 record["started"],
                 record.get("ended", "—"),
+                record.get('detail', ''),
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -128,7 +129,7 @@ class TaskCenterPage(QWidget):
             task_id = selected[0].data(Qt.UserRole)
             record = next((r for r in self.manager.records if r["id"] == task_id), {})
             self.details.setPlainText(
-                record.get("error", "") + "\n" + "\n".join(record.get("logs", []))
+                record.get('detail', '') + '\n' + record.get("error", "") + "\n" + "\n".join(record.get("logs", []))
             )
 
     def _stop_selected(self):

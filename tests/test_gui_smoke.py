@@ -112,8 +112,8 @@ def test_close_event_stops_all_workers(qapp, cfg):
 
 
 # ── 2. 有码检测页 ──────────────────────────────────────────
-def test_censorship_page_classifies(qapp, cfg, tmp_path):
-    """有码检测页：天生无码厂牌直接定无码，普通番号在没有画面证据时必须"未定"。"""
+def test_censorship_page_classifies(qapp, cfg, tmp_path, qtbot):
+    """元数据模式下，所有文件都保持待确认，不冒充画面结论。"""
     from ui.pages.censorship import CensorshipPage
 
     # 关掉抽帧，只验证证据链与界面回填（画面检测另有独立用例）
@@ -125,6 +125,7 @@ def test_censorship_page_classifies(qapp, cfg, tmp_path):
     (tmp_path / "ABC-123.mp4").write_bytes(b"\x00" * 100)
 
     page._start_scan([str(tmp_path)])
+    qtbot.waitUntil(lambda: page._worker is not None, timeout=3000)
     assert _wait_worker(page._worker)
     qapp.processEvents()
 
@@ -132,8 +133,13 @@ def test_censorship_page_classifies(qapp, cfg, tmp_path):
     for row in range(page.table.rowCount()):
         name = page.table.item(row, 0).text()
         states[name] = page.table.item(row, 2).text()
-    assert states["FC2-PPV-123456.mp4"] == "无码"
-    assert states["ABC-123.mp4"] == "未定"
+    assert states["FC2-PPV-123456.mp4"] == "待确认"
+    assert states["ABC-123.mp4"] == "待确认"
+
+    # TaskManager restores controls after its queued delivery barrier, which
+    # can finish later than QThread.wait(). Clearing while busy is disallowed.
+    from ui.services import busy
+    qtbot.waitUntil(lambda: not busy(page), timeout=2000)
 
     page._clear()
     assert page.table.rowCount() == 0

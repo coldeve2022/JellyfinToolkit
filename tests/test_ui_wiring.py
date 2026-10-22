@@ -147,7 +147,7 @@ def test_all_private_self_calls_are_defined():
     offenders = []
     for path in sorted(root.rglob("*.py")):
         parts = path.relative_to(root).parts
-        if parts[0] in ("build", "dist", "tests", "tools") or "__pycache__" in parts:
+        if parts[0] in ("build", "dist", "tests", "tools", ".venv", "venv", ".local", ".git") or "__pycache__" in parts:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}

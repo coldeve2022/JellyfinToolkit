@@ -1,12 +1,8 @@
-"""检测结果缓存 —— 第二次打开同一部片，不该再花 25 秒。
+"""Version-aware SQLite analysis cache and manual-label history.
 
-设计
-----
-- **键是路径，有效性看 (size, mtime)**：文件被替换过（比如你做了
-  破解替换）自然失效重算，不需要用户手动清缓存。
-- 证据与候选帧以 JSON 存一行，表结构扁平，方便直接用 sqlite 工具查。
-- 另建一张 ``censor_label`` 专门存**人工结论**：它是训练/调参语料，
-  也是唯一"永不自动覆盖"的表 —— 算法改版重算时它必须活下来。
+Strict service reads require file identity, analysis signature and completed
+processing. Legacy rows remain browsable; legacy unversioned labels cannot
+confirm a new file. Schema upgrades preserve both automatic and manual records.
 """
 
 from __future__ import annotations
@@ -19,7 +15,13 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from censor.models import (
-    CensorState, Evidence, EvidenceSource, FrameCandidate, Verdict, VideoVerdict,
+    CensorState,
+    Evidence,
+    EvidenceSource,
+    FrameCandidate,
+    Verdict,
+    VideoVerdict,
+    ProcessingStatus,
 )
 
 __all__ = ["VerdictStore"]
@@ -60,8 +62,16 @@ def _now() -> str:
 
 def _dump_evidence(evidence: Iterable[Evidence]) -> str:
     return json.dumps(
-        [{"source": ev.source.value, "state": ev.state.value,
-          "confidence": ev.confidence, "detail": ev.detail} for ev in evidence],
+        [
+            {
+                "source": ev.source.value,
+                "state": ev.state.value,
+                "confidence": ev.confidence,
+                "detail": ev.detail,
+                "review_required": ev.review_required,
+            }
+            for ev in evidence
+        ],
         ensure_ascii=False,
     )
 
@@ -72,14 +82,21 @@ def _load_evidence(raw: str) -> list[Evidence]:
         items = json.loads(raw or "[]")
     except (TypeError, ValueError):
         return out
-    for item in items or []:
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
         try:
-            out.append(Evidence(
-                source=EvidenceSource(item["source"]),
-                state=CensorState(item["state"]),
-                confidence=float(item.get("confidence", 0.0)),
-                detail=str(item.get("detail", "")),
-            ))
+            out.append(
+                Evidence(
+                    source=EvidenceSource(item["source"]),
+                    state=CensorState(item["state"]),
+                    confidence=float(item.get("confidence", 0.0)),
+                    detail=str(item.get("detail", "")),
+                review_required=item.get('review_required') if isinstance(item.get('review_required'), bool) else None,
+                )
+            )
         except (KeyError, ValueError, TypeError):
             continue
     return out
@@ -87,9 +104,19 @@ def _load_evidence(raw: str) -> list[Evidence]:
 
 def _dump_candidates(candidates: Iterable[FrameCandidate]) -> str:
     return json.dumps(
-        [{"timestamp": c.timestamp, "score": c.score, "block_size": c.block_size,
-          "box": list(c.box) if c.box else None, "skin_ratio": c.skin_ratio,
-          "thumb_path": c.thumb_path} for c in candidates],
+        [
+            {
+                "timestamp": c.timestamp,
+                "score": c.score,
+                "block_size": c.block_size,
+                "box": list(c.box) if c.box else None,
+                "skin_ratio": c.skin_ratio,
+                "thumb_path": c.thumb_path,
+                "frame_hash": c.frame_hash,
+                "crop_path": c.crop_path,
+            }
+            for c in candidates
+        ],
         ensure_ascii=False,
     )
 
@@ -100,17 +127,25 @@ def _load_candidates(raw: str) -> list[FrameCandidate]:
         items = json.loads(raw or "[]")
     except (TypeError, ValueError):
         return out
-    for item in items or []:
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
         try:
             box = item.get("box")
-            out.append(FrameCandidate(
-                timestamp=float(item.get("timestamp", 0.0)),
-                score=float(item.get("score", 0.0)),
-                block_size=int(item.get("block_size", 0) or 0),
-                box=tuple(box) if box else None,
-                skin_ratio=float(item.get("skin_ratio", 0.0) or 0.0),
-                thumb_path=str(item.get("thumb_path", "") or ""),
-            ))
+            out.append(
+                FrameCandidate(
+                    timestamp=float(item.get("timestamp", 0.0)),
+                    score=float(item.get("score", 0.0)),
+                    block_size=int(item.get("block_size", 0) or 0),
+                    box=tuple(box) if box else None,
+                    skin_ratio=float(item.get("skin_ratio", 0.0) or 0.0),
+                    thumb_path=str(item.get("thumb_path", "") or ""),
+                    frame_hash=str(item.get("frame_hash", "") or ""),
+                    crop_path=str(item.get('crop_path', '') or ''),
+                )
+            )
         except (TypeError, ValueError):
             continue
     return out
@@ -128,8 +163,10 @@ class StoreStats:
     labeled: int = 0
 
     def as_text(self) -> str:
-        return (f"已扫 {self.total} · 有码 {self.censored} · 无码 {self.uncensored} · "
-                f"未定 {self.unknown} · 待复核 {self.review} · 人工 {self.labeled}")
+        return (
+            f"已扫 {self.total} · 检出像素化 {self.censored} · 人工未见 {self.uncensored} · "
+            f"待确认 {self.unknown} · 待复核 {self.review} · 人工记录 {self.labeled}"
+        )
 
 
 class VerdictStore:
@@ -150,35 +187,117 @@ class VerdictStore:
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(censor_probe)")}
+            for name, definition in {
+                "file_identity": "TEXT NOT NULL DEFAULT ''",
+                "analysis_signature": "TEXT NOT NULL DEFAULT ''",
+                "status": "TEXT NOT NULL DEFAULT 'partial'",
+                "sampled_frames": "INTEGER NOT NULL DEFAULT 0",
+                "analyzed_frames": "INTEGER NOT NULL DEFAULT 0",
+                "detector_runs": "TEXT NOT NULL DEFAULT '{}'",
+            }.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE censor_probe ADD COLUMN {name} {definition}")
+            had_history = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='censor_label_history'"
+            ).fetchone()
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS censor_label_history ("
+                "path TEXT NOT NULL, file_identity TEXT NOT NULL, state TEXT NOT NULL,"
+                "note TEXT NOT NULL, labeled_at TEXT NOT NULL,"
+                "PRIMARY KEY(path, file_identity))"
+            )
+            if not had_history:
+                conn.execute(
+                    "INSERT OR IGNORE INTO censor_label_history "
+                    "SELECT path, '', state, note, labeled_at FROM censor_label"
+                )
 
     # ── 读写 ──
-    def get(self, path: str, size: int = -1, mtime: float = -1.0) -> Optional[VideoVerdict]:
+    def get(
+        self,
+        path: str,
+        size: int = -1,
+        mtime: float = -1.0,
+        *,
+        analysis_signature: str | None = None,
+        file_identity: str | None = None,
+    ) -> Optional[VideoVerdict]:
         """读缓存。传了 size/mtime 时会校验是否过期，过期返回 None。"""
         key = str(path)
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT size, mtime, duration, number, provider, state, confidence,"
-                " needs_review, reason, evidence, candidates, visual_score, elapsed, error"
-                " FROM censor_probe WHERE path = ?", (key,),
+                " needs_review, reason, evidence, candidates, visual_score, elapsed, error,"
+                " file_identity, analysis_signature, status, sampled_frames, analyzed_frames, detector_runs"
+                " FROM censor_probe WHERE path = ?",
+                (key,),
             ).fetchone()
         if not row:
             return None
-        (db_size, db_mtime, duration, number, provider, state, confidence,
-         needs_review, reason, evidence, candidates, visual_score, elapsed, error) = row
+        (
+            db_size,
+            db_mtime,
+            duration,
+            number,
+            provider,
+            state,
+            confidence,
+            needs_review,
+            reason,
+            evidence,
+            candidates,
+            visual_score,
+            elapsed,
+            error,
+            identity,
+            signature,
+            status,
+            sampled,
+            analyzed,
+            runs,
+        ) = row
+        try:
+            runs = json.loads(runs)
+            if not isinstance(runs, dict):
+                runs = {}
+        except (TypeError, ValueError):
+            runs = {}
+        if analysis_signature is not None and (
+            signature != analysis_signature or status != "completed"
+        ):
+            return None
+        if file_identity is not None and identity != file_identity:
+            return None
         if size >= 0 and int(db_size) != int(size):
             return None
         if mtime >= 0 and abs(float(db_mtime) - float(mtime)) > 1e-6:
             return None
         verdict = Verdict(
-            state=CensorState(state), confidence=float(confidence),
-            evidence=_load_evidence(evidence), needs_review=bool(needs_review),
+            state=CensorState(state),
+            confidence=float(confidence),
+            evidence=_load_evidence(evidence),
+            needs_review=bool(needs_review),
             reason=reason or "",
         )
         return VideoVerdict(
-            path=key, size=int(db_size), mtime=float(db_mtime),
-            duration=float(duration), number=number or "", provider=provider or "",
-            verdict=verdict, candidates=_load_candidates(candidates),
-            visual_score=float(visual_score), elapsed=float(elapsed), error=error or "",
+            path=key,
+            size=int(db_size),
+            mtime=float(db_mtime),
+            duration=float(duration),
+            number=number or "",
+            provider=provider or "",
+            verdict=verdict,
+            candidates=_load_candidates(candidates),
+            visual_score=float(visual_score),
+            elapsed=float(elapsed),
+            error=error or "",
+            file_identity=identity,
+            analysis_signature=signature,
+            status=ProcessingStatus(status),
+            sampled_frames=int(sampled),
+            analyzed_frames=int(analyzed),
+            detector_runs=runs,
         )
 
     def put(self, result: VideoVerdict) -> None:
@@ -195,14 +314,37 @@ class VerdictStore:
                 " reason=excluded.reason, evidence=excluded.evidence,"
                 " candidates=excluded.candidates, visual_score=excluded.visual_score,"
                 " elapsed=excluded.elapsed, error=excluded.error, updated_at=excluded.updated_at",
-                (str(result.path), int(result.size), float(result.mtime),
-                 float(result.duration), result.number, result.provider,
-                 result.verdict.state.value, float(result.verdict.confidence),
-                 1 if result.verdict.needs_review else 0, result.verdict.reason,
-                 _dump_evidence(result.verdict.evidence),
-                 _dump_candidates(result.candidates),
-                 float(result.visual_score), float(result.elapsed), result.error or "",
-                 _now()),
+                (
+                    str(result.path),
+                    int(result.size),
+                    float(result.mtime),
+                    float(result.duration),
+                    result.number,
+                    result.provider,
+                    result.verdict.state.value,
+                    float(result.verdict.confidence),
+                    1 if result.verdict.needs_review else 0,
+                    result.verdict.reason,
+                    _dump_evidence(result.verdict.evidence),
+                    _dump_candidates(result.candidates),
+                    float(result.visual_score),
+                    float(result.elapsed),
+                    result.error or "",
+                    _now(),
+                ),
+            )
+            conn.execute(
+                "UPDATE censor_probe SET file_identity=?, analysis_signature=?, "
+                "status=?, sampled_frames=?, analyzed_frames=?, detector_runs=? WHERE path=?",
+                (
+                    result.file_identity,
+                    result.analysis_signature,
+                    result.status.value,
+                    result.sampled_frames,
+                    result.analyzed_frames,
+                    json.dumps(result.detector_runs, ensure_ascii=False),
+                    str(result.path),
+                ),
             )
 
     def delete(self, path: str) -> None:
@@ -215,7 +357,9 @@ class VerdictStore:
             conn.execute("DELETE FROM censor_probe")
 
     # ── 人工标注 ──
-    def set_label(self, path: str, state: CensorState, note: str = "") -> None:
+    def set_label(
+        self, path: str, state: CensorState, note: str = "", *, file_identity: str = ""
+    ) -> None:
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO censor_label (path, state, note, labeled_at) VALUES (?,?,?,?)"
@@ -223,15 +367,37 @@ class VerdictStore:
                 " note=excluded.note, labeled_at=excluded.labeled_at",
                 (str(path), state.value, note, _now()),
             )
+            conn.execute(
+                "INSERT INTO censor_label_history VALUES (?,?,?,?,?) "
+                "ON CONFLICT(path,file_identity) DO UPDATE SET state=excluded.state,"
+                "note=excluded.note,labeled_at=excluded.labeled_at",
+                (str(path), file_identity, state.value, note, _now()),
+            )
 
-    def get_label(self, path: str) -> Optional[tuple[CensorState, str]]:
+    def get_label(
+        self, path: str, *, file_identity: str | None = None
+    ) -> Optional[tuple[CensorState, str]]:
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT state, note FROM censor_label WHERE path = ?", (str(path),),
-            ).fetchone()
+            if file_identity is None:
+                row = conn.execute(
+                    "SELECT state, note FROM censor_label WHERE path=?", (str(path),)
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT state, note FROM censor_label_history WHERE path=? AND file_identity=?",
+                    (str(path), file_identity),
+                ).fetchone()
         if not row:
             return None
         return CensorState(row[0]), row[1] or ""
+
+    def label_history(self, path: str) -> list[tuple]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT file_identity,state,note,labeled_at "
+                "FROM censor_label_history WHERE path=? ORDER BY labeled_at",
+                (str(path),),
+            ).fetchall()
 
     def labels(self) -> dict[str, CensorState]:
         with self._connect() as conn:
@@ -241,6 +407,7 @@ class VerdictStore:
     def clear_labels(self) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM censor_label")
+            conn.execute("DELETE FROM censor_label_history")
 
     # ── 统计 ──
     def stats(self) -> StoreStats:
@@ -256,24 +423,35 @@ class VerdictStore:
                     stats.uncensored = int(count)
                 else:
                     stats.unknown = int(count)
-            stats.review = int(conn.execute(
-                "SELECT COUNT(*) FROM censor_probe WHERE needs_review = 1"
-            ).fetchone()[0])
-            stats.labeled = int(conn.execute(
-                "SELECT COUNT(*) FROM censor_label"
-            ).fetchone()[0])
+            stats.review = int(
+                conn.execute("SELECT COUNT(*) FROM censor_probe WHERE needs_review = 1").fetchone()[
+                    0
+                ]
+            )
+            stats.labeled = int(conn.execute("SELECT COUNT(*) FROM censor_label").fetchone()[0])
         return stats
 
     def review_queue(self, limit: int = 500) -> list[VideoVerdict]:
         """按"分数从高到低"给出待复核列表 —— 最可疑的排前面。"""
+        if int(limit) <= 0:
+            return []
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT path FROM censor_probe WHERE needs_review = 1"
-                " ORDER BY visual_score DESC, updated_at DESC LIMIT ?", (int(limit),),
+                "SELECT path FROM censor_probe WHERE needs_review = 1 OR state = 'censored'"
+                " ORDER BY visual_score DESC, updated_at DESC",
             ).fetchall()
         out = []
+        from censor.review_route import needs_review
         for (path,) in rows:
             item = self.get(path)
-            if item is not None:
+            if item is not None and needs_review(item):
                 out.append(item)
+                if len(out) >= int(limit):
+                    break
         return out
+
+    def history(self, limit: int = 500, offset: int = 0) -> list[VideoVerdict]:
+        with self._connect() as conn:
+            rows = conn.execute('SELECT path FROM censor_probe ORDER BY updated_at DESC,path '
+                                'LIMIT ? OFFSET ?', (int(limit), int(offset))).fetchall()
+        return [item for (path,) in rows if (item := self.get(path)) is not None]

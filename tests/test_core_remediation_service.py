@@ -69,7 +69,7 @@ def test_cancelled_ingest_is_not_partial_success(monkeypatch):
 
 def test_direct_db_collection_cancellation_never_returns_partial_library(tmp_path):
     from utils import library, library_source
-    from test_core_remediation_data import make_ef_db
+    from tests.test_core_remediation_data import make_ef_db
     db = tmp_path / "jellyfin.db"
     make_ef_db(db)
     with pytest.raises(library_source.CollectionCancelled):
@@ -81,7 +81,7 @@ def test_running_job_keeps_its_selected_viewer_when_settings_change(tmp_path, ki
     from config import ToolkitConfig
     from workers.ingest import IngestWorker
     from workers.scorer import AnalyzeWorker
-    from test_core_remediation_data import make_ef_db
+    from tests.test_core_remediation_data import make_ef_db
     db = tmp_path / "jellyfin.db"
     make_ef_db(db)
     cfg = ToolkitConfig(library_source="db", jellyfin_db_path=str(db), jellyfin_user_id="viewer")

@@ -33,13 +33,15 @@ STATE_WORDS_CENSORED = ("有码", "有碼", "有马", "有馬", "薄码", "薄�
 def _classify_words(values: list[str]) -> tuple[bool, bool, list[str]]:
     """在标签列表里找状态词，返回 (有无码词, 有有码词, 命中的词)。"""
     hits_unc, hits_cen = [], []
+    from censor.tag_signals import classify_tag
     for value in values:
         text = str(value or "").strip().lower()
         if not text:
             continue
-        if any(w in text for w in STATE_WORDS_UNCENSORED):
+        uncensored, censored = classify_tag(text)
+        if uncensored:
             hits_unc.append(value)
-        elif any(w in text for w in STATE_WORDS_CENSORED):
+        if censored:
             hits_cen.append(value)
     return bool(hits_unc), bool(hits_cen), hits_unc + hits_cen
 
@@ -93,6 +95,7 @@ class NfoTagDetector(BaseDetector):
     """同目录 NFO 里的标签。**弱证据，且不覆盖画面结论。**"""
 
     name = "nfo.tags"
+    version = "2"
     title = "NFO 标签"
 
     def detect(self, ctx: ProbeContext) -> list[Evidence]:
@@ -125,6 +128,7 @@ class ServerTagDetector(BaseDetector):
     """Jellyfin / Emby 库里的 Genres / Tags。**弱证据。**"""
 
     name = "server.tags"
+    version = "2"
     title = "媒体服务器标签"
 
     def detect(self, ctx: ProbeContext) -> list[Evidence]:
