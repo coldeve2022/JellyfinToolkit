@@ -227,6 +227,9 @@ class CensorshipPage(QWidget):
         for column in (1,4,5):
             self.table.setColumnHidden(column,True)
         self.table.itemSelectionChanged.connect(self._on_row_selected)
+        # 右键菜单兜底：按钮被布局挤走时也能标记（这是最符合直觉的第二个入口）
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_row_menu)
         self.table.files_dropped.connect(self._start_scan)
         left_lay.addWidget(self.table)
         splitter.addWidget(left)
@@ -271,7 +274,10 @@ class CensorshipPage(QWidget):
             button.setToolTip(f'{key}；{hint}；保存后自动进入下一条')
             button.setProperty('cssClass',style)
             button.clicked.connect(lambda _,value=state:self._label(value))
-            button.setEnabled(False)   # 选中一行才可用，避免"点了没反应"
+            # 不禁用：没选中行时点击会给明确提示，比灰着让人猜更好
+            button.setMinimumHeight(28)
+            button.setMinimumWidth(104)
+            button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             row.addWidget(button)
         next_button = QPushButton('下一条')
         next_button.setProperty('taskInteractive',True)
@@ -818,7 +824,6 @@ class CensorshipPage(QWidget):
         if result is None:
             return
         self._current = result
-        self._set_label_buttons_enabled(True)
         self.lbl_review_title.setText(
             f"{os.path.basename(result.path)}\n"
             f"结论：{conclusion_label(result)} · 处理：{bucket_label(result)} · "
@@ -837,21 +842,75 @@ class CensorshipPage(QWidget):
             lines.append(f"错误: {result.error}")
         self.txt_evidence.setPlainText("\n".join(lines) or "（没有可用依据）")
 
+    def _show_row_menu(self, pos) -> None:
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+        self.table.selectRow(row)
+        self._on_row_selected()
+        menu = QMenu(self)
+        menu.addAction("标记「有码」", lambda: self._label(CensorState.CENSORED))
+        menu.addAction("标记「无码」", lambda: self._label(CensorState.UNCENSORED))
+        menu.addSeparator()
+        menu.addAction("深入检查（3倍采样）", self._deepen_current)
+        menu.addAction("下一条", lambda: self._advance_review(
+            self._current.path if self._current else ''))
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
     def _show_thumbs(self, result: VideoVerdict) -> None:
         self.gallery.show_candidates(result.candidates)
 
-    def _set_label_buttons_enabled(self, enabled: bool) -> None:
-        self.btn_censored.setEnabled(enabled)
-        self.btn_uncensored.setEnabled(enabled)
+    def _flash(self, text: str) -> None:
+        """把操作反馈显示在进度标题上。
+
+        **不能写 stats_label**：``_label`` 结尾会调 ``_refresh_stats()``，
+        它会把 stats_label 整段覆盖掉 —— 那样点了按钮就跟没点一样。
+        """
+        self.progress_title.setText(text)
+        QTimer.singleShot(8000, self._restore_progress_title)
+
+    def _restore_progress_title(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.progress_title.setText(f'列表 {len(self._results)} 条 · 选中一项可标记')
+
+    def _resolve_current(self):
+        """取当前要标记的那一条：选中 → 当前行 → 第一个可见行。"""
+        if self._current is not None:
+            return self._current
+        row = self.table.currentRow()
+        if row < 0:
+            rows = [r for r in range(self.table.rowCount()) if not self.table.isRowHidden(r)]
+            row = rows[0] if rows else -1
+        if row < 0:
+            return None
+        self.table.selectRow(row)
+        self._on_row_selected()
+        return self._current
 
     def _label(self, state: CensorState) -> None:
-        if self._current is None:
-            self._stats_label.setText('先在表格里选中一行，再标记有码 / 无码')
+        current = self._resolve_current()
+        if current is None:
+            total = len(self._results)
+            self._flash(
+                '没有可标记的行：当前视图'
+                f'（{self.combo_filter.currentText()}）里一行都没有'
+                + (f'，共 {total} 条被筛掉了 —— 切到「全部记录」看看' if total else
+                   '。先拖入视频检查，或点「更多 → 加载历史记录」'))
             return
-        path = self._current.path
+        self._current = current
+        path = current.path
         try:
-            refreshed = self._service.label(path, state, "界面人工确认", base=self._current)
-        except (OSError, ValueError) as exc:
+            refreshed = self._service.label(path, state, "界面人工确认", base=current)
+        except ValueError as exc:
+            # 文件被替换过：旧的人工结论不能套到新文件上
+            self._flash(f'标记失败：{exc} —— 请重新检查这部片再标记')
+            self.txt_evidence.appendPlainText(f'无法确认：{exc}')
+            return
+        except OSError as exc:
+            self._flash(
+                f'标记失败：读不到文件（{exc}）\n'
+                '文件可能被移动或删除，请把它重新拖进来检查')
             self.txt_evidence.appendPlainText(f'无法确认：{exc}')
             return
         if refreshed is not None:
@@ -869,10 +928,9 @@ class CensorshipPage(QWidget):
                         tail = f" —— 入队失败（{exc}）"
                 else:
                     tail = " —— 没有番号，无法按番号检索"
-                self._stats_label.setText(
-                    f"已标记「有码」：{os.path.basename(path)}{tail}")
+                self._flash(f"已标记「有码」：{os.path.basename(path)}{tail}")
             else:
-                self._stats_label.setText(
+                self._flash(
                     f"已标记「无码」：{os.path.basename(path)} —— 不需要找替换")
         self._refresh_stats()
         self._advance_review(path)
@@ -914,7 +972,6 @@ class CensorshipPage(QWidget):
         self._submitted.clear()
         self._row_of.clear()
         self._current = None
-        self._set_label_buttons_enabled(False)
         self.gallery.show_candidates([])
         self.txt_evidence.clear()
         self._refresh_stats()
