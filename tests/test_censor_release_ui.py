@@ -137,3 +137,23 @@ def test_uncensored_video_is_not_auto_queued(page):
     for result in page._results.values():
         page._maybe_queue_lookup(result)
     assert page._lookup_pending == pending_before
+
+
+def test_connection_test_button_reports_offline(page, monkeypatch):
+    """「测试连接」必须能跑通且不联网 —— 离线模式下要说清楚为什么测不了。"""
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    monkeypatch.setenv("JELLYFIN_TOOLKIT_OFFLINE", "1")
+    loop = QEventLoop()
+    page._on_connection_tested_orig = page._on_connection_tested
+    page._on_connection_tested = lambda ok, total: (
+        page._on_connection_tested_orig(ok, total), QTimer.singleShot(50, loop.quit))
+
+    page._test_release_connection()
+    QTimer.singleShot(8000, loop.quit)
+    loop.exec()
+
+    text = page.txt_release_test.toPlainText()
+    assert "离线模式" in text
+    assert "测试结束" in text
+    assert page.btn_test_release.isEnabled()

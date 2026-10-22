@@ -235,3 +235,103 @@ class ReleasePanel(QWidget):
         if report.availability is Availability.UNKNOWN and report.note:
             return f"未查（{report.note}）"
         return report.as_text()
+
+
+class ConnectionCheck(QThread):
+    """设置页的「测试连接」—— 一次把四件事都试一遍，逐条告诉你卡在哪。
+
+    为什么不只在失败时弹个错：这个功能涉及**三层**（本地代理 → 目标站点 →
+    Cloudflare 旁路），任何一层断了表现都是"查不到"，只给一句失败等于没说。
+    所以这里固定输出四行，每行都带"下一步该干什么"。
+    """
+
+    line = Signal(str)
+    passed = Signal(int, int)      # 通过条数, 总条数
+
+    def __init__(self, cfg, parent=None):
+        super().__init__(parent)
+        self._cfg = {
+            "release_proxy": getattr(cfg, "release_proxy", "") or "",
+            "release_cf_bypass_url": getattr(cfg, "release_cf_bypass_url", "") or "",
+            "release_sources": ["javdb", "supjav"],
+            # 测试要快：不重试、短超时、少请求
+            "release_timeout": 15.0,
+            "release_retries": 0,
+            "release_min_interval": 0.0,
+            "release_max_requests": 8,
+            "release_detail_limit": 1,
+        }
+        self._stopped = False
+
+    def stop(self) -> None:
+        self._stopped = True
+
+    def run(self) -> None:  # noqa: D102 - QThread 约定
+        from censor.releases.javdb import JavDbSource
+        from censor.releases.models import ReleaseQuery
+        from censor.releases.supjav import SupjavSource
+        from censor.releases.transport import (
+            TransportBlocked, TransportError, build_transport, offline, probe_bypass,
+        )
+
+        checks: list[bool] = []
+
+        def emit(ok: bool, text: str, hint: str = "") -> None:
+            checks.append(ok)
+            self.line.emit(f"{'✓' if ok else '✗'} {text}")
+            if hint:
+                self.line.emit(f"    → {hint}")
+
+        if offline():
+            emit(False, "离线模式已开启（JELLYFIN_TOOLKIT_OFFLINE=1）",
+                 "去掉这个环境变量后重启，测试才有意义")
+            self.passed.emit(0, 1)
+            return
+
+        endpoint = self._cfg["release_cf_bypass_url"].strip()
+        bypass_ok = False
+        if endpoint:
+            bypass_ok, why = probe_bypass(endpoint)
+            emit(bypass_ok, f"Cloudflare 旁路服务：{why}",
+                 "" if bypass_ok else "启动 FlareSolverr（默认端口 8191）后重试")
+
+        transport = build_transport(self._cfg)
+
+        # 1) 到站点的线路
+        try:
+            transport.get("https://javdb.com/")
+            emit(True, f"网络线路：{transport.description}")
+            reachable = True
+        except TransportBlocked as exc:
+            reachable = False
+            emit(False, f"网络线路：被拦截（{exc}）", "检查代理是否开启了规则分流")
+        except TransportError as exc:
+            reachable = False
+            emit(False, f"网络线路：{exc}",
+                 "在「检索代理」里填一个能访问该站点的地址（如 http://127.0.0.1:7897）")
+
+        # 2) JavDB 实际检索
+        if reachable:
+            try:
+                found = JavDbSource(transport, self._cfg).search(
+                    ReleaseQuery(number="PIYO-170"), limit=1)
+                emit(bool(found), f"JavDB 检索：命中 {len(found)} 条（PIYO-170）",
+                     "" if found else "页面结构可能变了，或该番号在站点上不存在")
+            except Exception as exc:  # noqa: BLE001 - 测试就该把原因显示出来
+                emit(False, f"JavDB 检索失败：{exc}", "站点改版或网络不稳定")
+
+        # 3) Supjav（破解版源，需要旁路）
+        if reachable:
+            try:
+                found = SupjavSource(transport, self._cfg).search(
+                    ReleaseQuery(number="NCRA-026"), limit=1)
+                emit(bool(found), f"Supjav 检索：命中 {len(found)} 条",
+                     "" if found else "拿到页面但没解析到条目，可能是选择器需要更新")
+            except TransportBlocked:
+                emit(False, "Supjav：被 Cloudflare 拦截",
+                     "配好上面的旁路地址才能抓这个站（JavDB / JavBus 不受影响）")
+            except Exception as exc:  # noqa: BLE001
+                emit(False, f"Supjav 检索失败：{exc}", "多半还是被拦，或站点不可达")
+
+        ok_count = sum(1 for value in checks if value)
+        self.passed.emit(ok_count, len(checks))

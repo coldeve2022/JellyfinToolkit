@@ -32,7 +32,7 @@ from config import ToolkitConfig
 from ui.services import busy, start_task, stop_page, CallWorker
 from ui.widgets import FileInputActions
 from ui.censor_scan import CensorScanWorker
-from ui.censor_release import ReleaseLookupWorker, ReleasePanel
+from ui.censor_release import ConnectionCheck, ReleaseLookupWorker, ReleasePanel
 
 __all__ = ["CensorshipPage"]
 
@@ -129,6 +129,7 @@ class CensorshipPage(QWidget):
         self._lookup_timer.setSingleShot(True)
         self._lookup_timer.setInterval(1200)
         self._lookup_timer.timeout.connect(self._flush_lookup)
+        self._conn_check: Optional[ConnectionCheck] = None
         self._setup_ui()
         self._refresh_stats()
         if self._jobs.pending() or self._jobs.unfinished_sources():
@@ -301,11 +302,62 @@ class CensorshipPage(QWidget):
         self.input_cf_bypass.textChanged.connect(
             lambda text: setattr(self.cfg, 'release_cf_bypass_url', text.strip()))
         settings.addWidget(self.input_cf_bypass)
-        settings.addWidget(QLabel('代理/旁路改动需要重新打开本页才生效。'))
+
+        test_row = QHBoxLayout()
+        self.btn_test_release = QPushButton('测试连接')
+        self.btn_test_release.setToolTip(
+            '依次检查：本地代理 → JavDB 检索 → Cloudflare 旁路服务 → Supjav')
+        self.btn_test_release.clicked.connect(self._test_release_connection)
+        test_row.addWidget(self.btn_test_release)
+        test_row.addStretch()
+        settings.addLayout(test_row)
+
+        self.txt_release_test = QPlainTextEdit()
+        self.txt_release_test.setReadOnly(True)
+        self.txt_release_test.setMaximumHeight(120)
+        self.txt_release_test.setPlaceholderText(
+            '点「测试连接」：逐条检查代理、JavDB、旁路服务与 Supjav，卡在哪一层会直接写出来')
+        settings.addWidget(self.txt_release_test)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close,
+                                   parent=self.settings_dialog)
+        buttons.button(QDialogButtonBox.Save).setText('保存并关闭')
+        buttons.button(QDialogButtonBox.Close).setText('关闭')
+        buttons.accepted.connect(self._save_settings)
+        buttons.rejected.connect(self.settings_dialog.reject)
+        settings.addWidget(buttons)
 
     def _show_settings(self):
         if not busy(self):
             self.settings_dialog.exec()
+
+    def _save_settings(self):
+        """设置项改的是内存里的 cfg，这里显式落盘 —— 不必等关程序。"""
+        try:
+            self.cfg.save()
+            self._stats_label.setText('设置已保存')
+        except OSError as exc:
+            self._stats_label.setText(f'设置保存失败：{exc}')
+        self.settings_dialog.accept()
+
+    def _test_release_connection(self):
+        """逐层测试检索链路。测试本身会联网，所以放在线程里跑。"""
+        if self._conn_check is not None and self._conn_check.isRunning():
+            return
+        self.txt_release_test.clear()
+        self.btn_test_release.setEnabled(False)
+        self.btn_test_release.setText('测试中…')
+        check = ConnectionCheck(self.cfg, self)
+        check.line.connect(self.txt_release_test.appendPlainText)
+        check.passed.connect(self._on_connection_tested)
+        self._conn_check = check
+        check.start()
+
+    def _on_connection_tested(self, ok: int, total: int):
+        self.btn_test_release.setEnabled(True)
+        self.btn_test_release.setText('再测一次')
+        verdict = '全部通过' if ok == total and total else f'{ok}/{total} 项通过'
+        self.txt_release_test.appendPlainText(f'—— 测试结束：{verdict}')
 
     def _show_help(self):
         QMessageBox.information(self,'像素化检查',
@@ -505,6 +557,9 @@ class CensorshipPage(QWidget):
         if worker is not None and worker.isRunning():
             worker.stop()
             worker.wait(3000)
+        if self._conn_check is not None and self._conn_check.isRunning():
+            self._conn_check.stop()
+            self._conn_check.wait(3000)
         stop_page(self)
 
     # ── Batched delivery keeps cache-heavy imports responsive. ──

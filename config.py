@@ -200,6 +200,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Cloudflare 旁路服务（FlareSolverr 兼容，形如 http://127.0.0.1:8000）。
     # 留空 = 不走旁路；Supjav 这类站必须配了它才抓得到
     "release_cf_bypass_url": "",
+    # 旁路单次等待上限（秒）。Cloudflare 挑战本身要十几秒，给短了必然失败
+    "release_bypass_timeout": 45.0,
     "release_timeout": 20.0,          # 单次请求超时（秒）
     "release_retries": 2,             # 同一线路重试次数（4xx 不重试）
     "release_min_interval": 1.5,      # 同站两次请求最小间隔（秒），别把站点打挂
@@ -376,6 +378,7 @@ def _coerce_config(data: dict) -> dict:
         "censor_min_block": (4, 64), "censor_max_block": (8, 128),
         "censor_min_phase_consistency": (0.0, 1.0),
         "release_timeout": (3.0, 300.0), "release_retries": (0, 5),
+        "release_bypass_timeout": (5.0, 300.0),
         "release_min_interval": (0.0, 60.0), "release_max_requests": (1, 400),
         "release_detail_limit": (1, 20), "release_cache_days": (0, 3650),
         "censor_min_coverage": (0.0, 1.0), "censor_min_ratio": (1.0, 1000.0),
@@ -536,6 +539,7 @@ class ToolkitConfig:
         default_factory=lambda: list(DEFAULT_CONFIG["release_sources"]))
     release_proxy: str = DEFAULT_CONFIG["release_proxy"]
     release_cf_bypass_url: str = DEFAULT_CONFIG["release_cf_bypass_url"]
+    release_bypass_timeout: float = DEFAULT_CONFIG["release_bypass_timeout"]
     release_timeout: float = DEFAULT_CONFIG["release_timeout"]
     release_retries: int = DEFAULT_CONFIG["release_retries"]
     release_min_interval: float = DEFAULT_CONFIG["release_min_interval"]

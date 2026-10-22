@@ -160,6 +160,8 @@
   "release_proxy": "",
   "_comment_release_cf": "Cloudflare 旁路（FlareSolverr 兼容）。Supjav 整站挂在挑战后面，不配它只能得到「被拦截」。",
   "release_cf_bypass_url": "",
+  "_comment_release_bypass_timeout": "旁路单次等待上限（秒）。Cloudflare 挑战本身要十几秒，给短了必然失败；连续失败 3 次会熔断，本次运行不再尝试。",
+  "release_bypass_timeout": 45.0,
   "release_timeout": 20.0,
   "release_retries": 2,
   "release_min_interval": 1.5,

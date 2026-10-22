@@ -295,3 +295,92 @@ def test_query_key_uses_number_then_title():
     assert ReleaseQuery(number="abc-123").key == "ABC123"
     assert ReleaseQuery(title_hint="PIYO 170").key == "PIYO170"
     assert not ReleaseQuery().usable
+
+
+# ── 旁路回退 ────────────────────────────────────────────────
+
+def test_build_transport_wraps_bypass_with_fallback():
+    from censor.releases.transport import FallbackTransport, build_transport
+
+    transport = build_transport({"release_cf_bypass_url": "http://127.0.0.1:9"})
+    assert isinstance(transport, FallbackTransport)
+    assert "旁路优先" in transport.description
+
+
+def test_bypass_down_does_not_break_direct_sites(monkeypatch):
+    """旁路服务没启动时，能直连的站必须照样能查 —— 这是实测踩过的坑。"""
+    from censor.releases.transport import FallbackTransport
+
+    class AlwaysDown(HttpTransport):
+        def _once(self, url, referer, extra=None):  # noqa: ARG002
+            raise TransportError("旁路服务连不上")
+
+    class AlwaysUp(HttpTransport):
+        def _once(self, url, referer, extra=None):  # noqa: ARG002
+            return b"<html>direct ok</html>"
+
+    transport = FallbackTransport(AlwaysDown(TransportConfig(proxy="", timeout=1)),
+                                  AlwaysUp(TransportConfig(proxy="", timeout=1)))
+    assert "direct ok" in transport.get("https://example.invalid/x")
+    assert any("旁路不可用" in item for item in transport.failures)
+
+
+def test_bypass_challenge_failure_falls_back_too(monkeypatch):
+    from censor.releases.transport import FallbackTransport
+
+    class Blocked(HttpTransport):
+        def _once(self, url, referer, extra=None):  # noqa: ARG002
+            raise TransportBlocked("挑战未通过")
+
+    class AlwaysUp(HttpTransport):
+        def _once(self, url, referer, extra=None):  # noqa: ARG002
+            return b"ok"
+
+    transport = FallbackTransport(Blocked(TransportConfig(proxy="", timeout=1)),
+                                  AlwaysUp(TransportConfig(proxy="", timeout=1)))
+    assert transport.get("https://example.invalid/x") == "ok"
+
+
+def test_probe_bypass_reports_missing_endpoint():
+    from censor.releases.transport import probe_bypass
+
+    ok, why = probe_bypass("")
+    assert not ok and "未配置" in why
+
+
+def test_bypass_circuit_breaker_stops_after_repeated_failures():
+    """连续失败就别再试旁路 —— 每次失败要等 45 秒，700 部片会被拖垮。"""
+    from censor.releases.transport import FallbackTransport
+
+    calls = {"primary": 0, "fallback": 0}
+
+    class Down(HttpTransport):
+        def _once(self, url, referer, extra=None):  # noqa: ARG002
+            calls["primary"] += 1
+            raise TransportError("旁路挂了")
+
+    class Up(HttpTransport):
+        def _once(self, url, referer, extra=None):  # noqa: ARG002
+            calls["fallback"] += 1
+            return b"ok"
+
+    cfg = TransportConfig(proxy="", timeout=1, retries=0, min_interval=0)
+    transport = FallbackTransport(Down(cfg), Up(cfg))
+    for _ in range(6):
+        assert transport.get("https://example.invalid/x") == "ok"
+    assert calls["primary"] == FallbackTransport.MAX_CONSECUTIVE_FAILURES
+    assert any("不再尝试" in item for item in transport.failures)
+
+
+def test_status_codes_are_classified_correctly():
+    """403 没有挑战页特征时也算"被拦" —— 不能把"没查成"说成"站点没有内容"。"""
+    from censor.releases.transport import raise_for_status
+
+    with pytest.raises(TransportNotFound):
+        raise_for_status(404)
+    with pytest.raises(TransportBlocked, match="403"):
+        raise_for_status(403)
+    with pytest.raises(TransportBlocked, match="Cloudflare"):
+        raise_for_status(403, b"<html><title>Just a moment...</title></html>")
+    with pytest.raises(TransportError, match="500"):
+        raise_for_status(500)

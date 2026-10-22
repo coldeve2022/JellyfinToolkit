@@ -30,8 +30,8 @@ from dataclasses import dataclass
 
 __all__ = [
     "TransportError", "TransportBlocked", "TransportNotFound", "HttpTransport",
-    "FlareSolverrTransport", "detect_proxy", "build_transport", "offline",
-    "OFFLINE_ENV",
+    "FlareSolverrTransport", "FallbackTransport", "detect_proxy", "build_transport",
+    "offline", "OFFLINE_ENV", "probe_bypass", "raise_for_status",
 ]
 
 DEFAULT_UA = (
@@ -124,6 +124,8 @@ class TransportConfig:
     retries: int = 2
     min_interval: float = 1.5      # 同一 host 两次请求的最小间隔（秒）
     max_requests: int = 40         # 单次检索的请求上限，防止翻页翻飞
+    #: 旁路请求的等待上限：Cloudflare 挑战本身要十几秒，给短了必然失败
+    bypass_timeout: float = 45.0
     user_agent: str = DEFAULT_UA
 
     @classmethod
@@ -143,6 +145,7 @@ class TransportConfig:
             retries=int(get("release_retries", 2) or 0),
             min_interval=float(get("release_min_interval", 1.5) or 0.0),
             max_requests=int(get("release_max_requests", 40) or 40),
+            bypass_timeout=float(get("release_bypass_timeout", 45.0) or 45.0),
         )
 
 
@@ -165,6 +168,21 @@ def _fallback_routes(explicit: str) -> list[str]:
     push(detect_proxy(""))
     routes.append("")   # 直连兜底
     return routes
+
+
+def raise_for_status(code: int, body: bytes = b"") -> None:
+    """把 HTTP 状态码翻译成本层的三种失败语义。
+
+    单独抽出来是为了能被直接测：实测里最容易搞错的就是
+    "403 到底是'没查成'还是'站点没有内容'"。
+    """
+    if code in (404, 410):
+        raise TransportNotFound(f"HTTP {code}")
+    if code in (403, 503) and HttpTransport._looks_blocked(body):
+        raise TransportBlocked(f"被 Cloudflare/反爬拦截（HTTP {code}）")
+    if code == 403:
+        raise TransportBlocked("HTTP 403（站点拒绝请求，通常是反爬或地区限制）")
+    raise TransportError(f"HTTP {code}")
 
 
 class HttpTransport:
@@ -267,19 +285,15 @@ class HttpTransport:
                 encoding = (response.headers.get("Content-Encoding") or "").lower()
                 status = getattr(response, "status", 200)
         except urllib.error.HTTPError as exc:
-            if exc.code in (404, 410):
-                raise TransportNotFound(f"HTTP {exc.code}") from exc
-            if exc.code in (403, 503):
-                body = b""
-                try:
-                    body = exc.read()
-                except Exception:  # noqa: BLE001
-                    pass
-                if self._looks_blocked(body):
-                    raise TransportBlocked(
-                        f"被 Cloudflare/反爬拦截（HTTP {exc.code}）"
-                    ) from exc
-            raise TransportError(f"HTTP {exc.code}") from exc
+            body = b""
+            try:
+                body = exc.read() or b""
+            except Exception:  # noqa: BLE001 - 读不到 body 就按状态码判断
+                pass
+            try:
+                raise_for_status(exc.code, body)
+            except TransportError as mapped:
+                raise mapped from exc
         except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as exc:
             raise TransportError(f"连接失败：{exc}") from exc
 
@@ -321,8 +335,9 @@ class FlareSolverrTransport(HttpTransport):
         return f"Cloudflare 旁路（{self.endpoint}）"
 
     def _once(self, url: str, referer: str, extra: dict | None = None) -> bytes:  # noqa: ARG002
+        wait = int(max(self.config.bypass_timeout, self.config.timeout) * 1000)
         payload = json.dumps(
-            {"cmd": "request.get", "url": url, "maxTimeout": int(self.config.timeout * 1000)}
+            {"cmd": "request.get", "url": url, "maxTimeout": wait}
         ).encode()
         request = urllib.request.Request(
             self.endpoint + "/v1",
@@ -331,12 +346,17 @@ class FlareSolverrTransport(HttpTransport):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout + 10) as resp:
+            with urllib.request.urlopen(request, timeout=wait / 1000 + 15) as resp:
                 data = json.loads(resp.read().decode("utf-8", "replace"))
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise TransportError(f"旁路服务不可用：{exc}") from exc
         if str(data.get("status", "")).lower() != "ok":
-            raise TransportBlocked(str(data.get("message") or "旁路服务未能通过挑战"))
+            message = str(data.get("message") or "").strip()
+            # 旁路自己说"挑战没解出来"时，这是"被拦"，不是"站点没有内容"
+            lowered = message.lower()
+            if "challenge" in lowered or "cloudflare" in lowered or not message:
+                raise TransportBlocked(message or "旁路服务未能通过 Cloudflare 挑战")
+            raise TransportError(message)
         solution = data.get("solution") or {}
         body = str(solution.get("response") or "")
         if self._looks_blocked(body.encode("utf-8", "replace")):
@@ -344,8 +364,89 @@ class FlareSolverrTransport(HttpTransport):
         return body.encode("utf-8", "replace")
 
 
+def probe_bypass(endpoint: str, timeout: float = 8.0) -> tuple[bool, str]:
+    """检查 Cloudflare 旁路服务是否在跑。
+
+    用 ``sessions.list`` 而不是真去开网页 —— 这条命令不会启动浏览器，
+    几百毫秒就能回答"服务活着吗"，适合给界面上的「测试连接」用。
+    """
+    endpoint = str(endpoint or "").strip().rstrip("/")
+    if not endpoint:
+        return False, "未配置旁路地址"
+    payload = json.dumps({"cmd": "sessions.list"}).encode()
+    request = urllib.request.Request(
+        endpoint + "/v1", data=payload,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (502, 503, 504):
+            return False, (f"HTTP {exc.code}：服务没启动，或这个地址被本地代理接管了"
+                           "（换一个端口，或先启动 FlareSolverr）")
+        return False, f"服务返回 HTTP {exc.code}（地址可能不是 FlareSolverr）"
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return False, f"连不上：{exc}"
+    status = str(data.get("status", "")).lower()
+    if status == "ok":
+        version = (data.get("version") or "").strip()
+        return True, f"正常{f'（v{version}）' if version else ''}"
+    return False, str(data.get("message") or "服务返回非 ok 状态")
+
+
+class FallbackTransport(HttpTransport):
+    """先走旁路，旁路不通就退回普通 HTTP。
+
+    为什么必须有这层：旁路服务是一个**独立进程**，它没启动、端口改了、
+    或者某个站它过不去 —— 这些都不该让"能直连的站"也跟着查不了。
+    实测踩过：把旁路地址填成一个没启动的端口，JavDB 也一起全红。
+    """
+
+    #: 连续失败几次就不再尝试旁路。Cloudflare 挑战每个失败要等 45 秒，
+    #: 不熔断的话一批 700 部片会被它拖掉好几个小时。
+    MAX_CONSECUTIVE_FAILURES = 3
+
+    def __init__(self, primary: HttpTransport, fallback: HttpTransport) -> None:
+        super().__init__(fallback.config)
+        self.primary = primary
+        self.fallback = fallback
+        self._consecutive = 0
+        self._bypass_off = False
+
+    @property
+    def description(self) -> str:
+        return f"旁路优先，失败回退（{self.primary.description}）"
+
+    def get(self, url: str, *, referer: str = "", headers: dict | None = None) -> str:
+        return self._run("get", url, referer, headers)
+
+    def request(self, url: str, *, referer: str = "", headers: dict | None = None) -> bytes:
+        return self._run("request", url, referer, headers)
+
+    def _run(self, method: str, url: str, referer: str, headers):
+        if not self._bypass_off:
+            try:
+                body = getattr(self.primary, method)(url, referer=referer, headers=headers)
+                self._consecutive = 0
+                return body
+            except TransportBlocked as exc:
+                self._note_failure(f"旁路未能通过挑战：{exc}")
+            except TransportError as exc:
+                self._note_failure(f"旁路不可用：{exc}")
+        return getattr(self.fallback, method)(url, referer=referer, headers=headers)
+
+    def _note_failure(self, reason: str) -> None:
+        self._consecutive += 1
+        self.failures.append(reason)
+        if self._consecutive >= self.MAX_CONSECUTIVE_FAILURES and not self._bypass_off:
+            self._bypass_off = True
+            self.failures.append(
+                f"旁路连续失败 {self._consecutive} 次，本次运行不再尝试（改配置后重启生效）")
+
+
 def build_transport(cfg) -> HttpTransport:
-    """按配置选传输方式：配了旁路地址就走旁路，否则直连。"""
+    """按配置选传输方式：配了旁路地址就"旁路优先 + 直连兜底"，否则直连。"""
     config = TransportConfig.from_config(cfg)
     endpoint = ""
     if cfg is not None:
@@ -356,5 +457,6 @@ def build_transport(cfg) -> HttpTransport:
             or ""
         ).strip()
     if endpoint:
-        return FlareSolverrTransport(endpoint, config)
+        return FallbackTransport(FlareSolverrTransport(endpoint, config),
+                                 HttpTransport(config))
     return HttpTransport(config)
