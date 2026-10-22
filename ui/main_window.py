@@ -91,6 +91,7 @@ class MainWindow(QMainWindow):
         ("🗑️", "删除暂存"),
         ("🔁", "重复处理"),
         ("🎬", "视频像素化检测"),
+        ("🔎", "找无码版"),
         ("📝", "字幕缺失检测"),
         ("✍️", "批量生成字幕"),
         ("🔄", "破解视频替换"),
@@ -201,13 +202,13 @@ class MainWindow(QMainWindow):
 
         self._nav_buttons: list[SidebarButton] = [None] * len(self.NAV_ITEMS)
         groups = [
-            ("首页与连接", (0, 16)),
+            ("首页与连接", (0, 17)),
             ("内容审核", (1, 2, 3, 4)),
-            ("版本与分集", (5, 14)),
-            ("字幕管理", (7, 8)),
-            ("媒体处理", (6, 10, 9, 11)),
-            ("工作流与任务", (15, 17)),
-            ("高级维护", (12, 13)),
+            ("版本与分集", (5, 15)),
+            ("字幕管理", (8, 9)),
+            ("媒体处理", (6, 7, 11, 10, 12)),
+            ("工作流与任务", (16, 18)),
+            ("高级维护", (13, 14)),
         ]
         nav_content = QWidget()
         nav_layout = QVBoxLayout(nav_content)
@@ -323,7 +324,7 @@ class MainWindow(QMainWindow):
         注意 ``stack`` 里放的是容器而不是页面本身，所以另外用 ``_pages``
         记住真实页面 —— ``closeEvent`` 要按页面调 ``shutdown()``。
         """
-        workspace = type(page).__module__ == "ui.pages.review"
+        workspace = type(page).__module__ in {"ui.pages.review", "ui.pages.censor_replace"}
         scroll = None
         if not workspace:
             scroll = QScrollArea()

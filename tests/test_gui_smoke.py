@@ -33,6 +33,7 @@ PAGE_SPECS = [
     ("ui.pages.delete", "DeletePage"),
     ("ui.pages.dedup", "DedupPage"),
     ("ui.pages.censorship", "CensorshipPage"),
+    ("ui.pages.censor_replace", "CensorReplacePage"),
     ("ui.pages.subtitle", "SubtitlePage"),
     ("ui.pages.subtitle_gen", "SubtitleGenPage"),
     ("ui.pages.replace", "ReplacePage"),

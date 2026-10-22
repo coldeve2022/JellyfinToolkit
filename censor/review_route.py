@@ -80,33 +80,25 @@ BUCKET_LABELS: dict[ReviewBucket, str] = {
 class WorkflowView(str, Enum):
     """顶部视图。**阶段一（定标记）与阶段二（找替换）是两件事，不混在一起算。**
 
-    阶段一的目标只有一个：把"哪些片确实有码"这件事定下来（人工确认）。
-    阶段二才对**已确认有码**的片去网上找无码版 —— 拿算法猜的"疑似有码"去查，
-    等于用假设喂流程，白查还可能把你的判断带偏。
+    这一层只管阶段一（定标记）：哪些片确实有码、还需不需要人看。
+    阶段二（找替换）是独立页面 ``ui/pages/censor_replace.py`` —— 两件事分开算，
+    不要在这里加"检索结果"相关的视图。
     """
 
-    TODO = "todo"        # 阶段一 · 待我处理：排队中 + 未完成 + 待复核
-    ALL = "all"          # 阶段一 · 全部记录
-    DONE = "done"        # 阶段一 · 已确认（有码 + 无码都在这里，用结论列区分）
-    REPLACE = "replace"  # 阶段二 · 找替换：只含"已确认有码"的片
-    PARKED = "parked"    # 阶段一 · 暂不处理：低风险 + 已延后
+    TODO = "todo"        # 待我处理：排队中 + 未完成 + 待复核
+    ALL = "all"          # 全部记录
+    DONE = "done"        # 已确认（有码 + 无码都在这里，用结论列区分）
+    PARKED = "parked"    # 暂不处理：低风险 + 已延后
 
     @property
     def label(self) -> str:
         return VIEW_LABELS[self]
 
-    @property
-    def stage(self) -> int:
-        """1 = 定标记，2 = 找替换。给界面分组用。"""
-        return 2 if self is WorkflowView.REPLACE else 1
-
-
 VIEW_LABELS: dict[WorkflowView, str] = {
-    WorkflowView.TODO: "① 待我处理",
-    WorkflowView.ALL: "① 全部记录",
-    WorkflowView.DONE: "① 已确认",
-    WorkflowView.REPLACE: "② 找替换",
-    WorkflowView.PARKED: "① 暂不处理",
+    WorkflowView.TODO: "待我处理",
+    WorkflowView.ALL: "全部记录",
+    WorkflowView.DONE: "已确认",
+    WorkflowView.PARKED: "暂不处理",
 }
 
 #: 结论维度里"已经定性"的三个状态（用于「结论」筛选）
@@ -184,11 +176,7 @@ def awaits_replacement(result) -> bool:
 
 
 def in_view(view: WorkflowView, value: ReviewBucket) -> bool:
-    """某个处理桶是否属于某个视图。
-
-    ``REPLACEABLE`` 需要额外条件（无码版检索结果为确有/疑似），
-    由界面叠加 —— 这里是纯函数，不认识网络。
-    """
+    """某个处理桶是否属于某个视图。**纯函数，不认识网络。**"""
     if view is WorkflowView.ALL:
         return True
     if view is WorkflowView.TODO:
@@ -197,7 +185,4 @@ def in_view(view: WorkflowView, value: ReviewBucket) -> bool:
         return value is ReviewBucket.CONFIRMED
     if view is WorkflowView.PARKED:
         return value in (ReviewBucket.LOW_RISK, ReviewBucket.DEFERRED)
-    if view is WorkflowView.REPLACE:
-        # 阶段二只装"已确认有码"的片，由界面用结论+处理两个维度判定
-        return value is ReviewBucket.CONFIRMED
     return True

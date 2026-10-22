@@ -450,6 +450,28 @@ class VerdictStore:
                     break
         return out
 
+    def confirmed_censored(self) -> list[VideoVerdict]:
+        """**已人工确认「有码」**的记录 —— 阶段二（找替换）的唯一数据来源。
+
+        注意这不是"算法判有码"，而是 `censor_label` 里人工存下的结论；
+        换了文件版本（file_identity 不匹配）的老标记不会混进来。
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT p.path FROM censor_label l JOIN censor_probe p ON p.path = l.path"
+                " WHERE l.state = 'censored' ORDER BY p.updated_at DESC, p.path"
+            ).fetchall()
+        out: list[VideoVerdict] = []
+        for (path,) in rows:
+            item = self.get(path)
+            if item is None:
+                continue
+            label = item.verdict.of(EvidenceSource.MANUAL)
+            if label is None or label.state is not CensorState.CENSORED:
+                continue
+            out.append(item)
+        return out
+
     def history(self, limit: int = 500, offset: int = 0) -> list[VideoVerdict]:
         with self._connect() as conn:
             rows = conn.execute('SELECT path FROM censor_probe ORDER BY updated_at DESC,path '

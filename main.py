@@ -32,6 +32,7 @@ PAGE_SPECS = [
     ("ui.pages.delete", "DeletePage"),
     ("ui.pages.dedup", "DedupPage"),
     ("ui.pages.censorship", "CensorshipPage"),
+    ("ui.pages.censor_replace", "CensorReplacePage"),
     ("ui.pages.subtitle", "SubtitlePage"),
     ("ui.pages.subtitle_gen", "SubtitleGenPage"),
     ("ui.pages.replace", "ReplacePage"),
@@ -164,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     from ui.pages.delete import DeletePage
     from ui.pages.dedup import DedupPage
     from ui.pages.censorship import CensorshipPage
+    from ui.pages.censor_replace import CensorReplacePage
     from ui.pages.subtitle import SubtitlePage
     from ui.pages.subtitle_gen import SubtitleGenPage
     from ui.pages.replace import ReplacePage
@@ -200,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
     window.register_page(DeletePage(cfg))
     window.register_page(DedupPage(cfg))
     window.register_page(CensorshipPage(cfg))
+    censor_replace_page = CensorReplacePage(cfg)
+    window.register_page(censor_replace_page)
     subtitle_page = SubtitlePage(cfg)
     subtitle_gen_page = SubtitleGenPage(cfg)
     replace_page = ReplacePage(cfg)

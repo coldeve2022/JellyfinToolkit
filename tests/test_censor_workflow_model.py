@@ -278,39 +278,12 @@ def test_awaits_replacement_only_for_confirmed_censored():
     assert not awaits_replacement(None)
 
 
-def test_replace_view_rejects_unconfirmed(page):
-    from censor.review_route import WorkflowView
-
-    page._on_item(_result(CensorState.CENSORED, path=r"C:/lib/auto.mp4"))
-    page.combo_filter.setCurrentIndex(page.combo_filter.findData(WorkflowView.REPLACE.value))
-    assert page.table.isRowHidden(0), "未确认有码的片不该出现在「② 找替换」"
-
-
-def test_scan_completion_does_not_trigger_lookup_for_guesses(page, monkeypatch):
-    """扫描结束只补查已确认的 —— 刚扫出来的"疑似有码"不查。"""
-    monkeypatch.setattr("censor.releases.transport.offline", lambda: False)
-    page.cfg.release_auto_lookup = True
+def test_confirming_censored_enqueues_number(page, monkeypatch):
+    """标记「有码」= 进阶段二清单：这里只入队，不联网。"""
     queued: list[list[str]] = []
-    monkeypatch.setattr(page, "_start_lookup",
-                        lambda numbers, force=False: queued.append(list(numbers)))
-    page._on_item(_result(CensorState.CENSORED, path=r"C:/lib/auto.mp4"))
-    page._autolookup_confirmed()
-    assert queued == [], "算法判的有码不该被送进检索"
-
-    confirmed = _result(CensorState.CENSORED, manual=True, path=r"C:/lib/conf.mp4")
-    confirmed.number = "CONF-1"
-    page._on_item(confirmed)
-    page._autolookup_confirmed()
-    assert queued and queued[-1] == ["CONF1"], queued
-
-
-def test_confirming_censored_queues_lookup_immediately(page, monkeypatch):
-    page.cfg.release_auto_lookup = True
-    queued: list[list[str]] = []
-    monkeypatch.setattr(page, "_start_lookup",
-                        lambda numbers, force=False: queued.append(list(numbers)))
+    monkeypatch.setattr(page._release_service, "queue",
+                        lambda numbers, **kwargs: queued.append(list(numbers)))
     page._on_item(_result(CensorState.UNKNOWN, path=r"C:/lib/A-123.mp4"))
-    page._results[r"C:/lib/A-123.mp4"].number = "A-123"
     page.table.selectRow(0)
     page._on_row_selected()
 
@@ -320,12 +293,13 @@ def test_confirming_censored_queues_lookup_immediately(page, monkeypatch):
                         lambda path, state, note="", base=None: confirmed)
     page._label(CensorState.CENSORED)
     assert queued and queued[-1] == ["A123"], queued
+    assert "找无码版" in page._stats_label.text()
 
 
-def test_confirming_uncensored_never_queues(page, monkeypatch):
+def test_confirming_uncensored_never_enqueues(page, monkeypatch):
     queued: list[list[str]] = []
-    monkeypatch.setattr(page, "_start_lookup",
-                        lambda numbers, force=False: queued.append(list(numbers)))
+    monkeypatch.setattr(page._release_service, "queue",
+                        lambda numbers, **kwargs: queued.append(list(numbers)))
     page._on_item(_result(CensorState.UNKNOWN, path=r"C:/lib/B-456.mp4"))
     page.table.selectRow(0)
     page._on_row_selected()
@@ -338,23 +312,18 @@ def test_confirming_uncensored_never_queues(page, monkeypatch):
     assert queued == []
 
 
-def test_stats_separate_checking_and_replacement(page):
-    """检查进度与检索进度必须分开报，不能混成一个数。"""
+def test_lookup_is_not_on_the_checking_page_anymore(page):
+    """检查页不再显示检索结果 —— 那是「找无码版」页的事。"""
+    from ui.pages.censorship import _COLUMNS
+
+    assert "无码版" not in _COLUMNS
+    assert not hasattr(page, "release_panel")
+    assert not hasattr(page, "_start_lookup")
+
+
+def test_stats_point_at_the_replace_page(page):
     page._on_item(_result(CensorState.CENSORED, manual=True, path=r"C:/lib/A-1.mp4"))
-    page._on_item(_result(CensorState.UNKNOWN, path=r"C:/lib/B-2.mp4"))
     page._refresh_stats()
     text = page._stats_label.text()
-    assert "检查：" in text and "找替换" in text, text
     assert "已确认有码 1" in text, text
-
-
-def test_lookup_button_refuses_before_confirmation(page, monkeypatch):
-    started: list = []
-    monkeypatch.setattr(page, "_start_lookup",
-                        lambda numbers, force=False: started.append(numbers))
-    page._on_item(_result(CensorState.CENSORED, path=r"C:/lib/auto.mp4"))
-    page.table.selectRow(0)
-    page._on_row_selected()
-    page._lookup_current()
-    assert started == []
-    assert "确认" in page._stats_label.text()
+    assert "找无码版" in text, text
