@@ -167,6 +167,18 @@ class ReleaseReport:
     def has_download(self) -> bool:
         return any(c.uncensored and c.downloadable for c in self.candidates)
 
+    @property
+    def stage(self) -> str:
+        """在"找替换"这一步里，这部片处在哪：todo / confirmed / likely / none / unknown。
+
+        放在模型里而不是界面里：界面只该显示结论，不该自己去解释 Available 的取值。
+        """
+        return {
+            Availability.CONFIRMED: "confirmed",
+            Availability.LIKELY: "likely",
+            Availability.NONE: "none",
+        }.get(self.availability, "unknown")
+
     def as_text(self) -> str:
         """一行摘要，给表格单元格用。"""
         if self.availability is Availability.CONFIRMED:

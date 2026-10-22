@@ -180,7 +180,7 @@ def test_view_labels_carry_counts(page):
     page._on_item(_result(CensorState.CENSORED, path=r"C:\lib\A-1.mp4"))
     page._refresh_stats()
     texts = [page.combo_filter.itemText(i) for i in range(page.combo_filter.count())]
-    assert any("待我处理 (1)" == text for text in texts), texts
+    assert any(text.endswith("待我处理 (1)") for text in texts), texts
 
 
 def test_manual_label_moves_row_to_confirmed(page, monkeypatch):
@@ -263,3 +263,98 @@ def test_restore_does_not_duplicate_existing_rows(page, monkeypatch):
     monkeypatch.setattr(page._service, "review_queue", lambda limit=500: pending)
     page._restore_pending()
     assert page.table.rowCount() == 1, "已经在列表里的不该再加一行"
+
+
+# ── 两个阶段：定标记 → 找替换 ─────────────────────────────
+
+def test_awaits_replacement_only_for_confirmed_censored():
+    """检索只服务于"已确认有码"。算法猜的、已确认无码的都不进。"""
+    from censor.review_route import awaits_replacement
+
+    assert awaits_replacement(_result(CensorState.CENSORED, manual=True))
+    assert not awaits_replacement(_result(CensorState.UNCENSORED, manual=True))
+    assert not awaits_replacement(_result(CensorState.CENSORED)), "算法判的不算确认"
+    assert not awaits_replacement(_result(CensorState.UNKNOWN))
+    assert not awaits_replacement(None)
+
+
+def test_replace_view_rejects_unconfirmed(page):
+    from censor.review_route import WorkflowView
+
+    page._on_item(_result(CensorState.CENSORED, path=r"C:/lib/auto.mp4"))
+    page.combo_filter.setCurrentIndex(page.combo_filter.findData(WorkflowView.REPLACE.value))
+    assert page.table.isRowHidden(0), "未确认有码的片不该出现在「② 找替换」"
+
+
+def test_scan_completion_does_not_trigger_lookup_for_guesses(page, monkeypatch):
+    """扫描结束只补查已确认的 —— 刚扫出来的"疑似有码"不查。"""
+    monkeypatch.setattr("censor.releases.transport.offline", lambda: False)
+    page.cfg.release_auto_lookup = True
+    queued: list[list[str]] = []
+    monkeypatch.setattr(page, "_start_lookup",
+                        lambda numbers, force=False: queued.append(list(numbers)))
+    page._on_item(_result(CensorState.CENSORED, path=r"C:/lib/auto.mp4"))
+    page._autolookup_confirmed()
+    assert queued == [], "算法判的有码不该被送进检索"
+
+    confirmed = _result(CensorState.CENSORED, manual=True, path=r"C:/lib/conf.mp4")
+    confirmed.number = "CONF-1"
+    page._on_item(confirmed)
+    page._autolookup_confirmed()
+    assert queued and queued[-1] == ["CONF1"], queued
+
+
+def test_confirming_censored_queues_lookup_immediately(page, monkeypatch):
+    page.cfg.release_auto_lookup = True
+    queued: list[list[str]] = []
+    monkeypatch.setattr(page, "_start_lookup",
+                        lambda numbers, force=False: queued.append(list(numbers)))
+    page._on_item(_result(CensorState.UNKNOWN, path=r"C:/lib/A-123.mp4"))
+    page._results[r"C:/lib/A-123.mp4"].number = "A-123"
+    page.table.selectRow(0)
+    page._on_row_selected()
+
+    confirmed = _result(CensorState.CENSORED, manual=True, path=r"C:/lib/A-123.mp4")
+    confirmed.number = "A-123"
+    monkeypatch.setattr(page._service, "label",
+                        lambda path, state, note="", base=None: confirmed)
+    page._label(CensorState.CENSORED)
+    assert queued and queued[-1] == ["A123"], queued
+
+
+def test_confirming_uncensored_never_queues(page, monkeypatch):
+    queued: list[list[str]] = []
+    monkeypatch.setattr(page, "_start_lookup",
+                        lambda numbers, force=False: queued.append(list(numbers)))
+    page._on_item(_result(CensorState.UNKNOWN, path=r"C:/lib/B-456.mp4"))
+    page.table.selectRow(0)
+    page._on_row_selected()
+
+    confirmed = _result(CensorState.UNCENSORED, manual=True, path=r"C:/lib/B-456.mp4")
+    confirmed.number = "B-456"
+    monkeypatch.setattr(page._service, "label",
+                        lambda path, state, note="", base=None: confirmed)
+    page._label(CensorState.UNCENSORED)
+    assert queued == []
+
+
+def test_stats_separate_checking_and_replacement(page):
+    """检查进度与检索进度必须分开报，不能混成一个数。"""
+    page._on_item(_result(CensorState.CENSORED, manual=True, path=r"C:/lib/A-1.mp4"))
+    page._on_item(_result(CensorState.UNKNOWN, path=r"C:/lib/B-2.mp4"))
+    page._refresh_stats()
+    text = page._stats_label.text()
+    assert "检查：" in text and "找替换" in text, text
+    assert "已确认有码 1" in text, text
+
+
+def test_lookup_button_refuses_before_confirmation(page, monkeypatch):
+    started: list = []
+    monkeypatch.setattr(page, "_start_lookup",
+                        lambda numbers, force=False: started.append(numbers))
+    page._on_item(_result(CensorState.CENSORED, path=r"C:/lib/auto.mp4"))
+    page.table.selectRow(0)
+    page._on_row_selected()
+    page._lookup_current()
+    assert started == []
+    assert "确认" in page._stats_label.text()

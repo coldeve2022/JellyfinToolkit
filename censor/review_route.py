@@ -42,7 +42,7 @@ from censor.tag_signals import classify_tag
 __all__ = [
     "ReviewBucket", "WorkflowView", "BUCKET_LABELS", "VIEW_LABELS",
     "bucket", "category", "needs_review", "conclusion_label", "bucket_label",
-    "in_view", "CONCLUDING_STATES",
+    "in_view", "CONCLUDING_STATES", "awaits_replacement",
 ]
 
 
@@ -78,25 +78,35 @@ BUCKET_LABELS: dict[ReviewBucket, str] = {
 
 
 class WorkflowView(str, Enum):
-    """顶部视图：按"我现在想干什么"组织，而不是按内部字段组织。"""
+    """顶部视图。**阶段一（定标记）与阶段二（找替换）是两件事，不混在一起算。**
 
-    TODO = "todo"                # 待我处理（默认）：排队中 + 未完成 + 待复核
-    ALL = "all"                  # 全部
-    DONE = "done"                # 已确认
-    REPLACEABLE = "replaceable"  # 有码且网上确有/疑似能换的无码版
-    PARKED = "parked"            # 暂不处理：低风险 + 已延后
+    阶段一的目标只有一个：把"哪些片确实有码"这件事定下来（人工确认）。
+    阶段二才对**已确认有码**的片去网上找无码版 —— 拿算法猜的"疑似有码"去查，
+    等于用假设喂流程，白查还可能把你的判断带偏。
+    """
+
+    TODO = "todo"        # 阶段一 · 待我处理：排队中 + 未完成 + 待复核
+    ALL = "all"          # 阶段一 · 全部记录
+    DONE = "done"        # 阶段一 · 已确认（有码 + 无码都在这里，用结论列区分）
+    REPLACE = "replace"  # 阶段二 · 找替换：只含"已确认有码"的片
+    PARKED = "parked"    # 阶段一 · 暂不处理：低风险 + 已延后
 
     @property
     def label(self) -> str:
         return VIEW_LABELS[self]
 
+    @property
+    def stage(self) -> int:
+        """1 = 定标记，2 = 找替换。给界面分组用。"""
+        return 2 if self is WorkflowView.REPLACE else 1
+
 
 VIEW_LABELS: dict[WorkflowView, str] = {
-    WorkflowView.TODO: "待我处理",
-    WorkflowView.ALL: "全部",
-    WorkflowView.DONE: "已确认",
-    WorkflowView.REPLACEABLE: "可换无码版",
-    WorkflowView.PARKED: "暂不处理",
+    WorkflowView.TODO: "① 待我处理",
+    WorkflowView.ALL: "① 全部记录",
+    WorkflowView.DONE: "① 已确认",
+    WorkflowView.REPLACE: "② 找替换",
+    WorkflowView.PARKED: "① 暂不处理",
 }
 
 #: 结论维度里"已经定性"的三个状态（用于「结论」筛选）
@@ -160,6 +170,19 @@ def bucket_label(result) -> str:
     return bucket(result).label
 
 
+def awaits_replacement(result) -> bool:
+    """这部片该不该进入阶段二（找替换）。
+
+    **只有人工确认过、且结论是「有码」的片子**才需要去找无码版：
+    算法判的"疑似有码"可能根本不是有码，拿它去查没有意义。
+    """
+    if result is None:
+        return False
+    if bucket(result) is not ReviewBucket.CONFIRMED:
+        return False
+    return result.state is CensorState.CENSORED
+
+
 def in_view(view: WorkflowView, value: ReviewBucket) -> bool:
     """某个处理桶是否属于某个视图。
 
@@ -174,6 +197,7 @@ def in_view(view: WorkflowView, value: ReviewBucket) -> bool:
         return value is ReviewBucket.CONFIRMED
     if view is WorkflowView.PARKED:
         return value in (ReviewBucket.LOW_RISK, ReviewBucket.DEFERRED)
-    if view is WorkflowView.REPLACEABLE:
-        return True
+    if view is WorkflowView.REPLACE:
+        # 阶段二只装"已确认有码"的片，由界面用结论+处理两个维度判定
+        return value is ReviewBucket.CONFIRMED
     return True

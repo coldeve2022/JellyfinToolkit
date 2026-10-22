@@ -1,9 +1,9 @@
 """无码版本检索的界面接线用例 —— 不联网，直接喂报告。
 
 守的是这几件事：
-1. 表格多出「无码版」列，且无报告时显示「未查 / 无番号」；
-2. 报告按番号落到所有同番号的行上（同一部片的多份副本共用一条结果）；
-3. 筛选「只看有无码版」只留下确有/疑似；
+1. 检索属于**阶段二**：没确认有码之前「无码版」列显示「—」，不假装查过；
+2. 只有人工标记「有码」的片才进「② 找替换」，算法判的"疑似有码"不进去；
+3. 报告按番号落到所有同番号的行上（同一部片的多份副本共用一条结果）；
 4. 面板能正确显示候选与按钮状态。
 """
 
@@ -25,9 +25,13 @@ from censor.releases.models import (  # noqa: E402
 )
 
 
-def _verdict(path: str, number: str, state=CensorState.CENSORED) -> VideoVerdict:
+def _verdict(path: str, number: str, state=CensorState.CENSORED, *,
+             manual: bool = False) -> VideoVerdict:
+    evidence = [Evidence(EvidenceSource.VISUAL, state, 0.9, "画面命中")]
+    if manual:
+        evidence.append(Evidence(EvidenceSource.MANUAL, state, 1.0, "人工确认"))
     result = VideoVerdict(path=path, number=number)
-    result.verdict = fuse([Evidence(EvidenceSource.VISUAL, state, 0.9, "画面命中")])
+    result.verdict = fuse(evidence)
     return result
 
 
@@ -69,40 +73,45 @@ def test_table_has_release_column(page):
     assert _COLUMNS[-1] == "无码版"
 
 
-def test_release_cell_before_lookup(page):
+def test_release_cell_is_blank_before_confirmation(page):
+    """阶段一还没打标记，无码版列就是「—」—— 检索根本没轮到它。"""
     page._on_item(_verdict(r"C:\tmp\ABC-123.mp4", "ABC-123"))
-    page._on_item(_verdict(r"C:\tmp\nonumber.mp4", ""))
+    page._on_item(_verdict(r"C:\tmp\CONF-1.mp4", "CONF-1", manual=True))
+    page._on_item(_verdict(r"C:\tmp\nonumber.mp4", "", manual=True))
     cells = {page.table.item(r, 0).data(0): page.table.item(r, 7).text()
              for r in range(page.table.rowCount())}
-    assert cells["ABC-123.mp4"] == "未查"
+    assert cells["ABC-123.mp4"] == "—", "算法判的有码不算确认，不该显示未查"
+    assert cells["CONF-1.mp4"] == "未查", "确认有码后才该轮到检索"
     assert cells["nonumber.mp4"] == "无番号"
 
 
 def test_report_updates_all_rows_with_same_number(page):
-    page._on_item(_verdict(r"C:\tmp\a\ABC-123.mp4", "ABC-123"))
-    page._on_item(_verdict(r"C:\tmp\b\ABC-123-1080p.mp4", "ABC-123"))
+    page._on_item(_verdict(r"C:\tmp\a\ABC-123.mp4", "ABC-123", manual=True))
+    page._on_item(_verdict(r"C:\tmp\b\ABC-123-1080p.mp4", "ABC-123", manual=True))
     page._on_release_report(_report("ABC-123", Availability.CONFIRMED))
     texts = {page.table.item(r, 7).text() for r in range(page.table.rowCount())}
     assert texts and all("确有" in text for text in texts), texts
 
 
-def test_filter_only_actionable(page):
-    page._on_item(_verdict(r"C:\tmp\A-1.mp4", "A-1"))
-    page._on_item(_verdict(r"C:\tmp\B-2.mp4", "B-2"))
-    page._on_release_report(_report("A-1", Availability.CONFIRMED))
-    page._on_release_report(_report("B-2", Availability.NONE))
-
+def test_replace_view_holds_only_confirmed_censored(page):
+    """「② 找替换」只装已确认有码的片 —— 不管检索结果如何。"""
     from censor.review_route import WorkflowView
 
+    page._on_item(_verdict(r"C:\tmp\A-1.mp4", "A-1", manual=True))
+    page._on_item(_verdict(r"C:\tmp\B-2.mp4", "B-2", manual=True,
+                           state=CensorState.UNCENSORED))
+    page._on_item(_verdict(r"C:\tmp\C-3.mp4", "C-3"))
+    page._on_release_report(_report("A-1", Availability.NONE))
+
     page.combo_filter.setCurrentIndex(
-        page.combo_filter.findData(WorkflowView.REPLACEABLE.value))
+        page.combo_filter.findData(WorkflowView.REPLACE.value))
     visible = {page.table.item(r, 0).data(0) for r in range(page.table.rowCount())
                if not page.table.isRowHidden(r)}
-    assert visible == {"A-1.mp4"}
+    assert visible == {"A-1.mp4"}, "未确认的 C-3 与已确认无码的 B-2 都不该进来"
 
 
 def test_panel_shows_candidates_and_enables_download(page):
-    page._on_item(_verdict(r"C:\tmp\ABC-123.mp4", "ABC-123"))
+    page._on_item(_verdict(r"C:\tmp\ABC-123.mp4", "ABC-123", manual=True))
     page.table.selectRow(0)
     page._on_row_selected()
     page._on_release_report(_report("ABC-123", Availability.CONFIRMED))
@@ -126,7 +135,7 @@ def test_panel_without_magnet_disables_copy(page):
 def test_unknown_report_carries_reason_in_cell(page):
     report = ReleaseReport(number="ABC123", availability=Availability.UNKNOWN,
                            note="站点被拦截，未能查证")
-    page._on_item(_verdict(r"C:\tmp\ABC-123.mp4", "ABC-123"))
+    page._on_item(_verdict(r"C:\tmp\ABC-123.mp4", "ABC-123", manual=True))
     page._on_release_report(report)
     cell = page.table.item(0, 7).text()
     assert "未查" in cell and "拦截" in cell, cell

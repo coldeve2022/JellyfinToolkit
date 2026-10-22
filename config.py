@@ -211,7 +211,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "release_max_requests": 40,       # 单次检索请求上限
     "release_detail_limit": 4,        # 每个站点最多抓几个条目的详情
     "release_cache_days": 7,          # 检索结果缓存天数
-    # 扫描判定为「有码」后自动去查无码版；关掉则只能手动点
+    # 你**确认「有码」**之后自动去查无码版（算法猜的"疑似有码"不会触发）；
+    # 关掉则只能在「② 找替换」里手动点
     "release_auto_lookup": True,
 }
 

@@ -27,8 +27,8 @@ from censor.jobs import ScanJobs, scan_priority as scan_priority
 from censor.releases import ReleaseReport, ReleaseService
 from censor.releases.models import normalize_number
 from censor.review_route import (
-    ReviewBucket, WorkflowView, bucket as review_bucket, bucket_label,
-    conclusion_label, in_view, needs_review, category,
+    ReviewBucket, WorkflowView, awaits_replacement, bucket as review_bucket,
+    bucket_label, conclusion_label, in_view, needs_review, category,
 )
 from ui.censor_gallery import EvidenceGallery
 from config import ToolkitConfig
@@ -266,8 +266,11 @@ class CensorshipPage(QWidget):
         self.release_panel.btn_lookup.clicked.connect(self._lookup_current)
         right_lay.addWidget(self.release_panel)
         row = QHBoxLayout()
-        self.btn_censored = QPushButton('确认存在')
-        self.btn_uncensored = QPushButton('确认未见')
+        # 这两个按钮是阶段一的**唯一产出**：给视频打上明确标记
+        self.btn_censored = QPushButton('标记「有码」')
+        self.btn_censored.setToolTip('确定这部片有马赛克 → 标记后自动进入「② 找替换」')
+        self.btn_uncensored = QPushButton('标记「无码」')
+        self.btn_uncensored.setToolTip('确定这部片没有马赛克 → 不需要找替换')
         for button,state,key,style in [(self.btn_censored,CensorState.CENSORED,'Alt+1','danger'),
                                        (self.btn_uncensored,CensorState.UNCENSORED,'Alt+2','accent')]:
             button.setShortcut(key)
@@ -381,11 +384,13 @@ class CensorshipPage(QWidget):
         QMessageBox.information(self,'像素化检查',
             '默认复用通过文件身份、参数和算法版本校验的分析。\n'
             '复用不会自动确认结果：疑似项仍留待复核。历史快照须重新添加文件才校验当前版本。\n'
-            '抽样低风险不证明全片没有像素化。Alt+1存在、Alt+2未见、Alt+3下一条。\n'
-            '更多菜单可恢复任务、选择延后视频、查看历史或忽略缓存重新分析。\n'
-            '「无码版」列来自联网检索：JavDB / JavBus 查官方无码与流出，Supjav 走搜索引擎索引\n'
-            '查破解版。结论分确有 / 疑似 / 未见 / 未查，未查会写明原因；筛选「只看有无码版」\n'
-            '可把没得换的片直接排除。检索方式与代理在「检查设置」里改。')
+            '抽样低风险不证明全片没有像素化。Alt+1 标有码、Alt+2 标无码、Alt+3 下一条。\n'
+            '更多菜单可恢复任务、选择延后视频、查看历史或忽略缓存重新分析。\n\n'
+            '这件事分两步，刻意分开算：\n'
+            '① 定标记 —— 你的任务只有一个：确认哪些片确实有码（红「标记有码」）。\n'
+            '② 找替换 —— 只有标记过「有码」的片才会去网上查无码版（JavDB / JavBus / Supjav\n'
+            '走搜索引擎索引）。没确认的片不会被查，因为"疑似有码"只是算法猜的。\n'
+            '「无码版」列在确认之前显示「—」，确认后显示 确有/疑似/未见/未查。')
 
     def _reanalyze_visible(self):
         paths = [self.table.item(row,0).data(Qt.UserRole) for row in range(self.table.rowCount())
@@ -499,7 +504,7 @@ class CensorshipPage(QWidget):
             self._stats_label.setText(
                 f"{len(reused)} 个视频沿用上次结果，本次无需重查"
                 "（要强制重算请用「更多 → 忽略缓存重新分析」）")
-            self._autolookup_after_scan()
+            self._autolookup_confirmed()
             return
 
         files = todo
@@ -790,14 +795,14 @@ class CensorshipPage(QWidget):
         self._finishing = False
         self._set_running(False)
         self._refresh_stats()
-        self._autolookup_after_scan()
+        self._autolookup_confirmed()
 
-    def _autolookup_after_scan(self) -> None:
-        """整批扫描结束后统一查一次 —— 不在每条结果回填时触发。
+    def _autolookup_confirmed(self) -> None:
+        """把**已确认有码**的片子补进检索队列（阶段二入口）。
 
-        原因：扫描过程中就把网络请求打进去，会让"扫描"和"联网"互相拖累，
-        而且用户还没看到结论就已经在跑外部请求了。等扫描收尾、再一次性查，
-        失败也不会影响扫描结果。
+        注意这里只处理人工确认过的：扫描刚出的"疑似有码"不查。
+        确认动作本身也会立刻触发一次（见 :meth:`_label`），所以这条路径
+        主要是给"恢复历史 / 批量确认"收尾用的。
         """
         from censor.releases.transport import offline
 
@@ -819,10 +824,8 @@ class CensorshipPage(QWidget):
         view = self._current_view()
         if not in_view(view, review_bucket(result)):
             return False
-        if view is WorkflowView.REPLACEABLE:
-            report = self._report_for(result)
-            if report is None or not report.availability.actionable:
-                return False
+        if view is WorkflowView.REPLACE and not awaits_replacement(result):
+            return False
         state = self.combo_conclusion.currentData()
         return not state or result.state.value == state
 
@@ -878,6 +881,16 @@ class CensorshipPage(QWidget):
         if refreshed is not None:
             self._review_overrides[path] = refreshed
             self._on_item(refreshed)
+            if state is CensorState.CENSORED:
+                # 标记完成 = 阶段二入口：立刻把它排进检索队列
+                self._maybe_queue_lookup(refreshed)
+                self._flush_lookup()
+                self._stats_label.setText(
+                    f"已标记「有码」：{os.path.basename(path)}"
+                    " —— 已加入「② 找替换」的检索队列")
+            else:
+                self._stats_label.setText(
+                    f"已标记「无码」：{os.path.basename(path)} —— 不需要找替换")
         self._refresh_stats()
         self._advance_review(path)
 
@@ -924,16 +937,26 @@ class CensorshipPage(QWidget):
         return cached
 
     def _release_cell(self, result) -> str:
+        # 检索属于阶段二：没确认有码之前，这一列不该假装"查过/没查过"
+        if not awaits_replacement(result):
+            return "—"
+        if not (result.number or ""):
+            return "无番号"
         report = self._report_for(result)
         if report is None:
-            return "未查" if (result.number or "") else "无番号"
+            return "未查"
         return self.release_panel.summary_for(report)
 
     def _maybe_queue_lookup(self, result) -> None:
-        """判定为「有码」才去查无码版 —— 无码/未定的查了也没有替换意义。"""
+        """**只有你确认过「有码」的片才去查无码版。**
+
+        算法判的"疑似有码"不能直接喂给检索：那只是猜测，可能根本不是有码，
+        查了白查，还会让你误以为"这部片有得换"。阶段一负责定标记，
+        阶段二才对标记过的片找替换。
+        """
         if not (self.cfg.release_enabled and self.cfg.release_auto_lookup):
             return
-        if result.state is not CensorState.CENSORED:
+        if not awaits_replacement(result):
             return
         number = normalize_number(result.number)
         if not number or number in self._releases or number in self._lookup_pending:
@@ -982,8 +1005,8 @@ class CensorshipPage(QWidget):
         self._refresh_release_column()
         actionable = sum(1 for r in self._releases.values() if r.availability.actionable)
         self.progress_detail.setText(
-            f"无码版本检索完成 {count} 个番号 · 确有/疑似 {actionable} 部"
-            "（可在筛选里选「只看有无码版」）")
+            f"找替换完成：{count} 个番号 · 确有/疑似 {actionable} 部"
+            "（切到视图「② 找替换」，无码版列就是结果）")
 
     def _refresh_release_column(self) -> None:
         if self.table.columnCount() <= 7:
@@ -999,17 +1022,29 @@ class CensorshipPage(QWidget):
         self.table.setSortingEnabled(True)
 
     def _lookup_current(self) -> None:
-        """面板上的「检索无码版」：有选中就查它，没选中就查所有有码项。"""
-        if self._current is not None and self._current.number:
-            self._start_lookup([normalize_number(self._current.number)], force=True)
+        """面板上的「检索无码版」。**只对已确认有码的片生效。**
+
+        没确认之前，检索没有意义 —— 先回答"这部片到底有没有码"。
+        """
+        current = self._current
+        if current is not None and awaits_replacement(current):
+            if current.number:
+                self._start_lookup([normalize_number(current.number)], force=True)
+            else:
+                self._stats_label.setText("这部片没有解析出番号，无法按番号检索")
+            return
+        if current is not None:
+            self._stats_label.setText(
+                "先在右侧确认「有码」，确认后才会进入「② 找替换」去找无码版")
             return
         numbers = [normalize_number(r.number) for r in self._results.values()
-                   if r.state is CensorState.CENSORED and r.number]
+                   if awaits_replacement(r) and r.number]
         numbers = list(dict.fromkeys(numbers))
         if numbers:
             self._start_lookup(numbers, force=True)
         else:
-            self._stats_label.setText("当前列表没有判定为「有码」且有番号的视频")
+            self._stats_label.setText(
+                "还没有确认过任何「有码」的视频 —— 阶段一先定标记，阶段二才找替换")
 
     # ── 杂项 ──
     def _clear(self) -> None:
@@ -1030,25 +1065,47 @@ class CensorshipPage(QWidget):
         self._refresh_stats()
 
     def _refresh_stats(self) -> None:
+        """两段统计，**刻意不混着算**：检查进度和检索进度是两件事。
+
+        混在一起（上一版把"可换无码版"塞进同一个计数）会让人分不清
+        "还有多少要我看"和"还有多少要去网上查"。
+        """
         counts = Counter(review_bucket(r) for r in self._results.values())
         todo = sum(n for b, n in counts.items() if b.is_todo)
-        replaceable = sum(
-            1 for r in self._results.values()
-            if (report := self._report_for(r)) is not None and report.availability.actionable)
+        confirmed_censored = [r for r in self._results.values() if awaits_replacement(r)]
+        confirmed_clean = counts[ReviewBucket.CONFIRMED] - len(confirmed_censored)
         self._update_view_labels({
             WorkflowView.TODO: todo,
             WorkflowView.ALL: len(self._results),
             WorkflowView.DONE: counts[ReviewBucket.CONFIRMED],
-            WorkflowView.REPLACEABLE: replaceable,
+            WorkflowView.REPLACE: len(confirmed_censored),
             WorkflowView.PARKED: counts[ReviewBucket.LOW_RISK] + counts[ReviewBucket.DEFERRED],
         })
-        self._stats_label.setText(
-            f'列表 {len(self._results)} · 待我处理 {todo}'
-            f' · 已确认 {counts[ReviewBucket.CONFIRMED]}'
+        check_text = (
+            f'检查：待处理 {todo} · 已确认有码 {len(confirmed_censored)}'
+            f' · 已确认无码 {confirmed_clean}'
             f' · 低风险 {counts[ReviewBucket.LOW_RISK]}'
-            f' · 已延后 {counts[ReviewBucket.DEFERRED]}'
-            f' · 可换无码版 {replaceable}'
+            f' · 已延后 {counts[ReviewBucket.DEFERRED]}')
+        replace_text = ''
+        if confirmed_censored:
+            buckets = Counter(self._replace_stage_of(r) for r in confirmed_censored)
+            replace_text = (
+                f' ｜ 找替换（{len(confirmed_censored)} 部）：'
+                f'待查 {buckets["todo"]} · 确有 {buckets["confirmed"]}'
+                f' · 疑似 {buckets["likely"]} · 未见 {buckets["none"]}'
+                f' · 未查 {buckets["unknown"]}')
+        self._stats_label.setText(
+            f'列表 {len(self._results)} · {check_text}{replace_text}'
             + (f' · 正在呈现 {len(self._pending_results)} 条结果' if self._pending_results else ''))
+
+    def _replace_stage_of(self, result) -> str:
+        """阶段二里这部片处在哪一步：待查 / 确有 / 疑似 / 未见 / 未查。"""
+        if not (result.number or ""):
+            return "unknown"
+        report = self._report_for(result)
+        if report is None:
+            return "todo"
+        return report.stage
 
     def _update_view_labels(self, counts: dict) -> None:
         """把计数写进下拉项：``待我处理 (37)``。
