@@ -92,7 +92,10 @@ def test_filter_only_actionable(page):
     page._on_release_report(_report("A-1", Availability.CONFIRMED))
     page._on_release_report(_report("B-2", Availability.NONE))
 
-    page.combo_filter.setCurrentText("只看有无码版")
+    from censor.review_route import WorkflowView
+
+    page.combo_filter.setCurrentIndex(
+        page.combo_filter.findData(WorkflowView.REPLACEABLE.value))
     visible = {page.table.item(r, 0).data(0) for r in range(page.table.rowCount())
                if not page.table.isRowHidden(r)}
     assert visible == {"A-1.mp4"}

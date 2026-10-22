@@ -106,6 +106,47 @@ class CensorService:
         self._tools = (ffmpeg, ffprobe)
         return self._tools
 
+    # ── 缓存查询（给界面"不重复检查"用）──
+    def cached_result(
+        self,
+        path: str | Path,
+        options: Optional[CensorOptions] = None,
+        *,
+        server_tags: Optional[list[str]] = None,
+    ) -> Optional[VideoVerdict]:
+        """返回**仍然有效**的缓存结果；没有就返回 None。不抽帧、不写盘。
+
+        界面在"导入一批文件"时先问一遍：能用的直接铺到列表里，只把真正要算的
+        送进扫描队列。这样重复导入同一批片子不会从头再算一遍，
+        但又不会因为"有缓存"而漏掉配置/文件变化导致的过期结果。
+        """
+        opts = options or CensorOptions()
+        if opts.force or not opts.use_cache:
+            return None
+        target = str(path)
+        try:
+            stat = Path(target).stat()
+            size, mtime = int(stat.st_size), float(stat.st_mtime)
+            identity = identify_file(target).serialize()
+            active = self._active_detectors(opts)
+            label = self.store.get_label(target, file_identity=identity)
+            signature = self._analysis_signature(
+                target, opts, active, server_tags or [], label)
+            cached = self.store.get(
+                target, size, mtime, file_identity=identity, analysis_signature=signature)
+        except Exception:  # noqa: BLE001 - 查询缓存失败就当没有缓存
+            return None
+        if cached is None:
+            return None
+        evidence = [ev for ev in cached.verdict.evidence
+                    if ev.source is not EvidenceSource.MANUAL]
+        if label is not None:
+            evidence.append(Evidence(EvidenceSource.MANUAL, label[0], 1.0, label[1]))
+        cached.verdict = fuse(evidence, self.policy)
+        cached.elapsed = 0.0
+        cached.cache_hit = True
+        return cached
+
     # ── 单部 ──
     def probe(
         self,

@@ -129,12 +129,16 @@ def test_censorship_page_classifies(qapp, cfg, tmp_path, qtbot):
     assert _wait_worker(page._worker)
     qapp.processEvents()
 
-    states = {}
+    # 结论列只表达"有没有码"，处理列表达"还需不需要人"——两列分开断言，
+    # 元数据模式既不能冒充画面结论（结论=未定），也不能自动当成处理完（处理=待复核）
+    conclusions, buckets = {}, {}
     for row in range(page.table.rowCount()):
         name = page.table.item(row, 0).text()
-        states[name] = page.table.item(row, 2).text()
-    assert states["FC2-PPV-123456.mp4"] == "待确认"
-    assert states["ABC-123.mp4"] == "待确认"
+        conclusions[name] = page.table.item(row, 2).text()
+        buckets[name] = page.table.item(row, 3).text()
+    for name in ("FC2-PPV-123456.mp4", "ABC-123.mp4"):
+        assert conclusions[name] == "未定"
+        assert buckets[name] == "待复核"
 
     # TaskManager restores controls after its queued delivery barrier, which
     # can finish later than QThread.wait(). Clearing while busy is disallowed.

@@ -22,11 +22,14 @@ from PySide6.QtWidgets import (
 
 from censor import CensorOptions, CensorService, CensorState, VideoVerdict
 from censor.fusion import explain, fuse
-from censor.models import ProcessingStatus, EvidenceSource
+from censor.models import EvidenceSource
 from censor.jobs import ScanJobs, scan_priority as scan_priority
 from censor.releases import ReleaseReport, ReleaseService
 from censor.releases.models import normalize_number
-from censor.review_route import category, needs_review
+from censor.review_route import (
+    ReviewBucket, WorkflowView, bucket as review_bucket, bucket_label,
+    conclusion_label, in_view, needs_review, category,
+)
 from ui.censor_gallery import EvidenceGallery
 from config import ToolkitConfig
 from ui.services import busy, start_task, stop_page, CallWorker
@@ -36,25 +39,30 @@ from ui.censor_release import ConnectionCheck, ReleaseLookupWorker, ReleasePanel
 
 __all__ = ["CensorshipPage"]
 
-_COLUMNS = ["文件名", "标识", "结论 / 状态", "依据等级", "结构分", "依据", "记录来源",
-            "无码版"]
+#: 表格列：**结论**与**处理**是两个独立维度，不再挤在一格里
+#: （以前一列里混着"疑似·待复核""人工确认未见""低风险·未确证"，无法单独筛）
+_COLUMNS = ["文件名", "标识", "结论", "处理", "结构分", "依据", "记录来源", "无码版"]
 
+#: 结论（有没有码）用状态色
+_STATE_COLOR = {
+    CensorState.CENSORED: "#c0392b",
+    CensorState.UNCENSORED: "#1e8449",
+    CensorState.UNKNOWN: "#7f8c8d",
+}
 
-def _result_label(result):
-    if result.status is not ProcessingStatus.COMPLETED:
-        return result.status.label
-    route = category(result)
-    if route == 'deferred':
-        return '名称线索·延后'
-    if route == 'low_risk':
-        return '低风险 · 未确证'
-    if result.state is CensorState.CENSORED:
-        return '人工确认存在' if route == 'manual' else '疑似 · 待复核'
-    return {CensorState.CENSORED: '疑似像素化', CensorState.UNCENSORED: '人工确认未见',
-            CensorState.UNKNOWN: '待确认'}[result.state]
+#: 处理（还需不需要人）用另一套色，避免和结论混淆
+_BUCKET_COLOR = {
+    ReviewBucket.PENDING: "#7f8c8d",
+    ReviewBucket.FAILED: "#b9770e",
+    ReviewBucket.UNREVIEWED: "#d35400",
+    ReviewBucket.CONFIRMED: "#1e8449",
+    ReviewBucket.LOW_RISK: "#566573",
+    ReviewBucket.DEFERRED: "#566573",
+}
 
 
 def _evidence_grade(result):
+    """给"处理"列做悬停说明：这条结论是靠什么来的。"""
     if result.verdict.of(EvidenceSource.MANUAL) is not None:
         return '人工确认'
     return '多时点画面' if result.is_decided else '证据不足'
@@ -84,13 +92,6 @@ class _DropTable(QTableWidget):
             return
         event.acceptProposedAction()
         self.files_dropped.emit(paths)
-
-
-_STATE_COLOR = {
-    CensorState.CENSORED: "#c0392b",
-    CensorState.UNCENSORED: "#1e8449",
-    CensorState.UNKNOWN: "#7f8c8d",
-}
 
 
 class CensorshipPage(QWidget):
@@ -123,6 +124,8 @@ class CensorshipPage(QWidget):
         # ── 无码版本检索：结果按番号缓存，同一部片的多份副本共用 ──
         self._release_service = ReleaseService(cfg)
         self._releases: dict[str, ReleaseReport] = {}
+        self._release_missing: set[str] = set()
+        self._restored = False
         self._release_worker: Optional[ReleaseLookupWorker] = None
         self._lookup_pending: list[str] = []
         self._lookup_timer = QTimer(self)
@@ -187,13 +190,26 @@ class CensorshipPage(QWidget):
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(0,0,3,0)
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel('显示：'))
+        # 视图 = "我现在想干什么"；结论 = "有没有码"。两个维度各管一件事，
+        # 不再用一个菜单同时表达结论、处理进度和业务动作（那是上一版的病根）。
+        filter_row.addWidget(QLabel('视图：'))
         self.combo_filter = QComboBox()
         self.combo_filter.setProperty('taskInteractive',True)
-        self.combo_filter.addItems(['全部','检出像素化','人工确认未见','待确认','只看待复核',
-                                   '抽样低风险','名称线索延后','人工已确认','只看有无码版'])
+        for view in WorkflowView:
+            self.combo_filter.addItem(view.label, view.value)
+        self.combo_filter.setCurrentIndex(self.combo_filter.findData(WorkflowView.ALL.value))
         self.combo_filter.currentIndexChanged.connect(self._apply_filter)
         filter_row.addWidget(self.combo_filter)
+        filter_row.addWidget(QLabel('结论：'))
+        self.combo_conclusion = QComboBox()
+        self.combo_conclusion.setProperty('taskInteractive',True)
+        self.combo_conclusion.addItem('全部', '')
+        for state, text in ((CensorState.CENSORED, '有码'),
+                            (CensorState.UNCENSORED, '无码'),
+                            (CensorState.UNKNOWN, '未定')):
+            self.combo_conclusion.addItem(text, state.value)
+        self.combo_conclusion.currentIndexChanged.connect(self._apply_filter)
+        filter_row.addWidget(self.combo_conclusion)
         filter_row.addStretch()
         left_lay.addLayout(filter_row)
         self.table = _DropTable(0,len(_COLUMNS))
@@ -207,12 +223,14 @@ class CensorshipPage(QWidget):
         header.setMinimumSectionSize(50)
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setSectionResizeMode(0,QHeaderView.Stretch)
-        self.table.setColumnWidth(0,180)
-        self.table.setColumnWidth(2,155)
+        self.table.setColumnWidth(0,200)
+        self.table.setColumnWidth(2,70)
+        self.table.setColumnWidth(3,84)
         self.table.setColumnWidth(4,62)
-        self.table.setColumnWidth(6,100)
+        self.table.setColumnWidth(6,88)
         self.table.setColumnWidth(7,150)
-        for column in (1,3,4,5):
+        # 标识/结构分/依据 默认收起：结论与处理才是主线，其余是排查用的细节
+        for column in (1,4,5):
             self.table.setColumnHidden(column,True)
         self.table.itemSelectionChanged.connect(self._on_row_selected)
         self.table.files_dropped.connect(self._start_scan)
@@ -378,6 +396,46 @@ class CensorshipPage(QWidget):
         else:
             self._stats_label.setText('当前没有可重新分析的未复核项；延后视频请从选择菜单手动勾选')
 
+    # ── 打开页面：把"没做完的活"接过来 ──
+    def showEvent(self, event):  # noqa: N802 - Qt 约定
+        super().showEvent(event)
+        if self._restored:
+            return
+        self._restored = True
+        self._restore_pending()
+
+    def _restore_pending(self) -> None:
+        """自动载入数据库里的待处理项。
+
+        以前要手动「更多 → 加载历史记录」，关一次程序待办就等于消失了 ——
+        这是"遗漏"最实际的来源。现在打开页面就自动接上，并直接把视图切到
+        「待我处理」，你不需要记得上次停在哪。
+        """
+        if self._results:
+            return
+        try:
+            pending = self._service.review_queue(limit=300)
+        except Exception as exc:  # noqa: BLE001 - 读历史失败不该拦住页面
+            self._stats_label.setText(f"读取待处理记录失败：{exc}")
+            return
+        if not pending:
+            self._refresh_stats()
+            return
+        self._batching = True
+        try:
+            for result in pending:
+                result.from_history = True
+                self._on_item(result)
+        finally:
+            self._batching = False
+        self.combo_filter.setCurrentIndex(
+            self.combo_filter.findData(WorkflowView.TODO.value))
+        self._apply_filter()
+        self._refresh_stats()
+        self._stats_label.setText(
+            f"已自动载入 {len(pending)} 个待处理项（含历史记录）；"
+            "视图切到「待我处理」，其它项在「全部」里")
+
     # ── 拖拽 ──
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -422,13 +480,33 @@ class CensorshipPage(QWidget):
         if not files:
             self._stats_label.setText("没有新增视频可检测")
             return
+
+        options = CensorOptions(
+            detect_visual=bool(self.cfg.censor_visual_enabled), force=force,
+            recheck_manual=deep,
+            frame_samples=min(600, self.cfg.censor_frame_samples * 3) if deep else None,
+        )
+        # 已经有有效结果的先铺进列表（不重算），只把真正要算的送进队列。
+        # 判据是"文件身份 + 参数签名"都一致，所以改过配置/换过文件仍会重算。
+        todo, reused = self._partition_reusable(files, options)
+        if reused:
+            self._batching = True
+            for result in reused:
+                self._on_item(result)
+            self._batching = False
+            self._refresh_stats()
+        if not todo:
+            self._stats_label.setText(
+                f"{len(reused)} 个视频沿用上次结果，本次无需重查"
+                "（要强制重算请用「更多 → 忽略缓存重新分析」）")
+            self._autolookup_after_scan()
+            return
+
+        files = todo
         self._set_running(True)
         self._finishing = False
         self._worker = CensorScanWorker(
-            self._service, files,
-            CensorOptions(detect_visual=bool(self.cfg.censor_visual_enabled), force=force,
-                          recheck_manual=deep,
-                          frame_samples=min(600, self.cfg.censor_frame_samples * 3) if deep else None),
+            self._service, files, options,
             workers=int(getattr(self.cfg, "censor_workers", 4) or 4),
             manual_deferred=manual_deferred,
         )
@@ -438,6 +516,25 @@ class CensorshipPage(QWidget):
         self._worker.error.connect(self._on_log)
         self._worker.all_done.connect(self._on_all_done)
         start_task(self, self._worker, "视频像素化检测")
+
+    def _partition_reusable(self, files: list[str], options: CensorOptions):
+        """把"已有有效结果"的文件挑出来，其余才是要真算的。
+
+        这是"不重复检查"的落点：拖同一批片子进来不会从头再扫一遍，
+        但文件被换过（大小/修改时间变）、参数或插件版本变过，签名就不匹配，
+        照样会重算 —— 不会因为"有缓存"而漏掉该更新的结果。
+        """
+        if options.force:
+            return list(files), []
+        todo: list[str] = []
+        reused = []
+        for path in files:
+            cached = self._service.cached_result(path, options)
+            if cached is None:
+                todo.append(path)
+            else:
+                reused.append(cached)
+        return todo, reused
 
     def _on_discovered(self, paths):
         seen = set(self._submitted)
@@ -628,8 +725,8 @@ class CensorshipPage(QWidget):
         values = [
             os.path.basename(result.path),
             result.number or "—",
-            _result_label(result),
-            _evidence_grade(result),
+            conclusion_label(result),
+            bucket_label(result),
             f"{result.visual_score:.1f}" if result.visual_score else "—",
             (result.error or evidence_text or result.verdict.reason)[:120],
             self._record_source(result),
@@ -640,6 +737,10 @@ class CensorshipPage(QWidget):
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             if col == 2:
                 item.setForeground(QColor(_STATE_COLOR.get(result.state, "#333")))
+                item.setToolTip("这部片子画面里有没有码；待复核只是流程状态，不改变结论")
+            if col == 3:
+                item.setForeground(QColor(_BUCKET_COLOR.get(review_bucket(result), "#333")))
+                item.setToolTip(_evidence_grade(result))
             if col == 0:
                 item.setData(Qt.UserRole, result.path)
                 item.setToolTip(result.path)
@@ -709,20 +810,21 @@ class CensorshipPage(QWidget):
             self._advance_review('')
 
     # ── 筛选 ──
-    def _matches_filter(self, result):
-        mode = self.combo_filter.currentText()
-        route = category(result)
-        if mode == '检出像素化':
-            return result.state is CensorState.CENSORED
-        if mode == '人工确认未见':
-            return route == 'manual' and result.state is CensorState.UNCENSORED
-        if mode in ('待确认','只看待复核'):
-            return needs_review(result)
-        if mode == '只看有无码版':
+    def _current_view(self) -> WorkflowView:
+        data = self.combo_filter.currentData()
+        return WorkflowView(data) if data else WorkflowView.TODO
+
+    def _matches_filter(self, result) -> bool:
+        """视图（我现在想干什么）× 结论（有没有码）—— 两个维度独立的 AND。"""
+        view = self._current_view()
+        if not in_view(view, review_bucket(result)):
+            return False
+        if view is WorkflowView.REPLACEABLE:
             report = self._report_for(result)
-            return bool(report and report.availability.actionable)
-        return route == {'抽样低风险':'low_risk','名称线索延后':'deferred',
-                         '人工已确认':'manual'}.get(mode,route)
+            if report is None or not report.availability.actionable:
+                return False
+        state = self.combo_conclusion.currentData()
+        return not state or result.state.value == state
 
     def _apply_filter(self) -> None:
         for row in range(self.table.rowCount()):
@@ -744,7 +846,8 @@ class CensorshipPage(QWidget):
         self._current = result
         self.lbl_review_title.setText(
             f"{os.path.basename(result.path)}\n"
-            f"结论：{_result_label(result)} · 结构分 {result.visual_score:.1f} · "
+            f"结论：{conclusion_label(result)} · 处理：{bucket_label(result)} · "
+            f"结构分 {result.visual_score:.1f} · "
             f"耗时 {result.elapsed:.0f}s")
         self._show_thumbs(result)
         self.release_panel.show_report(self._report_for(result))
@@ -786,9 +889,11 @@ class CensorshipPage(QWidget):
         if not self._batching:
             self.table.setSortingEnabled(False)
         self.table.item(row, 6).setText(self._record_source(result))
-        self.table.item(row, 2).setText(_result_label(result))
+        self.table.item(row, 2).setText(conclusion_label(result))
         self.table.item(row, 2).setForeground(QColor(_STATE_COLOR.get(result.state, '#333')))
-        self.table.item(row, 3).setText(_evidence_grade(result))
+        self.table.item(row, 3).setText(bucket_label(result))
+        self.table.item(row, 3).setForeground(QColor(_BUCKET_COLOR.get(review_bucket(result), '#333')))
+        self.table.item(row, 3).setToolTip(_evidence_grade(result))
         self.table.item(row, 4).setText(f'{result.visual_score:.1f}' if result.visual_score else '—')
         self.table.item(row, 5).setText(
             (result.error or "；".join(t for _, t in explain(result.verdict))
@@ -808,9 +913,14 @@ class CensorshipPage(QWidget):
             return None
         if number in self._releases:
             return self._releases[number]
+        if number in self._release_missing:
+            return None
         cached = self._release_service.cached(number)
         if cached is not None:
             self._releases[number] = cached
+        else:
+            # 记下"查过但没有"，否则每次刷新统计（每次筛选/新增一行）都要打一次库
+            self._release_missing.add(number)
         return cached
 
     def _release_cell(self, result) -> str:
@@ -862,6 +972,7 @@ class CensorshipPage(QWidget):
 
     def _on_release_report(self, report: ReleaseReport) -> None:
         self._releases[normalize_number(report.number)] = report
+        self._release_missing.discard(normalize_number(report.number))
         self._refresh_release_column()
         current = self._current
         if current is not None and normalize_number(current.number) == normalize_number(report.number):
@@ -919,9 +1030,39 @@ class CensorshipPage(QWidget):
         self._refresh_stats()
 
     def _refresh_stats(self) -> None:
-        counts = self._category_counts
+        counts = Counter(review_bucket(r) for r in self._results.values())
+        todo = sum(n for b, n in counts.items() if b.is_todo)
+        replaceable = sum(
+            1 for r in self._results.values()
+            if (report := self._report_for(r)) is not None and report.availability.actionable)
+        self._update_view_labels({
+            WorkflowView.TODO: todo,
+            WorkflowView.ALL: len(self._results),
+            WorkflowView.DONE: counts[ReviewBucket.CONFIRMED],
+            WorkflowView.REPLACEABLE: replaceable,
+            WorkflowView.PARKED: counts[ReviewBucket.LOW_RISK] + counts[ReviewBucket.DEFERRED],
+        })
         self._stats_label.setText(
-            f'列表 {len(self._results)} · 人工确认 {counts["manual"]}'
-            f' · 待复核 {counts["review"] + counts["failed"]}'
-            f' · 抽样低风险 {counts["low_risk"]} · 名称延后 {counts["deferred"]}'
+            f'列表 {len(self._results)} · 待我处理 {todo}'
+            f' · 已确认 {counts[ReviewBucket.CONFIRMED]}'
+            f' · 低风险 {counts[ReviewBucket.LOW_RISK]}'
+            f' · 已延后 {counts[ReviewBucket.DEFERRED]}'
+            f' · 可换无码版 {replaceable}'
             + (f' · 正在呈现 {len(self._pending_results)} 条结果' if self._pending_results else ''))
+
+    def _update_view_labels(self, counts: dict) -> None:
+        """把计数写进下拉项：``待我处理 (37)``。
+
+        菜单里带数字是为了让"还有多少活"一眼可见 —— 上一版要逐个点开才知道。
+        """
+        for index in range(self.combo_filter.count()):
+            value = self.combo_filter.itemData(index)
+            try:
+                view = WorkflowView(value)
+            except ValueError:
+                continue
+            label = view.label
+            if value in counts:
+                label = f"{label} ({counts[value]})"
+            if self.combo_filter.itemText(index) != label:
+                self.combo_filter.setItemText(index, label)
