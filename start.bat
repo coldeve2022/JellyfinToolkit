@@ -3,11 +3,19 @@ chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
 
-REM ───────────────────────────────────────────────────────────
-REM  依次尝试：项目自带 .venv → 常见安装位置 → py -3 → PATH 的 python
-REM  **不再直接用 where python**：本机 PATH 第一位可能是某个工具自带的
-REM  隔离运行时（没装 PySide6），命中它就会启动失败。
-REM ───────────────────────────────────────────────────────────
+REM ===========================================================
+REM  Setup + start. Prefer the other .bat (the launcher) for normal
+REM  use: it keeps the console open on failure. This one installs
+REM  dependencies first if they are missing.
+REM
+REM  Interpreter order: project .venv -> common install paths ->
+REM  py -3 -> PATH python. Do NOT rely on "where python" first:
+REM  on some machines PATH starts with a bundled runtime that has
+REM  no PySide6.
+REM
+REM  NOTE: keep this file CRLF + pure ASCII (see the launcher).
+REM ===========================================================
+
 set "PYBIN="
 set "PYARGS="
 
@@ -56,12 +64,17 @@ if errorlevel 1 (
   "%PYBIN%" %PYARGS% -m pip install -r requirements.txt || goto :fail
 )
 
+if /i "%~1"=="--check" (
+  "%PYBIN%" %PYARGS% -c "import sys, PySide6; print('[check]', sys.version.split()[0], '/ PySide6', PySide6.__version__)"
+  exit /b 0
+)
+
 start "" "%PYBIN%" %PYARGS% "%~dp0main.py"
 exit /b 0
 
 :fail
 echo.
 echo [ERROR] Setup failed. The messages above are the reason.
-echo         Double-click 启动.bat to see the details in a console window.
+echo         Double-click the launcher .bat to see details in a console.
 pause
 exit /b 1
