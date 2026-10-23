@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from typing import Optional
+from copy import copy, deepcopy
 
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication
@@ -38,15 +39,21 @@ class ReleaseLookupWorker(QThread):
     progressed = Signal(int, int)     # 已完成, 总数
     logged = Signal(str)
     all_done = Signal(int)
+    task_status = Signal(object)
 
     def __init__(self, service: ReleaseService, numbers: list[str], *,
                  ttl_days: float = 7.0, force: bool = False, parent=None):
         super().__init__(parent)
-        self._service = service
+        self._service = copy(service)
+        self._service.cfg = deepcopy(service.cfg)
+        if service._transport is not None and service._factory is None:
+            self._service._transport = None
+        self._service._source_sessions = {}
         self._numbers = list(dict.fromkeys(n for n in numbers if n))
         self._ttl_days = ttl_days
         self._force = force
         self._stopped = False
+        self.stats = dict(ok=0, fail=0, cancelled=False)
 
     def stop(self) -> None:
         self._stopped = True
@@ -71,11 +78,22 @@ class ReleaseLookupWorker(QThread):
             except Exception as exc:  # noqa: BLE001 - 单个番号失败不该中断整批
                 self.logged.emit(f"检索 {number} 失败：{exc}")
                 done += 1
+                self.stats["fail"] += 1
                 self.progressed.emit(done, total)
                 continue
             done += 1
+            from censor.models import ProcessingStatus
+            if report.status is ProcessingStatus.CANCELLED:
+                self.stats["cancelled"] = True
+            elif report.status is not ProcessingStatus.COMPLETED:
+                self.stats["fail"] += 1
+            else:
+                self.stats["ok"] += 1
             self.report_ready.emit(report)
             self.progressed.emit(done, total)
+            self.task_status.emit(dict(progress=int(done * 100 / max(1, total)), phase="检索作品",
+                detail=f"{done}/{total} · 完成 {self.stats['ok']} · 未完成 {self.stats['fail']} · {number}"))
+        self.stats["cancelled"] = self.stats["cancelled"] or self._stopped
         self.all_done.emit(done)
 
 
@@ -144,6 +162,7 @@ class ReleasePanel(QWidget):
 
     def _fill(self) -> None:
         report = self._report
+        self._candidates_index = {}
         self.table.setRowCount(0)
         if report is None:
             self.lbl_summary.setText("无码版本：未查")
@@ -169,7 +188,7 @@ class ReleasePanel(QWidget):
         self.table.insertRow(row)
         best = candidate.best_magnet
         seeds = (f"{len(candidate.magnets)} 个 · {best.size_text}"
-                 if candidate.magnets else "无")
+                 if best else "无可确认版本的磁链")
         values = [
             candidate.source,
             candidate.number or "—",
@@ -205,7 +224,7 @@ class ReleasePanel(QWidget):
 
     def copy_magnet(self) -> None:
         candidate = self.selected() or self._fallback()
-        magnet = candidate.best_magnet if candidate else None
+        magnet = candidate.best_magnet if candidate and candidate.uncensored else None
         if magnet is not None:
             QGuiApplication.clipboard().setText(magnet.uri)
             self.btn_magnet.setText("已复制")
@@ -220,7 +239,7 @@ class ReleasePanel(QWidget):
     def _refresh_buttons(self) -> None:
         candidate = self.selected() or self._fallback()
         has_page = bool(candidate and candidate.page_url)
-        has_magnet = bool(candidate and candidate.best_magnet)
+        has_magnet = bool(candidate and candidate.uncensored and candidate.best_magnet)
         self.btn_open.setEnabled(has_page)
         self.btn_magnet.setEnabled(has_magnet)
         if not has_magnet:
@@ -256,6 +275,7 @@ class ConnectionCheck(QThread):
             "release_sources": ["javdb", "supjav"],
             "release_supjav_engines": list(
                 getattr(cfg, "release_supjav_engines", ["bing", "duckduckgo"]) or []),
+            "release_supjav_mode": getattr(cfg, 'release_supjav_mode', 'auto'),
             # 测试要快：不重试、短超时、少请求
             "release_timeout": 15.0,
             "release_retries": 0,
@@ -322,20 +342,21 @@ class ConnectionCheck(QThread):
             except Exception as exc:  # noqa: BLE001 - 测试就该把原因显示出来
                 emit(False, f"JavDB 检索失败：{exc}", "站点改版或网络不稳定")
 
-        # 3) Supjav（走站点索引，不碰它的 Cloudflare）
-        if reachable:
+        # Supjav has an independent route/session and must be tested even if JavDB fails.
+        if not self._stopped:
             source = SupjavSource(transport, self._cfg)
             try:
                 found = source.search(ReleaseQuery(number="NCRA-026"), limit=2)
             except Exception as exc:  # noqa: BLE001 - 测试就把原因显示出来
-                emit(False, f"Supjav 索引检索失败：{exc}",
-                     "换一个搜索引擎（设置里 release_supjav_engines，例如只留 duckduckgo）")
+                emit(False, f"Supjav 检索失败：{exc}",
+                     "在检索设置连接 Supjav 浏览器会话并手动完成验证；也可配置 FlareSolverr")
             else:
                 detail = "；".join(f"{k}: {v}" for k, v in source.status_detail.items())
                 if found:
-                    emit(True, f"Supjav 索引检索：命中 {len(found)} 条", detail)
+                    verified = sum('站内' in c.uncensored_reason for c in found)
+                    emit(True, f"Supjav：命中 {len(found)} 条，其中站内核验 {verified} 条", detail)
                 else:
-                    emit(False, "Supjav 索引检索：没有命中",
+                    emit(False, "Supjav：没有命中",
                          (detail + "；" if detail else "")
                          + "索引里没有这个番号，不代表站上没有，只代表没被索引到")
 

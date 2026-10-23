@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from threading import RLock
 import time
+from copy import copy, deepcopy
 
 from PySide6.QtCore import QThread, Signal
 from censor.jobs import ScanJobs, scan_priority
@@ -22,8 +23,16 @@ class CensorScanWorker(QThread):
 
     def __init__(self, service, paths, options, workers=4, parent=None, *, manual_deferred=False):
         super().__init__(parent)
-        self._service, self._paths, self._options = service, list(paths), options
-        self._workers = max(1, min(int(workers or 1), 8))
+        self._service, self._paths, self._options = copy(service), list(paths), deepcopy(options)
+        if hasattr(service, 'cfg'):
+            self._service.cfg = deepcopy(service.cfg)
+        self._workers = max(1, min(int(workers or 1), 16, max(1, (os.cpu_count() or 2) // 2)))
+        if options.detect_visual:
+            pixels = int(service._cfg_get('censor_sample_width', 960)) * int(service._cfg_get('censor_sample_height', 540))
+            retained = min(20, int(service._cfg_get('censor_candidates', 18))) + 26
+            per_file = max(1, pixels * retained)
+            budget = int(service._cfg_get('censor_memory_mb', 512)) * 1024 * 1024
+            self._workers = min(self._workers, max(1, budget // per_file))
         self._stopped = False
         self.jobs = ScanJobs(service.store.db_path)
         self._manual_deferred = manual_deferred

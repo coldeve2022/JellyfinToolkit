@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import time
+import re
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -42,6 +43,14 @@ CONTAINER_HINTS = (
     "tool", "app", "soft", "program", "portable", "green", "bin", "dev",
     "project", "work", "download", "解压", "工具", "软件", "程序", "便携",
 )
+
+
+def parse_cli_options(help_text: str) -> set:
+    """Read option definition lines, ignoring references in explanatory prose."""
+    pattern = re.compile(r"(?<![\w-])(--[a-z][a-z0-9_\-]*)")
+    return {name for line in (help_text or "").splitlines()
+            if line[:1].isspace() and line.strip().startswith("-")
+            for name in pattern.findall(line.strip().split("  ")[0])}
 
 
 def drives() -> list:

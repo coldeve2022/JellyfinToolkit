@@ -195,7 +195,7 @@ def test_manual_label_moves_row_to_confirmed(page, monkeypatch):
     assert page.table.item(0, 3).text() == "已确认"
 
 
-def test_import_skips_files_with_valid_cache(page, monkeypatch, tmp_path):
+def test_import_skips_files_with_valid_cache(page, monkeypatch, tmp_path, qtbot):
     """重复导入同一批文件：有有效结果的不重算，只把要算的送进队列。"""
     from censor import CensorOptions
 
@@ -228,14 +228,15 @@ def test_import_skips_files_with_valid_cache(page, monkeypatch, tmp_path):
 
     monkeypatch.setattr("ui.pages.censorship.CensorScanWorker", FakeWorker)
     monkeypatch.setattr("ui.pages.censorship.start_task",
-                        lambda parent, worker, title: None)
+                        lambda parent, worker, title: worker.start())
 
     page._start_scan([str(tmp_path / "done.mp4"), fresh])
+    qtbot.waitUntil(lambda: bool(started))
     assert page._results, "有缓存的那条应当立刻铺进列表"
     assert started and started[0] == [fresh], "只该把没缓存的送进扫描队列"
 
 
-def test_import_all_cached_does_not_start_a_scan(page, monkeypatch, tmp_path):
+def test_import_all_cached_does_not_start_a_scan(page, monkeypatch, tmp_path, qtbot):
     cached = _result(CensorState.CENSORED, path=str(tmp_path / "done.mp4"))
     monkeypatch.setattr(page._service, "cached_result",
                         lambda path, options=None, **_: cached)
@@ -243,6 +244,7 @@ def test_import_all_cached_does_not_start_a_scan(page, monkeypatch, tmp_path):
     monkeypatch.setattr("ui.pages.censorship.CensorScanWorker",
                         lambda *a, **k: started.append(a))
     page._start_scan([str(tmp_path / "done.mp4")])
+    qtbot.waitUntil(lambda: '沿用上次结果' in page._stats_label.text())
     assert not started, "全部命中缓存时不该起扫描线程"
     assert "沿用上次结果" in page._stats_label.text()
 

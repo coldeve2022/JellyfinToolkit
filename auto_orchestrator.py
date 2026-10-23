@@ -34,6 +34,8 @@ def main() -> int:
     parser.add_argument("--ffmpeg", default="", help="ffmpeg 路径")
     parser.add_argument("--ffprobe", default="", help="ffprobe 路径")
     parser.add_argument("--scan-video", action="store_true", help="逐文件检测损坏/不兼容（CPU 较重）")
+    parser.add_argument("--pixelation-scan", action="store_true", help="对同一范围执行画面像素化检查")
+    parser.add_argument("--release-lookup", action="store_true", help="检索同一范围内已人工确认有码的作品")
     parser.add_argument("--check-old", action="store_true", help="不解码检查历史合并")
 
     parser.add_argument("--apply-merge", action="store_true", help="合并 ready 分集组（原分集不移动）")
@@ -63,6 +65,8 @@ def main() -> int:
         "ffmpeg": args.ffmpeg,
         "ffprobe": args.ffprobe,
         "scan_video": args.scan_video,
+        "pixelation_scan": args.pixelation_scan,
+        "release_lookup": args.release_lookup,
         "check_old": args.check_old,
         "apply_merge": args.apply_merge,
         "apply_nfo_fix": args.apply_nfo_fix,

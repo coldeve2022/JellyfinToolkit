@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
+from contextlib import contextmanager
 
 from censor.models import (
     CensorState,
@@ -178,11 +179,16 @@ class VerdictStore:
         self._ensure_schema()
 
     # ── 基础设施 ──
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         conn = sqlite3.connect(str(self.db_path), timeout=15)
         conn.execute("PRAGMA busy_timeout=15000")
         conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
@@ -212,6 +218,12 @@ class VerdictStore:
                     "INSERT OR IGNORE INTO censor_label_history "
                     "SELECT path, '', state, note, labeled_at FROM censor_label"
                 )
+            conn.execute("CREATE TABLE IF NOT EXISTS censor_label_revocations ("
+                         "path TEXT NOT NULL,file_identity TEXT NOT NULL,revoked_at TEXT NOT NULL,"
+                         "PRIMARY KEY(path,file_identity))")
+            conn.execute("CREATE TABLE IF NOT EXISTS censor_label_events ("
+                         "id INTEGER PRIMARY KEY,path TEXT NOT NULL,file_identity TEXT NOT NULL,"
+                         "state TEXT,note TEXT NOT NULL,created_at TEXT NOT NULL)")
 
     # ── 读写 ──
     def get(
@@ -233,6 +245,11 @@ class VerdictStore:
                 " FROM censor_probe WHERE path = ?",
                 (key,),
             ).fetchone()
+        return self._decode_row(key, row, size=size, mtime=mtime,
+                                analysis_signature=analysis_signature, file_identity=file_identity)
+
+    @staticmethod
+    def _decode_row(key, row, *, size=-1, mtime=-1., analysis_signature=None, file_identity=None):
         if not row:
             return None
         (
@@ -373,6 +390,10 @@ class VerdictStore:
                 "note=excluded.note,labeled_at=excluded.labeled_at",
                 (str(path), file_identity, state.value, note, _now()),
             )
+            conn.execute("DELETE FROM censor_label_revocations WHERE path=? AND file_identity=?",
+                         (str(path), file_identity))
+            conn.execute("INSERT INTO censor_label_events(path,file_identity,state,note,created_at) "
+                         "VALUES (?,?,?,?,?)", (str(path), file_identity, state.value, note, _now()))
 
     def get_label(
         self, path: str, *, file_identity: str | None = None
@@ -384,7 +405,9 @@ class VerdictStore:
                 ).fetchone()
             else:
                 row = conn.execute(
-                    "SELECT state, note FROM censor_label_history WHERE path=? AND file_identity=?",
+                    "SELECT state,note FROM censor_label_history h WHERE path=? AND file_identity=? "
+                    "AND NOT EXISTS (SELECT 1 FROM censor_label_revocations r "
+                    "WHERE r.path=h.path AND r.file_identity=h.file_identity)",
                     (str(path), file_identity),
                 ).fetchone()
         if not row:
@@ -408,6 +431,34 @@ class VerdictStore:
         with self._connect() as conn:
             conn.execute("DELETE FROM censor_label")
             conn.execute("DELETE FROM censor_label_history")
+            conn.execute("DELETE FROM censor_label_revocations")
+            conn.execute("DELETE FROM censor_label_events")
+
+    def remove_label(self, path: str, file_identity: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM censor_label WHERE path=?", (str(path),))
+            conn.execute("INSERT OR REPLACE INTO censor_label_revocations VALUES (?,?,?)",
+                         (str(path), file_identity, _now()))
+            conn.execute("INSERT INTO censor_label_events(path,file_identity,state,note,created_at) "
+                         "VALUES (?,?,NULL,?,?)", (str(path), file_identity, "撤回人工确认", _now()))
+
+    def get_many(self, paths: Iterable[str]) -> dict[str, VideoVerdict]:
+        columns = ("size,mtime,duration,number,provider,state,confidence,needs_review,reason,"
+                   "evidence,candidates,visual_score,elapsed,error,file_identity,analysis_signature,"
+                   "status,sampled_frames,analyzed_frames,detector_runs")
+        keys = list(dict.fromkeys(str(p) for p in paths))
+        out = {}
+        with self._connect() as conn:
+            for offset in range(0, len(keys), 800):
+                batch = keys[offset:offset + 800]
+                rows = conn.execute(f"SELECT path,{columns} FROM censor_probe WHERE path IN "
+                                    f"({','.join('?' for _ in batch)})", batch).fetchall()
+                for row in rows:
+                    try:
+                        out[row[0]] = self._decode_row(row[0], row[1:])
+                    except (ValueError, TypeError, KeyError):
+                        continue
+        return out
 
     # ── 统计 ──
     def stats(self) -> StoreStats:
@@ -450,7 +501,7 @@ class VerdictStore:
                     break
         return out
 
-    def confirmed_censored(self) -> list[VideoVerdict]:
+    def confirmed_censored(self, verify_identity=True) -> list[VideoVerdict]:
         """**已人工确认「有码」**的记录 —— 阶段二（找替换）的唯一数据来源。
 
         注意这不是"算法判有码"，而是 `censor_label` 里人工存下的结论；
@@ -462,10 +513,19 @@ class VerdictStore:
                 " WHERE l.state = 'censored' ORDER BY p.updated_at DESC, p.path"
             ).fetchall()
         out: list[VideoVerdict] = []
+        records = self.get_many(path for (path,) in rows)
         for (path,) in rows:
-            item = self.get(path)
+            item = records.get(path)
             if item is None:
                 continue
+            if verify_identity:
+                from censor.identity import identify_file
+                try:
+                    identity = identify_file(path).serialize()
+                except OSError:
+                    continue
+                if item.file_identity != identity:
+                    continue
             label = item.verdict.of(EvidenceSource.MANUAL)
             if label is None or label.state is not CensorState.CENSORED:
                 continue
@@ -476,4 +536,16 @@ class VerdictStore:
         with self._connect() as conn:
             rows = conn.execute('SELECT path FROM censor_probe ORDER BY updated_at DESC,path '
                                 'LIMIT ? OFFSET ?', (int(limit), int(offset))).fetchall()
-        return [item for (path,) in rows if (item := self.get(path)) is not None]
+        records = self.get_many(path for (path,) in rows)
+        return [records[path] for (path,) in rows if path in records]
+
+    def referenced_thumbnails(self):
+        with self._connect() as conn:
+            rows = conn.execute('SELECT candidates FROM censor_probe').fetchall()
+        paths = set()
+        for (raw,) in rows:
+            for candidate in _load_candidates(raw):
+                for path in (candidate.thumb_path, candidate.crop_path):
+                    if path:
+                        paths.add(str(Path(path).resolve()))
+        return paths

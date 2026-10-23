@@ -17,21 +17,28 @@
 from __future__ import annotations
 
 import time
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional
+from contextvars import copy_context
+from concurrent.futures import ThreadPoolExecutor
 
 from censor.releases.base import ReleaseSource
+from censor.releases.base import same_number
 from censor.releases.models import (
     Availability, ReleaseCandidate, ReleaseQuery, ReleaseReport, normalize_number,
 )
 from censor.releases.store import ReleaseStats, ReleaseStore
 from censor.releases.transport import TransportBlocked, build_transport
+from censor.releases.transport import TransportCancelled, query_scope
+from censor.models import ProcessingStatus
 
 __all__ = ["ReleaseService", "ReleaseOptions", "decide_availability", "ALGORITHM_VERSION"]
 
 #: 判定逻辑变更时递增，用来让旧缓存失效
-ALGORITHM_VERSION = "1"
+ALGORITHM_VERSION = "3"
 
 #: 硬依据的最低置信度
 HARD_EVIDENCE = 0.8
@@ -86,6 +93,8 @@ class ReleaseService:
         self.store = store or ReleaseStore(self._default_db_path())
         self._transport = transport
         self._factory = factory
+        self._source_errors = {}
+        self._source_sessions = {}
 
     # ── 基础设施 ──
     def _default_db_path(self) -> Path:
@@ -113,6 +122,7 @@ class ReleaseService:
     def build_sources(self, names: Optional[list[str]] = None) -> list[ReleaseSource]:
         """按注册表优先级实例化启用中的源。"""
         from censor.registry import sources as registry
+        self._source_errors = {}
 
         allowed = names
         if allowed is None:
@@ -127,8 +137,8 @@ class ReleaseService:
             for name in target:
                 try:
                     out.append(self._factory(name))
-                except Exception:  # noqa: BLE001
-                    continue
+                except Exception as exc:
+                    self._source_errors[name] = f"初始化失败：{exc}"
             return out
 
         out = []
@@ -136,15 +146,28 @@ class ReleaseService:
             if allowed is not None and spec.name not in allowed:
                 continue
             try:
-                out.append(spec.create(self.transport, self.cfg))
-            except Exception:  # noqa: BLE001 - 一个源构造失败不影响其它源
-                continue
+                session = self._source_sessions.get(spec.name)
+                if session is None:
+                    transport = self.transport
+                    session = transport.fork() if hasattr(transport, 'fork') else transport
+                    self._source_sessions[spec.name] = session
+                out.append(spec.create(session, self.cfg))
+            except Exception as exc:
+                self._source_errors[spec.name] = f"初始化失败：{exc}"
+        if allowed is not None:
+            for name in set(allowed) - set(registry.names()):
+                self._source_errors[name] = "初始化失败：未注册的检索源"
         return out
 
     def signature(self, sources: Optional[list[ReleaseSource]] = None) -> str:
         """源集合 + 版本 + 判定算法版本 —— 任一变化都让缓存失效。"""
         items = sources if sources is not None else self.build_sources()
-        return f"v{ALGORITHM_VERSION}|" + "|".join(
+        config = {name: self._cfg_get(name, default) for name, default in (
+            ("release_sources", None), ("release_supjav_engines", None),
+            ("release_supjav_mode", "auto"),
+            ("release_detail_limit", 4))}
+        digest = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
+        return f"v{ALGORITHM_VERSION}|{digest}|" + "|".join(
             f"{s.name}:{s.version}" for s in items
         )
 
@@ -160,7 +183,7 @@ class ReleaseService:
         title_hint: str = "",
     ) -> ReleaseReport:
         """查一个番号。任何站点失败都不会抛异常，而是写进 ``report.sources``。"""
-        opts = options or ReleaseOptions()
+        opts = options or ReleaseOptions(ttl_days=float(self._cfg_get('release_cache_days', 7)))
         start = time.perf_counter()
         query = ReleaseQuery(
             number=str(number or "").strip(),
@@ -175,42 +198,82 @@ class ReleaseService:
             )
 
         key = normalize_number(query.key)
+        if not self._cfg_get("release_enabled", True):
+            return ReleaseReport(number=key, note="检索已禁用", status=ProcessingStatus.FAILED,
+                                 queried_at=time.time())
         sources = self.build_sources(opts.sources)
         signature = self.signature(sources)
-        if opts.use_cache and not opts.force:
+        if opts.use_cache and not opts.force and not should_stop():
             cached = self.store.get_fresh(key, ttl_seconds=opts.ttl_days * 86400)
-            if cached is not None and self.store.signature_matches(key, signature):
+            attempt = self.store.latest_attempt(key)
+            incomplete = (attempt is not None and attempt.status is not ProcessingStatus.COMPLETED
+                          and (cached is None or attempt.queried_at >= cached.queried_at))
+            if cached is not None and not incomplete and self.store.signature_matches(key, signature):
                 cached.elapsed = 0.0
+                cached.cache_hit = True
+                self.store.set_queue_status(key, 'done')
                 return cached
 
         candidates: list[ReleaseCandidate] = []
-        statuses: dict[str, str] = {}
+        statuses: dict[str, str] = dict(self._source_errors)
         blocked = 0
-        failed = 0
-        for source in sources:
+        failed = len(statuses)
+        succeeded = 0
+        cancelled = should_stop()
+        self.store.set_queue_status(key, "running")
+        def search_source(source):
             if should_stop():
-                statuses[source.name] = "已取消"
-                break
-            ok, why = source.available()
-            if not ok:
-                statuses[source.name] = f"不可用：{why}"
-                continue
+                return 'cancelled', '已取消', []
             try:
-                found = source.search(query, should_stop=should_stop, log=log)
+                ok, why = source.available()
+                if not ok:
+                    return 'failed', f'不可用：{why}', []
+                found = source.search(query, should_stop=should_stop, log=log,
+                                      limit=int(self._cfg_get('release_detail_limit', 4)))
+                reason = getattr(source, 'incomplete_reason', '')
+                return ('partial', f'部分完成：{reason}', found) if reason else (
+                    'ok', f'命中 {len(found)} 条', found)
+            except TransportCancelled:
+                return 'cancelled', '已取消', []
             except TransportBlocked as exc:
-                blocked += 1
-                statuses[source.name] = f"被拦截：{exc}"
-                continue
-            except Exception as exc:  # noqa: BLE001 - 单站失败要如实记录
-                failed += 1
-                statuses[source.name] = f"失败：{exc}"
-                continue
-            statuses[source.name] = f"命中 {len(found)} 条"
-            candidates.extend(found)
+                return 'blocked', f'被拦截：{exc}', []
+            except Exception as exc:
+                return 'failed', f'失败：{exc}', []
+
+        with query_scope(self._cfg_get("release_max_requests", 40), should_stop):
+            workers = max(1, min(3, int(self._cfg_get('release_source_workers', 1)), len(sources) or 1))
+            if workers == 1:
+                results = [search_source(source) for source in sources]
+            else:
+                # Each source owns routing/circuit state, while context copies
+                # share this work's atomic budget and host scheduling session.
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='release-source') as pool:
+                    futures = [pool.submit(copy_context().run, search_source, source) for source in sources]
+                    results = [future.result() for future in futures]
+            for source, (kind, detail, found) in zip(sources, results):
+                statuses[source.name] = detail
+                cancelled |= kind == 'cancelled'
+                blocked += kind == 'blocked'
+                failed += kind in ('failed', 'partial')
+                succeeded += kind in ('ok', 'partial')
+                candidates.extend(c for c in found if not query.number or same_number(c.number, query.number))
+        cancelled = cancelled or should_stop()
 
         availability = decide_availability(candidates)
         note = ""
-        if availability is Availability.UNKNOWN:
+        status = ProcessingStatus.COMPLETED
+        if cancelled:
+            status, note = ProcessingStatus.CANCELLED, "检索已取消，可继续未完成任务"
+        elif failed or blocked:
+            status = ProcessingStatus.PARTIAL if succeeded else ProcessingStatus.FAILED
+            if availability is Availability.NONE:
+                availability = Availability.UNKNOWN
+            note = "部分来源未完成，可重试" if succeeded else "站点请求失败，未能查证"
+            if blocked and not succeeded:
+                note = "站点被拦截，未能查证"
+        elif not sources:
+            status, note = ProcessingStatus.FAILED, "没有可用检索源，请检查来源设置"
+        if availability is Availability.UNKNOWN and not note:
             if blocked and not candidates:
                 note = "站点被拦截，未能查证"
             elif failed and not candidates:
@@ -226,10 +289,14 @@ class ReleaseService:
             note=note,
             elapsed=time.perf_counter() - start,
             queried_at=time.time(),
+            status=status,
         )
         try:
-            self.store.put(report, signature)
-            self.store.done(key)
+            self.store.record_attempt(report)
+            if opts.use_cache and status is ProcessingStatus.COMPLETED:
+                self.store.put(report, signature)
+            self.store.set_queue_status(key, "done" if status is ProcessingStatus.COMPLETED
+                                        else "pending" if cancelled else "failed")
         except Exception as exc:  # noqa: BLE001 - 缓存写失败不该影响结果
             log(f"⚠️ 检索结果写入失败：{exc}")
         return report
@@ -259,13 +326,27 @@ class ReleaseService:
     def cached(self, number: str) -> ReleaseReport | None:
         return self.store.get(normalize_number(number))
 
+    def fresh(self, number: str, options: Optional[ReleaseOptions] = None) -> ReleaseReport | None:
+        opts = options or ReleaseOptions(ttl_days=float(self._cfg_get("release_cache_days", 7)))
+        if not self._cfg_get("release_enabled", True):
+            return None
+        report = self.store.get_fresh(number, ttl_seconds=opts.ttl_days * 86400)
+        if report is None or not self.store.signature_matches(number, self.signature()):
+            return None
+        attempt = self.store.latest_attempt(number)
+        if (attempt and attempt.queried_at >= report.queried_at
+                and attempt.status is not ProcessingStatus.COMPLETED):
+            return None
+        return report
+
     def cached_many(self, numbers: Iterable[str]) -> dict[str, ReleaseReport]:
-        out: dict[str, ReleaseReport] = {}
-        for number in numbers:
-            report = self.cached(number)
-            if report is not None:
-                out[report.number] = report
-        return out
+        return self.store.get_many(numbers)
+
+    def fresh_many(self, numbers, options: Optional[ReleaseOptions] = None):
+        opts = options or ReleaseOptions(ttl_days=float(self._cfg_get('release_cache_days', 7)))
+        if not self._cfg_get('release_enabled', True) or opts.force or not opts.use_cache:
+            return {}
+        return self.store.fresh_many(numbers, signature=self.signature(), ttl_seconds=opts.ttl_days * 86400)
 
     def queue(self, numbers: Iterable[str], *, priority: int = 1, note: str = "") -> int:
         return self.store.enqueue(

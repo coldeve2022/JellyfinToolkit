@@ -152,10 +152,10 @@ def test_javbus_uc_flag_means_uncensored():
 # 直连抓页面的实现已经废弃（整站 Cloudflare），现在走"站点索引"检索：
 # 解析与判定的用例在 tests/test_release_index.py。
 
-def test_supjav_no_longer_requests_the_site_directly():
-    """Supjav 不该再直连它自己的域名 —— 那只会拿到 403 挑战页。"""
+def test_supjav_index_only_mode_does_not_request_the_site():
+    """显式索引兼容模式仍然只访问搜索引擎。"""
     transport = FakeTransport({"bing.com": "<html></html>"})
-    SupjavSource(transport, {"release_supjav_engines": ["bing"]}).search(
+    SupjavSource(transport, {"release_supjav_engines": ["bing"], 'release_supjav_mode': 'index'}).search(
         ReleaseQuery(number="NCRA-026"))
     from urllib.parse import urlsplit
 

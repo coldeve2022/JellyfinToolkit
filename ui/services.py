@@ -26,6 +26,9 @@ class Events(QObject):
     subtitle_ready = Signal(list)
     restored_ready = Signal(list, list)
     media_changed = Signal(list)
+    censor_changed = Signal(list)
+    replacement_ready = Signal(list, list)
+    lada_ready = Signal(list)
 
 
 events = Events()
@@ -161,8 +164,20 @@ def analysis_worker(cfg, labels, exclude_keywords=None, th_keep=None, th_delete=
 
 
 def page_workers(page):
+    from shiboken6 import isValid
+    seen = set()
     for value in vars(page).values():
         if isinstance(value, QThread) or callable(getattr(value, "isRunning", None)):
+            if isinstance(value, QObject) and not isValid(value):
+                continue
+            seen.add(id(value))
+            yield value
+    try:
+        children = page.findChildren(QThread)
+    except RuntimeError:
+        children = []
+    for value in children:
+        if id(value) not in seen:
             yield value
 
 
@@ -331,6 +346,8 @@ class TaskManager(QObject):
             worker.progress.connect(lambda *args, tid=task_id: self._progress(tid, args))
         if hasattr(worker, "log") and not hasattr(worker, 'task_status'):
             worker.log.connect(lambda value, tid=task_id: self._log(tid, value))
+        if hasattr(worker, "logged"):
+            worker.logged.connect(lambda value, tid=task_id: self._log(tid, value))
         worker.start()
         self.changed.emit()
         return True
@@ -341,9 +358,12 @@ class TaskManager(QObject):
             return
         entry["reported"] = True
         for button in entry["buttons"]:
-            if button.isEnabled():
-                entry["buttons"][button] = True
-            button.setEnabled(False)
+            try:
+                if button.isEnabled():
+                    entry["buttons"][button] = True
+                button.setEnabled(False)
+            except RuntimeError:
+                continue  # The owning view may have closed after work finished.
         for value in args:
             if isinstance(value, list):
                 for result in value:
@@ -407,7 +427,11 @@ class TaskManager(QObject):
 
     def _poll(self):
         for task_id, entry in list(self._active.items()):
-            if entry["worker"].isRunning():
+            try:
+                running = entry["worker"].isRunning()
+            except RuntimeError:
+                running = False
+            if running:
                 continue
             if not entry.get("delivery_barrier_passed"):
                 if not entry.get("delivery_barrier_scheduled"):
@@ -436,6 +460,8 @@ class TaskManager(QObject):
                 except RuntimeError:
                     pass
             del self._active[task_id]
+            if isinstance(entry['worker'], QObject) and entry['worker'].property('taskAutoDelete'):
+                entry['worker'].deleteLater()
             self._save_history()
             self.changed.emit()
 

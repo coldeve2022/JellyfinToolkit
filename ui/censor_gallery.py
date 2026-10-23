@@ -72,6 +72,9 @@ class EvidenceGallery(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.labels: list[EvidenceImage] = []
         self._candidates: list = []
+        self._cells = []
+        self._tile_width = 186
+        self._columns = 0
         self.body = QWidget()
         self.grid = QGridLayout(self.body)
         self.grid.setContentsMargins(2, 2, 2, 2)
@@ -90,8 +93,29 @@ class EvidenceGallery(QScrollArea):
             self.grid.addWidget(hint, 0, 0, 1, self.COLUMNS)
             return
         for index, candidate in enumerate(self._candidates):
-            self.grid.addWidget(self._cell(index, candidate),
-                                index // self.COLUMNS, index % self.COLUMNS)
+            self._cells.append(self._cell(index, candidate))
+        self._reflow()
+
+    def set_preferences(self, width=186, columns=0):
+        self._tile_width, self._columns = int(width), int(columns)
+        for label in self.labels:
+            label.setFixedSize(self._tile_width, max(72, self._tile_width * 9 // 16))
+            label._render()
+        self._reflow()
+
+    def _reflow(self):
+        if not self._cells:
+            return
+        while self.grid.count():
+            self.grid.takeAt(0)
+        available = max(1, (self.viewport().width() - 8) // (self._tile_width + 6))
+        columns = min(self._columns or available, available)
+        for index, cell in enumerate(self._cells):
+            self.grid.addWidget(cell, index // columns, index % columns)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reflow()
 
     def expand(self, candidate, index: int = 0) -> None:
         on_close = getattr(self, "_on_expand_close", None)
@@ -113,7 +137,8 @@ class EvidenceGallery(QScrollArea):
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(2)
 
-        image = EvidenceImage("缩略图缺失，请重新检查补充")
+        image = EvidenceImage("缩略图缺失，请重新检查补充",
+                              tile=(self._tile_width, max(72, self._tile_width * 9 // 16)))
         self.labels.append(image)
         self._set_image(image, candidate.thumb_path)
         image.activated.connect(lambda c=candidate, i=index: self.expand(c, i))
@@ -139,6 +164,7 @@ class EvidenceGallery(QScrollArea):
             if widget is not None:
                 widget.deleteLater()
         self.labels.clear()
+        self._cells.clear()
         self._candidates = []
 
     @staticmethod

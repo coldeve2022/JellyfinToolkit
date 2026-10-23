@@ -14,6 +14,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from contextlib import contextmanager
+from censor.models import ProcessingStatus
 
 from censor.releases.models import (
     Availability, MagnetLink, ReleaseCandidate, ReleaseReport, normalize_number,
@@ -30,6 +32,11 @@ CREATE TABLE IF NOT EXISTS release_report (
     queried_at  REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_release_availability ON release_report(availability);
+CREATE TABLE IF NOT EXISTS release_attempt (
+    number TEXT PRIMARY KEY,
+    report TEXT NOT NULL,
+    queried_at REAL NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS release_lookup_queue (
     number      TEXT PRIMARY KEY,
@@ -59,6 +66,7 @@ def _dump(report: ReleaseReport) -> str:
             "elapsed": report.elapsed,
             "queried_at": report.queried_at,
             "sources": report.sources,
+            "status": report.status.value,
             "candidates": [
                 {
                     "source": c.source,
@@ -88,6 +96,8 @@ def _dump(report: ReleaseReport) -> str:
 
 def _load(raw: str) -> ReleaseReport:
     data = json.loads(raw or "{}")
+    if not isinstance(data, dict):
+        raise ValueError("报告必须为对象")
     candidates = []
     for item in data.get("candidates") or []:
         candidates.append(ReleaseCandidate(
@@ -123,6 +133,7 @@ def _load(raw: str) -> ReleaseReport:
         note=str(data.get("note", "")),
         elapsed=float(data.get("elapsed", 0.0) or 0.0),
         queried_at=float(data.get("queried_at", 0.0) or 0.0),
+        status=ProcessingStatus(data.get("status", "completed")),
     )
 
 
@@ -148,11 +159,16 @@ class ReleaseStore:
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         conn = sqlite3.connect(str(self.db_path), timeout=15)
         conn.execute("PRAGMA busy_timeout=15000")
         conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     # ── 报告 ──
     def get(self, number: str) -> ReleaseReport | None:
@@ -167,13 +183,64 @@ class ReleaseStore:
             return None
         try:
             return _load(row[0])
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, AttributeError, KeyError):
             return None
+
+    def get_many(self, numbers) -> dict[str, ReleaseReport]:
+        return self._get_many('release_report', numbers)
+
+    def latest_attempts(self, numbers) -> dict[str, ReleaseReport]:
+        return self._get_many('release_attempt', numbers)
+
+    def fresh_many(self, numbers, *, signature, ttl_seconds):
+        keys = list(dict.fromkeys(_key(n) for n in numbers if _key(n)))
+        out = {}
+        with self._connect() as conn:
+            for offset in range(0, len(keys), 800):
+                batch = keys[offset:offset + 800]
+                rows = conn.execute(
+                    'SELECT r.number,r.report,r.signature,a.report FROM release_report r '
+                    'LEFT JOIN release_attempt a ON a.number=r.number WHERE r.number IN '
+                    f"({','.join('?' for _ in batch)})", batch).fetchall()
+                for key, raw, stored_signature, attempt_raw in rows:
+                    if signature != stored_signature:
+                        continue
+                    try:
+                        report = _load(raw)
+                        attempt = _load(attempt_raw) if attempt_raw else None
+                    except (ValueError, TypeError, AttributeError, KeyError):
+                        continue
+                    if report.status is not ProcessingStatus.COMPLETED:
+                        continue
+                    if ttl_seconds > 0 and _now() - report.queried_at > ttl_seconds:
+                        continue
+                    if (attempt and attempt.queried_at >= report.queried_at
+                            and attempt.status is not ProcessingStatus.COMPLETED):
+                        continue
+                    out[key] = report
+        return out
+
+    def _get_many(self, table, numbers) -> dict[str, ReleaseReport]:
+        keys = list(dict.fromkeys(_key(n) for n in numbers if _key(n)))
+        out = {}
+        with self._connect() as conn:
+            for offset in range(0, len(keys), 800):
+                batch = keys[offset:offset + 800]
+                rows = conn.execute(f"SELECT number,report FROM {table} WHERE number IN "
+                                    f"({','.join('?' for _ in batch)})", batch).fetchall()
+                for key, raw in rows:
+                    try:
+                        out[key] = _load(raw)
+                    except (ValueError, TypeError, AttributeError, KeyError):
+                        continue
+        return out
 
     def get_fresh(self, number: str, *, ttl_seconds: float) -> ReleaseReport | None:
         """只返回未过期的报告。``ttl_seconds <= 0`` 表示永不过期。"""
         report = self.get(number)
         if report is None:
+            return None
+        if report.status is not ProcessingStatus.COMPLETED:
             return None
         if ttl_seconds > 0 and _now() - report.queried_at > ttl_seconds:
             return None
@@ -184,6 +251,7 @@ class ReleaseStore:
         key = _key(report.number)
         if not key:
             return
+        report.queried_at = report.queried_at or _now()
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO release_report (number, availability, signature, report, queried_at)"
@@ -273,3 +341,34 @@ class ReleaseStore:
             return dict(conn.execute(
                 "SELECT status, COUNT(*) FROM release_lookup_queue GROUP BY status"
             ))
+
+    def record_attempt(self, report: ReleaseReport) -> None:
+        if not _key(report.number):
+            return
+        with self._connect() as conn:
+            conn.execute("INSERT INTO release_attempt VALUES (?,?,?) ON CONFLICT(number) "
+                         "DO UPDATE SET report=excluded.report,queried_at=excluded.queried_at",
+                         (_key(report.number), _dump(report), report.queried_at or _now()))
+
+    def latest_attempt(self, number: str) -> ReleaseReport | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT report FROM release_attempt WHERE number=?",
+                               (_key(number),)).fetchone()
+        if row:
+            try:
+                return _load(row[0])
+            except (ValueError, TypeError, AttributeError, KeyError):
+                return None
+        return None
+
+    def set_queue_status(self, number: str, status: str) -> None:
+        if status not in {"pending", "running", "failed", "done"}:
+            raise ValueError("无效的检索队列状态")
+        with self._connect() as conn:
+            conn.execute("UPDATE release_lookup_queue SET status=?,updated_at=datetime('now') "
+                         "WHERE number=?", (status, _key(number)))
+
+    def retry_failed(self) -> int:
+        with self._connect() as conn:
+            return conn.execute("UPDATE release_lookup_queue SET status='pending' "
+                                "WHERE status IN ('failed','running')").rowcount

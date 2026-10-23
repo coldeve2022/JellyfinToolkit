@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
+    QComboBox,
 )
 
 from config import ToolkitConfig
@@ -69,27 +70,39 @@ class ReplaceWorker(QThread):
                 )
             stats = execute_replacements(plan, should_stop=lambda: self._stopped, log=self.log.emit)
             self.stats = stats
+            stats['metadata'] = []
             for operation in stats.get("operations", []):
                 if operation.get("ok") and not self._stopped:
-                    self._sync_censor_metadata(operation["target"])
+                    try:
+                        outcome = self._sync_censor_metadata(operation["target"])
+                    except Exception as exc:
+                        outcome = dict(target=operation['target'], status='failed', error=str(exc))
+                        self.log.emit(f'文件已替换；元数据同步失败：{exc}')
+                    stats['metadata'].append(outcome)
+            stats['metadata_failed'] = sum(row.get('status') == 'failed' for row in stats['metadata'])
             self.finished.emit(stats["ok"], stats["fail"])
         except Exception as exc:
             self.stats = {"error": str(exc)}
             self.log.emit(f"替换失败：{exc}")
             self.finished.emit(0, 1)
 
-    def _sync_censor_metadata(self, target: str) -> None:
+    def _sync_censor_metadata(self, target: str) -> dict:
         """替换成功后同步 NFO 与 Jellyfin 数据库的“有码 → 无码破解”。"""
         nfo = find_nfo(target)
+        result = dict(target=target, status='completed', nfo='skipped', server='skipped')
         if nfo:
             ok, detail = update_nfo_censor_tags(nfo)
+            result['nfo'] = 'completed' if ok else 'failed'
+            result['nfo_detail'] = detail
+            if not ok:
+                result['status'] = 'failed'
             self.log.emit(("  ✅ " if ok else "  ⚠️ ") + f"NFO 标签：{detail}")
         else:
             self.log.emit("  ⚠️ 未找到同名 NFO，跳过 NFO 标签同步")
 
         if not self._cfg:
             self.log.emit("  ⚠️ 未提供配置，跳过 Jellyfin 数据库标签同步")
-            return
+            return result
         db_path = getattr(self._cfg, "jellyfin_db_path", "")
         if not db_path or not Path(db_path).exists():
             self.log.emit(
@@ -98,11 +111,16 @@ class ReplaceWorker(QThread):
                 "     换名后的条目会在服务器下次扫描时自动更新；"
                 "若使用 Emby 或「服务器 API」模式，请在服务器端刷新媒体库。"
             )
-            return
+            return result
         backup = not self._db_backed_up
         self._db_backed_up = True
         ok, detail = update_jellyfin_db_tags(db_path, target, backup=backup, log=self.log.emit)
+        result['server'] = 'completed' if ok else 'failed'
+        result['server_detail'] = detail
+        if not ok:
+            result['status'] = 'failed'
         self.log.emit(("  ✅ " if ok else "  ⚠️ ") + f"Jellyfin 数据库：{detail}")
+        return result
 
 
 class ReplacePage(QWidget):
@@ -132,6 +150,11 @@ class ReplacePage(QWidget):
             "替换前会自动备份原文件，失败时自动回滚，安全可靠。"
         )
         layout.addWidget(hint)
+        self.match_mode = QComboBox()
+        self.match_mode.addItem("Lada 产物：按 restored 文件名配对", "restored")
+        self.match_mode.addItem("检索后的本地候选：按作品番号配对", "release")
+        self.match_mode.currentIndexChanged.connect(self._invalidate_plan)
+        layout.addWidget(self.match_mode)
 
         splitter = QSplitter()
         left_w = QWidget()
@@ -204,13 +227,14 @@ class ReplacePage(QWidget):
         if busy(self):
             return
         from utils.replacement import preview_replacements
+        from utils.replacement import preview_release_replacements
 
         restored = self.list_restored.get_all_paths()
         library = self.list_library.get_all_paths()
         marker = self.cfg.restored_suffix_marker
-        self._worker = CallWorker(
-            lambda cancel: preview_replacements(restored, library, marker, cancel)
-        )
+        release_mode = self.match_mode.currentData() == "release"
+        self._worker = CallWorker(lambda cancel: preview_release_replacements(restored, library, cancel)
+            if release_mode else preview_replacements(restored, library, marker, cancel))
         self._worker.result.connect(self._show_plan)
         self._worker.error.connect(self.log_panel.log_error)
         start_task(self, self._worker, "生成恢复视频配对计划")
@@ -234,13 +258,17 @@ class ReplacePage(QWidget):
         self.btn_start.setEnabled(bool(plan) and all(entry["status"] == "ready" for entry in plan))
         self.stats.setText(f"配对计划 {len(plan)} 项；有冲突/多候选时请调整输入再重新生成计划。")
 
-    def receive_outputs(self, restored, originals):
+    def receive_outputs(self, restored, originals, *, mode="restored"):
         if busy(self):
             return
         self._clear()
+        self.match_mode.setCurrentIndex(max(0, self.match_mode.findData(mode)))
         self._add_to_restored(restored)
         self._add_to_library(originals)
         self._preview()
+
+    def receive_candidates(self, candidates, originals):
+        self.receive_outputs(candidates, originals, mode="release")
 
     def _add_to_restored(self, paths: list[str]) -> None:
         if busy(self):
@@ -311,7 +339,13 @@ class ReplacePage(QWidget):
             )
         else:
             self.log_panel.log_success(f"替换完成：{replaced} 项。")
-        self.stats.setText(f"本次: 成功 {replaced} | 未匹配 {not_found}")
+        self.stats.setText(f"文件替换: 成功 {replaced} | 失败 {not_found}"
+                          f" · 元数据同步失败 {stats.get('metadata_failed', 0)}"
+                          '（详情见日志；API 模式需在服务器刷新媒体库）')
+        from ui.services import events
+        changed = [op["target"] for op in stats.get("operations", []) if op.get("ok")]
+        if changed:
+            events.media_changed.emit(changed)
 
     def _clear(self) -> None:
         if busy(self):

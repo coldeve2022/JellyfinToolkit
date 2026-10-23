@@ -49,7 +49,8 @@ def _cand(uncensored=True, number="ABC-123", confidence=0.9) -> ReleaseCandidate
         page_url="https://example.invalid/x", maker="日本コンテンツ流通" if uncensored else "ひよこ",
         uncensored=uncensored, uncensored_reason="测试",
         uncensored_confidence=confidence if uncensored else 0.0,
-        magnets=(MagnetLink(uri="magnet:?xt=urn:btih:" + "a" * 40, size_mb=8000),),
+        magnets=(MagnetLink(uri="magnet:?xt=urn:btih:" + "a" * 40,
+            name=f'{number} Uncensored' if uncensored else number, size_mb=8000),),
     )
 
 

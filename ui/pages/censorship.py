@@ -10,7 +10,7 @@ import os
 from collections import Counter, deque
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
@@ -111,12 +111,19 @@ class CensorshipPage(QWidget):
         self._pending_results = deque()
         self._category_counts = Counter()
         self._review_overrides = {}
+        self._media_epochs = {}
+        self._pending_verifications = set()
         self._last_status = {}
         self._batching = False
         self._finishing = False
         self._render_timer = QTimer(self)
         self._render_timer.setInterval(60)
         self._render_timer.timeout.connect(self._drain_results)
+        # 操作反馈的恢复定时器：挂在 self 上，页面销毁时自动失效
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.setInterval(8000)
+        self._flash_timer.timeout.connect(self._restore_progress_title)
         self._results: dict[str, VideoVerdict] = {}
         self._submitted: list[str] = []
         self._row_of: dict[str, int] = {}
@@ -126,6 +133,8 @@ class CensorshipPage(QWidget):
         self._restored = False
         self._conn_check: Optional[ConnectionCheck] = None
         self._setup_ui()
+        from ui.services import events
+        events.media_changed.connect(self._media_changed)
         self._refresh_stats()
         if self._jobs.pending() or self._jobs.unfinished_sources():
             self._stats_label.setText('发现未完成任务，点击“继续未完成”恢复')
@@ -141,6 +150,9 @@ class CensorshipPage(QWidget):
         toolbar.addWidget(title)
         toolbar.addStretch()
         toolbar.addWidget(FileInputActions(self, self._start_scan))
+        library = QPushButton('从当前媒体库导入')
+        library.clicked.connect(self._import_library)
+        toolbar.addWidget(library)
         self.more_button = QPushButton('更多')
         menu = QMenu(self.more_button)
         for text,callback in [('继续未完成任务',self._resume),('重试失败项',self._retry_failed),
@@ -154,6 +166,7 @@ class CensorshipPage(QWidget):
         menu.addSeparator()
         menu.addAction('检查设置…',self._show_settings)
         menu.addAction('使用说明',self._show_help)
+        menu.addAction('清理过期无引用证据图', self._cleanup_evidence)
         menu.addAction('清空当前列表（保留记录）',self._clear)
         self.more_button.setMenu(menu)
         toolbar.addWidget(self.more_button)
@@ -178,6 +191,7 @@ class CensorshipPage(QWidget):
         layout.addWidget(self.progress_detail)
 
         splitter = QSplitter(Qt.Horizontal)
+        self.splitter = splitter
         left = QWidget()
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(0,0,3,0)
@@ -204,6 +218,12 @@ class CensorshipPage(QWidget):
         filter_row.addWidget(self.combo_conclusion)
         filter_row.addStretch()
         left_lay.addLayout(filter_row)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText('搜索文件名、路径或分析依据…')
+        self.search.setClearButtonEnabled(True)
+        self.search.setProperty('taskInteractive', True)
+        self.search.textChanged.connect(self._apply_filter)
+        left_lay.addWidget(self.search)
         self.table = _DropTable(0,len(_COLUMNS))
         self.table.setProperty('taskInteractive',True)
         self.table.setHorizontalHeaderLabels(_COLUMNS)
@@ -246,6 +266,8 @@ class CensorshipPage(QWidget):
         current_menu = QPushButton('此视频')
         actions = QMenu(current_menu)
         actions.addAction('深入检查（3倍采样）',self._deepen_current)
+        actions.addAction('撤回当前人工标记', self._withdraw_current)
+        actions.addAction('交给 Lada 处理', self._send_lada)
         current_menu.setMenu(actions)
         review_header.addWidget(current_menu)
         right_lay.addLayout(review_header)
@@ -280,6 +302,7 @@ class CensorshipPage(QWidget):
             button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             row.addWidget(button)
         next_button = QPushButton('下一条')
+        self.btn_next = next_button
         next_button.setProperty('taskInteractive',True)
         next_button.setShortcut('Alt+3')
         next_button.clicked.connect(lambda:self._advance_review(self._current.path if self._current else ''))
@@ -300,46 +323,20 @@ class CensorshipPage(QWidget):
         self.evidence_count = QSpinBox()
         self.evidence_count.setRange(6,20)
         self.evidence_count.setValue(self.cfg.censor_candidates)
-        self.evidence_count.valueChanged.connect(lambda value:setattr(self.cfg,'censor_candidates',value))
         settings.addWidget(self.evidence_count)
-
-        # ── 无码版本检索设置 ──
-        settings.addWidget(QLabel('无码版本检索（联网查流出/破解版）：'))
-        self.chk_release_auto = QCheckBox('扫描出有码后自动检索')
-        self.chk_release_auto.setChecked(bool(self.cfg.release_auto_lookup))
-        self.chk_release_auto.toggled.connect(
-            lambda value: setattr(self.cfg, 'release_auto_lookup', value))
-        settings.addWidget(self.chk_release_auto)
-
-        settings.addWidget(QLabel('检索代理（留空 = 自动：环境变量 → 系统代理 → 直连）：'))
-        self.input_release_proxy = QLineEdit(self.cfg.release_proxy)
-        self.input_release_proxy.setPlaceholderText('例如 http://127.0.0.1:7897')
-        self.input_release_proxy.textChanged.connect(
-            lambda text: setattr(self.cfg, 'release_proxy', text.strip()))
-        settings.addWidget(self.input_release_proxy)
-
-        settings.addWidget(QLabel('Cloudflare 旁路地址（FlareSolverr 兼容，可留空）：'))
-        self.input_cf_bypass = QLineEdit(self.cfg.release_cf_bypass_url)
-        self.input_cf_bypass.setPlaceholderText('例如 http://127.0.0.1:8000；Supjav 需要它')
-        self.input_cf_bypass.textChanged.connect(
-            lambda text: setattr(self.cfg, 'release_cf_bypass_url', text.strip()))
-        settings.addWidget(self.input_cf_bypass)
-
-        test_row = QHBoxLayout()
-        self.btn_test_release = QPushButton('测试连接')
-        self.btn_test_release.setToolTip(
-            '依次检查：本地代理 → JavDB 检索 → Cloudflare 旁路服务 → Supjav')
-        self.btn_test_release.clicked.connect(self._test_release_connection)
-        test_row.addWidget(self.btn_test_release)
-        test_row.addStretch()
-        settings.addLayout(test_row)
-
-        self.txt_release_test = QPlainTextEdit()
-        self.txt_release_test.setReadOnly(True)
-        self.txt_release_test.setMaximumHeight(120)
-        self.txt_release_test.setPlaceholderText(
-            '点「测试连接」：逐条检查代理、JavDB、旁路服务与 Supjav，卡在哪一层会直接写出来')
-        settings.addWidget(self.txt_release_test)
+        settings.addWidget(QLabel('并行视频上限（实际并发受 CPU 和内存预算约束）：'))
+        self.scan_workers = QSpinBox()
+        self.scan_workers.setRange(1, 16)
+        self.scan_workers.setValue(self.cfg.censor_workers)
+        settings.addWidget(self.scan_workers)
+        settings.addWidget(QLabel('检测内存预算（MiB）：'))
+        self.memory_budget = QSpinBox()
+        self.memory_budget.setRange(64, 8192)
+        self.memory_budget.setValue(self.cfg.censor_memory_mb)
+        settings.addWidget(self.memory_budget)
+        self.verify_replacements = QCheckBox('媒体替换完成后自动检查新版本')
+        self.verify_replacements.setChecked(self.cfg.censor_verify_replacements)
+        settings.addWidget(self.verify_replacements)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close,
                                    parent=self.settings_dialog)
@@ -348,38 +345,35 @@ class CensorshipPage(QWidget):
         buttons.accepted.connect(self._save_settings)
         buttons.rejected.connect(self.settings_dialog.reject)
         settings.addWidget(buttons)
+        from ui.workspace_preferences import WorkspacePreferences
+        self.workspace = WorkspacePreferences(self, 'pixelation', self.table, splitter=splitter,
+            gallery=self.gallery, filters={'view': self.combo_filter, 'conclusion': self.combo_conclusion,
+                                          'search': self.search})
+        menu.addSeparator()
+        menu.addMenu(self.workspace.menu(self.more_button)).setText('工作区布局与偏好')
 
     def _show_settings(self):
         if not busy(self):
+            self.evidence_count.setValue(self.cfg.censor_candidates)
+            self.scan_workers.setValue(self.cfg.censor_workers)
+            self.memory_budget.setValue(self.cfg.censor_memory_mb)
+            self.verify_replacements.setChecked(self.cfg.censor_verify_replacements)
             self.settings_dialog.exec()
 
     def _save_settings(self):
         """设置项改的是内存里的 cfg，这里显式落盘 —— 不必等关程序。"""
         try:
+            self.cfg.censor_candidates = self.evidence_count.value()
+            self.cfg.censor_workers = self.scan_workers.value()
+            self.cfg.censor_memory_mb = self.memory_budget.value()
+            self.cfg.censor_verify_replacements = self.verify_replacements.isChecked()
             self.cfg.save()
+            from ui.services import events
+            events.config_changed.emit()
             self._stats_label.setText('设置已保存')
         except OSError as exc:
             self._stats_label.setText(f'设置保存失败：{exc}')
         self.settings_dialog.accept()
-
-    def _test_release_connection(self):
-        """逐层测试检索链路。测试本身会联网，所以放在线程里跑。"""
-        if self._conn_check is not None and self._conn_check.isRunning():
-            return
-        self.txt_release_test.clear()
-        self.btn_test_release.setEnabled(False)
-        self.btn_test_release.setText('测试中…')
-        check = ConnectionCheck(self.cfg, self)
-        check.line.connect(self.txt_release_test.appendPlainText)
-        check.passed.connect(self._on_connection_tested)
-        self._conn_check = check
-        check.start()
-
-    def _on_connection_tested(self, ok: int, total: int):
-        self.btn_test_release.setEnabled(True)
-        self.btn_test_release.setText('再测一次')
-        verdict = '全部通过' if ok == total and total else f'{ok}/{total} 项通过'
-        self.txt_release_test.appendPlainText(f'—— 测试结束：{verdict}')
 
     def _show_help(self):
         QMessageBox.information(self,'像素化检查',
@@ -390,7 +384,7 @@ class CensorshipPage(QWidget):
             '这件事分两步，刻意分开算：\n'
             '① 定标记 —— 你的任务只有一个：确认哪些片确实有码（红「标记有码」）。\n'
             '② 找无码版 —— 在左侧「找无码版」页里，对已标记「有码」的番号去网上查\n'
-            '（JavDB / JavBus / Supjav 走搜索引擎索引），可反复重查、可导出清单。\n'
+            '（JavDB / JavBus 直连；Supjav 站内优先、索引补充），可反复重查、可导出清单。\n'
             '这一页只管定标记；检索结果不在本页显示。')
 
     def _reanalyze_visible(self):
@@ -463,6 +457,61 @@ class CensorshipPage(QWidget):
         self._start_scan(paths)
 
     # ── 扫描 ──
+    def _media_changed(self, paths):
+        from censor.models import ProcessingStatus
+        changed = set(paths)
+        self._pending_results = deque(result for result in self._pending_results if result.path not in changed)
+        for path in paths:
+            self._media_epochs[path] = self._media_epochs.get(path, 0) + 1
+            self._review_overrides.pop(path, None)
+            if path in self._results:
+                self._on_item(VideoVerdict(path=path, status=ProcessingStatus.PARTIAL,
+                                          error='文件已变更，请重新检查新版本'))
+        if self.cfg.censor_verify_replacements:
+            self._pending_verifications.update(path for path in paths if os.path.isfile(path))
+            from ui.services import after_stopped
+            after_stopped(self, self._verify_changed)
+
+    def _verify_changed(self):
+        paths = sorted(self._pending_verifications)
+        self._pending_verifications.clear()
+        if paths:
+            self._start_scan(paths, force=True)
+
+    def _cleanup_evidence(self):
+        if busy(self):
+            return
+        from ui.services import CallWorker
+        self._cleanup_worker = CallWorker(lambda stopped: self._service.cleanup_thumbnails())
+        self._cleanup_worker.result.connect(lambda result: self._flash(
+            f"已清理 {result['removed_bytes'] / 1048576:.1f} MiB；有效证据保留"))
+        self._cleanup_worker.error.connect(self._on_log)
+        start_task(self, self._cleanup_worker, '清理过期证据图')
+
+    def _import_library(self):
+        if busy(self):
+            return
+        from copy import deepcopy
+        from ui.services import CallWorker
+        cfg = deepcopy(self.cfg)
+        def collect(stopped):
+            from utils import library_source
+            items = library_source.collect(cfg, should_stop=stopped,
+                exclude_keywords=cfg.exclude_path_keywords)
+            paths = [item.path for item in items if item.path and os.path.isfile(item.path)]
+            return dict(paths=list(dict.fromkeys(paths)), unavailable=len(items) - len(paths))
+        worker = CallWorker(collect)
+        self._library_worker = worker
+        worker.result.connect(self._library_imported)
+        worker.error.connect(self._on_log)
+        start_task(self, worker, '从当前媒体库收集检测范围')
+
+    def _library_imported(self, data):
+        self._stats_label.setText(f"可访问 {len(data['paths'])} 个视频；无本地映射/不可访问 {data['unavailable']} 个")
+        if data['paths']:
+            from ui.services import after_stopped
+            after_stopped(self, lambda: self._start_scan(data['paths']))
+
     def queued_paths(self) -> list[str]:
         """已提交去检测的文件（按提交顺序）。供自动化测试与外部脚本查询。"""
         return list(self._submitted)
@@ -496,9 +545,53 @@ class CensorshipPage(QWidget):
             recheck_manual=deep,
             frame_samples=min(600, self.cfg.censor_frame_samples * 3) if deep else None,
         )
-        # 已经有有效结果的先铺进列表（不重算），只把真正要算的送进队列。
-        # 判据是"文件身份 + 参数签名"都一致，所以改过配置/换过文件仍会重算。
-        todo, reused = self._partition_reusable(files, options)
+        from copy import copy, deepcopy
+        from ui.services import CallWorker
+        service = copy(self._service)
+        service.cfg = deepcopy(self.cfg)
+        self._set_running(True)
+        self.progress_title.setText('后台校验文件身份与缓存…')
+        worker = CallWorker(lambda stopped: self._partition_reusable(files, options,
+            should_stop=stopped, service=service))
+        worker.delivery_context = self._scan_context()
+        worker.media_epochs = dict(self._media_epochs)
+        worker.analysis_service = service
+        worker.scan_options = options
+        worker.manual_deferred = manual_deferred
+        self._prepare_worker = worker
+        worker.delivered = False
+        worker.result.connect(self._prepared_result)
+        worker.finished.connect(self._preparation_finished)
+        worker.error.connect(self._on_log)
+        start_task(self, worker, '校验检测缓存与输入')
+
+    def _scan_context(self):
+        import json
+        from ui.services import state_context
+        return json.dumps((self._service._analysis_config(), self.cfg.merge_ffmpeg_path,
+                           state_context(self.cfg)), sort_keys=True, default=str)
+
+    @Slot(object)
+    def _prepared_result(self, partition):
+        worker = self.sender()
+        worker.delivered = True
+        if worker.delivery_context != self._scan_context() or worker._stopped:
+            self._set_running(False)
+            self._stats_label.setText('配置或范围已变更，旧准备结果已丢弃，请重新开始')
+            return
+        todo, reused = partition
+        def valid(path):
+            return worker.media_epochs.get(path, 0) == self._media_epochs.get(path, 0)
+        self._prepared_scan(([p for p in todo if valid(p)], [r for r in reused if valid(r.path)]),
+                            worker.scan_options, worker.manual_deferred, service=worker.analysis_service)
+
+    @Slot()
+    def _preparation_finished(self):
+        if not self.sender().delivered:
+            self._set_running(False)
+
+    def _prepared_scan(self, partition, options, manual_deferred, *, service=None):
+        todo, reused = partition
         if reused:
             self._batching = True
             for result in reused:
@@ -506,6 +599,7 @@ class CensorshipPage(QWidget):
             self._batching = False
             self._refresh_stats()
         if not todo:
+            self._set_running(False)
             self._stats_label.setText(
                 f"{len(reused)} 个视频沿用上次结果，本次无需重查"
                 "（要强制重算请用「更多 → 忽略缓存重新分析」）")
@@ -515,18 +609,20 @@ class CensorshipPage(QWidget):
         self._set_running(True)
         self._finishing = False
         self._worker = CensorScanWorker(
-            self._service, files, options,
+            service or self._service, files, options,
             workers=int(getattr(self.cfg, "censor_workers", 4) or 4),
             manual_deferred=manual_deferred,
         )
-        self._worker.item_done.connect(self._queue_item)
+        self._worker.delivery_context = self._scan_context()
+        self._worker.media_epochs = dict(self._media_epochs)
+        self._worker.item_done.connect(self._queue_scan_item)
         self._worker.discovered.connect(self._on_discovered)
         self._worker.task_status.connect(self._on_task_status)
         self._worker.error.connect(self._on_log)
         self._worker.all_done.connect(self._on_all_done)
         start_task(self, self._worker, "视频像素化检测")
 
-    def _partition_reusable(self, files: list[str], options: CensorOptions):
+    def _partition_reusable(self, files: list[str], options: CensorOptions, *, should_stop=None, service=None):
         """把"已有有效结果"的文件挑出来，其余才是要真算的。
 
         这是"不重复检查"的落点：拖同一批片子进来不会从头再扫一遍，
@@ -538,7 +634,9 @@ class CensorshipPage(QWidget):
         todo: list[str] = []
         reused = []
         for path in files:
-            cached = self._service.cached_result(path, options)
+            if should_stop and should_stop():
+                break
+            cached = (service or self._service).cached_result(path, options)
             if cached is None:
                 todo.append(path)
             else:
@@ -653,20 +751,31 @@ class CensorshipPage(QWidget):
         self.progress_detail.setText('历史成功只表示当时分析完成；疑似项仍需复核。重新添加文件可校验版本并复用或重算。')
 
     def _stop(self) -> None:
-        if self._worker and self._worker.isRunning():
-            self._worker.stop()
-            self._stats_label.setText("正在停止…已完成的片会保留结果")
+        stop_page(self)
+        self.progress_title.setText('已请求停止，正在收尾…')
 
     def _set_running(self, running: bool) -> None:
         self.btn_stop.setEnabled(running)
 
     def shutdown(self) -> None:
+        self.workspace.save()
         if self._conn_check is not None and self._conn_check.isRunning():
             self._conn_check.stop()
             self._conn_check.wait(3000)
         stop_page(self)
 
     # ── Batched delivery keeps cache-heavy imports responsive. ──
+    @Slot(object)
+    def _queue_scan_item(self, result):
+        worker = self.sender()
+        if (worker.delivery_context != self._scan_context()
+                or worker.media_epochs.get(result.path, 0) != self._media_epochs.get(result.path, 0)):
+            return
+        # Keep the context with queued render items as well as at signal receipt.
+        result._delivery_context = worker.delivery_context
+        result._media_epoch = worker.media_epochs.get(result.path, 0)
+        self._queue_item(result)
+
     def _queue_item(self, result):
         self._pending_results.append(result)
         if not self._render_timer.isActive():
@@ -690,6 +799,10 @@ class CensorshipPage(QWidget):
                 self._finish_view()
 
     def _on_item(self, result: VideoVerdict) -> None:
+        if (getattr(result, '_delivery_context', self._scan_context()) != self._scan_context()
+                or getattr(result, '_media_epoch', self._media_epochs.get(result.path, 0))
+                != self._media_epochs.get(result.path, 0)):
+            return
         reviewed = self._review_overrides.get(result.path)
         if reviewed is not None:
             if result.file_identity and reviewed.file_identity == result.file_identity:
@@ -751,7 +864,9 @@ class CensorshipPage(QWidget):
         self._row_of[result.path] = row
         if not self._batching:
             self.table.setSortingEnabled(True)
-        self.table.setRowHidden(row, not self._matches_filter(result))
+            self._apply_filter()
+        else:
+            self.table.setRowHidden(row, not self._matches_filter(result))
 
     def _on_progress(self, done: int, total: int) -> None:
         self.scan_progress.setRange(0,max(1,total))
@@ -800,6 +915,10 @@ class CensorshipPage(QWidget):
 
     def _matches_filter(self, result) -> bool:
         """视图（我现在想干什么）× 结论（有没有码）—— 两个维度独立的 AND。"""
+        words = self.search.text().casefold().split()
+        text = f'{result.path} {result.number} {result.verdict.reason}'.casefold()
+        if not all(word in text for word in words):
+            return False
         view = self._current_view()
         if not in_view(view, review_bucket(result)):
             return False
@@ -867,9 +986,14 @@ class CensorshipPage(QWidget):
         它会把 stats_label 整段覆盖掉 —— 那样点了按钮就跟没点一样。
         """
         self.progress_title.setText(text)
-        QTimer.singleShot(8000, self._restore_progress_title)
+        self._flash_timer.start()
 
     def _restore_progress_title(self) -> None:
+        """8 秒后把进度标题恢复成常态。
+
+        用成员 QTimer 而不是 ``QTimer.singleShot``：后者没有生命周期绑定，
+        页面销毁后仍会回调，会访问已删除的控件（测试里表现为跨用例报错）。
+        """
         if self._worker is not None and self._worker.isRunning():
             return
         self.progress_title.setText(f'列表 {len(self._results)} 条 · 选中一项可标记')
@@ -932,8 +1056,47 @@ class CensorshipPage(QWidget):
             else:
                 self._flash(
                     f"已标记「无码」：{os.path.basename(path)} —— 不需要找替换")
+            from ui.services import events
+            events.censor_changed.emit([path])
         self._refresh_stats()
-        self._advance_review(path)
+        if self.workspace.state.get('auto_next', True):
+            self._advance_review(path)
+
+    def _withdraw_current(self):
+        current = self._resolve_current()
+        if current is None:
+            self._flash('先选择一条已人工标记的记录')
+            return
+        try:
+            result = self._service.remove_label(current.path)
+        except (OSError, ValueError) as exc:
+            self._flash(f'撤回失败：{exc}')
+            return
+        self._review_overrides.pop(current.path, None)
+        if result:
+            self._on_item(result)
+        from ui.services import events
+        events.censor_changed.emit([current.path])
+        self._flash('已撤回人工确认，历史保留；可重新检查')
+
+    def _send_lada(self):
+        current = self._resolve_current()
+        if current is None or not awaits_replacement(current):
+            self._flash('先人工确认当前视频有码，再交给 Lada')
+            return
+        from ui.services import events
+        events.lada_ready.emit([current.path])
+
+    def apply_theme(self):
+        from ui import theme
+        _STATE_COLOR.update({CensorState.CENSORED: theme.color('danger'),
+                             CensorState.UNCENSORED: theme.color('success'),
+                             CensorState.UNKNOWN: theme.color('text_secondary')})
+        _BUCKET_COLOR.update({key: theme.color('success' if key is ReviewBucket.CONFIRMED
+            else 'warning' if key in (ReviewBucket.FAILED, ReviewBucket.UNREVIEWED)
+            else 'text_secondary') for key in ReviewBucket})
+        for result in self._results.values():
+            self._replace_row(result)
 
     def _replace_row(self, result: VideoVerdict) -> None:
         row = next((r for r in range(self.table.rowCount())
@@ -954,7 +1117,9 @@ class CensorshipPage(QWidget):
              or result.verdict.reason)[:120])
         if not self._batching:
             self.table.setSortingEnabled(True)
-        self.table.setRowHidden(row, not self._matches_filter(result))
+            self._apply_filter()
+        else:
+            self.table.setRowHidden(row, not self._matches_filter(result))
 
     # ── 无码版本检索（网络）──────────────────────────────────────
     # 说明：检索属于"辅助动作"，刻意**不进 TaskManager** ——

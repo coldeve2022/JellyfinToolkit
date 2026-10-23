@@ -1,0 +1,27 @@
+{
+  "scope": "8s synthetic clip; 24 identical timestamp samples at 1280x720 gray; not real-library throughput",
+  "baseline": "a4e2b3b",
+  "runs": {
+    "before": {
+      "sampling_seconds": 4.561668700014707,
+      "sampling_subprocesses": 25,
+      "evidence_seconds": 0.5824686999840196,
+      "evidence_subprocesses": 6,
+      "samples": 24,
+      "retained_batch_pixel_bytes": 22118400
+    },
+    "after": {
+      "sampling_seconds": 4.254028800001834,
+      "sampling_subprocesses": 25,
+      "evidence_seconds": 0.39302390001830645,
+      "evidence_subprocesses": 0,
+      "samples": 24,
+      "retained_batch_pixel_bytes": 22118400
+    }
+  },
+  "timestamp_and_pixel_hashes_identical": true,
+  "production_raw_frame_retention": {
+    "before": "all sampled frames",
+    "after": "current decoded frame plus selected output evidence; temporary disk spool"
+  }
+}

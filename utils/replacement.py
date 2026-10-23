@@ -74,6 +74,41 @@ def validate_restored_output(original, output):
     return True, ""
 
 
+def preview_release_replacements(candidate_paths, originals, should_stop=None):
+    """Pair downloaded versions by complete work ID; never choose among copies."""
+    from censor.numbering import parse_from_path
+    from censor.releases.models import normalize_number
+    index = {}
+    for value in _videos(originals, should_stop):
+        key = normalize_number(parse_from_path(value).number)
+        if key:
+            index.setdefault(key, []).append(str(value))
+    plan = []
+    for value in _videos(candidate_paths, should_stop):
+        if should_stop and should_stop():
+            break
+        key = normalize_number(parse_from_path(value).number)
+        matches = list(dict.fromkeys(index.get(key, []))) if key else []
+        status = "ready" if len(matches) == 1 else "ambiguous" if matches else "not_found"
+        target = matches[0] if status == "ready" else ""
+        if target and path_key(value) == path_key(target):
+            status, target = "conflict", ""
+        if target and Path(value).suffix.lower() != Path(target).suffix.lower():
+            status = "container_mismatch"
+        plan.append(dict(source=str(value), target=target, candidates=matches, status=status,
+                         error="" if status == "ready" else "需要选择唯一原文件并匹配封装格式",
+                         source_hash=file_hash(value), target_hash=file_hash(target) if target else None))
+    grouped = {}
+    for row in plan:
+        if row["target"] and row["status"] == "ready":
+            grouped.setdefault(path_key(row["target"]), []).append(row)
+    for rows in grouped.values():
+        if len(rows) > 1:
+            for row in rows:
+                row.update(status="conflict", error="多个候选指向同一原文件，请只保留一个版本")
+    return plan
+
+
 def execute_replacements(plan, *, journal=None, should_stop=None, log=print, validator=None):
     journal = journal or OperationJournal()
     stats = dict(ok=0, fail=0, cancelled=False, fails=[], operations=[])

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from censor.models import ProcessingStatus
 
 __all__ = [
     "Availability", "ReleaseQuery", "MagnetLink", "ReleaseCandidate",
@@ -120,14 +121,26 @@ class ReleaseCandidate:
 
     @property
     def downloadable(self) -> bool:
-        return bool(self.magnets)
+        return self.best_magnet is not None
 
     @property
     def best_magnet(self) -> MagnetLink | None:
         """优先要文件最大的那条 —— 通常是高清正片而非片段。"""
         if not self.magnets:
             return None
-        return max(self.magnets, key=lambda m: (m.size_mb, m.files == 1))
+        from censor.tag_signals import classify_tag
+        from censor.releases.base import contains_number
+        matches, unmarked = [], []
+        for magnet in self.magnets:
+            if self.number and not contains_number(magnet.name, self.number):
+                continue
+            uncensored, censored = classify_tag(" ".join((magnet.name, *magnet.tags)))
+            if uncensored and not censored:
+                matches.append(magnet)
+            elif not censored:
+                unmarked.append(magnet)
+        pool = matches if self.uncensored else matches or unmarked
+        return max(pool, key=lambda m: (m.size_mb, m.files == 1)) if pool else None
 
     @property
     def total_size_mb(self) -> int:
@@ -145,6 +158,8 @@ class ReleaseReport:
     note: str = ""
     elapsed: float = 0.0
     queried_at: float = 0.0
+    status: ProcessingStatus = ProcessingStatus.COMPLETED
+    cache_hit: bool = False
 
     @property
     def uncensored(self) -> tuple[ReleaseCandidate, ...]:
@@ -158,7 +173,7 @@ class ReleaseReport:
     @property
     def best(self) -> ReleaseCandidate | None:
         """最值得下载的那条：有磁链的无码条目优先，其次体积大的。"""
-        pool = [c for c in self.uncensored if c.downloadable] or list(self.candidates)
+        pool = [c for c in self.uncensored if c.best_magnet] or list(self.uncensored)
         if not pool:
             return None
         return max(pool, key=lambda c: (c.uncensored, c.total_size_mb))
@@ -181,6 +196,12 @@ class ReleaseReport:
 
     def as_text(self) -> str:
         """一行摘要，给表格单元格用。"""
+        if self.status is ProcessingStatus.CANCELLED:
+            return "已取消（可继续）"
+        if self.status is ProcessingStatus.FAILED:
+            return f"查询失败（{self.note or '可重试'}）"
+        if self.status is ProcessingStatus.PARTIAL and self.availability is Availability.UNKNOWN:
+            return "部分来源未完成（可重试）"
         if self.availability is Availability.CONFIRMED:
             count = len(self.uncensored)
             tail = "有磁链" if self.has_download else "无磁链"

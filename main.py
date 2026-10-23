@@ -153,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     _install_excepthook()
 
     from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt
 
     from config import ToolkitConfig
     from utils.fonts import ui_font
@@ -179,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     from ui.pages.tasks import TaskCenterPage
     from ui.services import events
 
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv[:1])
     app.setStyle("Fusion")
     font = ui_font(10)
@@ -186,6 +188,11 @@ def main(argv: list[str] | None = None) -> int:
         app.setFont(font)
 
     cfg = ToolkitConfig.load()
+    if cfg.release_enabled and 'supjav' in cfg.release_sources and cfg.release_supjav_mode != 'index':
+        from censor.releases.transport import offline
+        if not offline():
+            from ui.supjav_browser import prepare_supjav_session
+            prepare_supjav_session()
     # 用户配置里的 ffmpeg 路径要在任何页面构造前注入
     configure_tools(cfg.merge_ffmpeg_path, force=True)
 
@@ -221,8 +228,16 @@ def main(argv: list[str] | None = None) -> int:
 
     events.subtitle_ready.connect(send_subtitles)
     events.restored_ready.connect(send_restored)
+    def send_candidates(paths, originals):
+        replace_page.receive_candidates(paths, originals)
+        _goto(window, "破解视频替换")
+    events.replacement_ready.connect(send_candidates)
     # Lada 需要 ffprobe 校验产出时长，用与 ffmpeg 同一套解析逻辑取它的路径
     lada_page = LadaPage(cfg)
+    def send_lada(paths):
+        lada_page._add_paths(paths)
+        _goto(window, "马赛克破解")
+    events.lada_ready.connect(send_lada)
     lada_page.set_ffprobe(resolve_tool("ffprobe") or "ffprobe")
     window.register_page(lada_page)
     window.register_page(RepairPage(cfg))

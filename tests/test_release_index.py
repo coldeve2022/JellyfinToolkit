@@ -122,14 +122,14 @@ def test_lookup_site_reports_engine_failures_separately():
 
 # ── Supjav 判定 ─────────────────────────────────────────────
 
-def test_supjav_marks_uncensored_leak_as_confirmed():
+def test_supjav_index_title_is_a_soft_lead_until_verified():
     transport = FakeTransport({"bing.com": fixture("bing_supjav_ncra026.html")})
     found = SupjavSource(transport, {"release_supjav_engines": ["bing"]}).search(
         ReleaseQuery(number="NCRA-026"))
     assert found, "应当命中 NCRA-026"
     top = found[0]
     assert top.uncensored
-    assert top.uncensored_confidence >= 0.8, "站点标题写無修正流出 → 确有"
+    assert 0 < top.uncensored_confidence < 0.8, "搜索索引标题需要核对，不能代替条目确证"
     assert "supjav.com" in top.page_url
 
 

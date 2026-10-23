@@ -63,7 +63,7 @@ def _report(number: str, availability: Availability) -> ReleaseReport:
         uncensored=availability is not Availability.NONE,
         uncensored_reason="站点标题含无码/破解标记",
         uncensored_confidence=0.85 if availability is not Availability.NONE else 0.0,
-        magnets=(MagnetLink(uri="magnet:?xt=urn:btih:" + "c" * 40, size_mb=4096),)
+        magnets=(MagnetLink(uri="magnet:?xt=urn:btih:" + "c" * 40, name=f'{number} Uncensored', size_mb=4096),)
         if availability is not Availability.NONE else (),
     )
     return ReleaseReport(number=number, availability=availability,
@@ -78,7 +78,7 @@ def cfg():
 
 
 @pytest.fixture
-def page(qapp, cfg, monkeypatch):
+def page(qapp, qtbot, cfg, monkeypatch):
     from ui.pages.censor_replace import CensorReplacePage
 
     records = [
@@ -96,7 +96,12 @@ def page(qapp, cfg, monkeypatch):
         widget._release, "cached",
         lambda number: _report("A123", Availability.CONFIRMED)
         if normalize_number(number) == "A123" else None)
+    monkeypatch.setattr(widget._release, "fresh", lambda number: _report("A123", Availability.CONFIRMED)
+                        if normalize_number(number) == "A123" else None)
+    monkeypatch.setattr(widget._release, 'fresh_many', lambda numbers: {'A123': _report('A123', Availability.CONFIRMED)})
+    widget._release.store.put(_report("A123", Availability.CONFIRMED))
     widget.refresh()
+    qtbot.waitUntil(lambda: widget.table.rowCount() == 3, timeout=4000)
     yield widget
     widget.shutdown()
 
@@ -144,10 +149,11 @@ def test_selecting_row_shows_candidates_and_files(page):
     assert page.files.rowCount() == 2
 
 
-def test_lookup_new_only_queries_unchecked(page, monkeypatch):
+def test_lookup_new_only_queries_unchecked(page, monkeypatch, qtbot):
     FakeWorker.calls = []
     monkeypatch.setattr("ui.pages.censor_replace.ReleaseLookupWorker", FakeWorker)
     page._lookup(force=False)
+    qtbot.waitUntil(lambda: bool(FakeWorker.calls), timeout=4000)
     assert FakeWorker.calls == [["B-456"]], FakeWorker.calls
 
 
@@ -172,9 +178,10 @@ def test_report_updates_row_and_panel(page):
     assert "确有" in page.panel.lbl_summary.text()
 
 
-def test_empty_list_is_handled(page, monkeypatch):
+def test_empty_list_is_handled(page, monkeypatch, qtbot):
     monkeypatch.setattr(page._censor, "store",
                         type("S", (), {"confirmed_censored": staticmethod(lambda: [])})())
     page.refresh()
+    qtbot.waitUntil(lambda: page.table.rowCount() == 0, timeout=4000)
     assert page.table.rowCount() == 0
     assert "已确认有码 0" in page.lbl_summary.text()

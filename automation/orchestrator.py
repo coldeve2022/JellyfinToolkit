@@ -417,6 +417,14 @@ def run_orchestrator(cfg, options=None, log=print, progress=None, should_stop=No
         if stopped():
             report["status"] = "cancelled"
             return report
+        if opts.get("pixelation_scan") or opts.get("release_lookup"):
+            from censor.workflow import run_censor_workflow
+            stage = run_censor_workflow(cfg, paths, scan=bool(opts.get("pixelation_scan")),
+                lookup=bool(opts.get("release_lookup")), should_stop=stopped, log=log, progress=progress)
+            report["stages"]["censor_workflow"] = stage
+            if stage["status"] != "succeeded":
+                report.update(status=stage["status"], error=stage.get("error", ""))
+                return report
         scoring = score_items(items, log, cfg)
         from utils.state_context import bind_resolved_context
 

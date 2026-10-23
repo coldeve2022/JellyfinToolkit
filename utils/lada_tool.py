@@ -69,19 +69,9 @@ _DROP_IN_NAMES = (
 _OPT_RE = re.compile(r"(?<![\w-])(--[a-z][a-z0-9_\-]*)")
 
 
-def _drives() -> list:
-    """所有存在的盘根（Windows）/ 常见挂载点（其它平台）。"""
-    if os.name != "nt":
-        return [Path("/opt"), Path("/usr/local"), Path.home() / "Apps"]
-    out = []
-    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
-        root = Path(f"{letter}:\\")
-        try:
-            if root.is_dir():
-                out.append(root)
-        except OSError:
-            continue
-    return out
+def _drives():
+    from utils.tool_search import drives
+    return drives()
 
 
 def candidate_dirs(configured: str = "", extra: Optional[list] = None) -> list:
@@ -249,22 +239,9 @@ def _run(cli: Path, args: list, timeout: int) -> tuple:
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
-def parse_options(help_text: str) -> set:
-    """从 ``--help`` 文本里抽出 Lada 真正认识的选项名。
-
-    只认行首缩进的选项定义行，避免把说明文字里顺带提到的参数也算进来
-    （Lada 的帮助文本里会引用 ``--list-devices`` 之类的其它参数）。
-    """
-    found = set()
-    for line in (help_text or "").splitlines():
-        if not line[:1].isspace():
-            continue
-        stripped = line.strip()
-        if not stripped.startswith("-"):
-            continue
-        for name in _OPT_RE.findall(stripped.split("  ")[0]):
-            found.add(name)
-    return found
+def parse_options(help_text: str):
+    from utils.tool_search import parse_cli_options
+    return parse_cli_options(help_text)
 
 
 def probe(cli: Path, timeout: int = 120) -> dict:

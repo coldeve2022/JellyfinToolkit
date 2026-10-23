@@ -298,7 +298,8 @@ def split_path_name(p: str) -> str:
     ``os.path.basename`` 不把反斜杠当分隔符，会把整串当成文件名 ——
     于是附属文件判定、封面查找全部失效。这是实测出来的，不是理论问题。
     """
-    return str(p).replace(chr(92), "/").rstrip("/").rsplit("/", 1)[-1]
+    from utils.media_types import split_path_name as split
+    return split(p)
 
 
 # ── 附属文件判定：**全仓库唯一一份规则** ────────────────────────

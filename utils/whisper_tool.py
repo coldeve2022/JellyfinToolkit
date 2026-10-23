@@ -81,19 +81,9 @@ _DROP_IN_NAMES = (
 )
 
 
-def _drives() -> list[Path]:
-    """所有存在的盘根（Windows）/ 常见挂载点（其它平台）。"""
-    if os.name != "nt":
-        return [Path("/opt"), Path("/usr/local"), Path.home() / "Apps"]
-    out = []
-    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
-        root = Path(f"{letter}:\\")
-        try:
-            if root.is_dir():
-                out.append(root)
-        except OSError:
-            continue
-    return out
+def _drives():
+    from utils.tool_search import drives
+    return drives()
 
 
 def candidate_dirs(configured: str = "", extra: Optional[list] = None) -> list[Path]:
@@ -211,22 +201,9 @@ def find_infer_exe(configured: str = "", extra_dirs: Optional[list] = None) -> O
 _OPT_RE = re.compile(r"(?<![\w-])(--[a-z][a-z0-9_\-]*)")
 
 
-def parse_options(help_text: str) -> set:
-    """从 ``--help`` 文本里抽出它真正认识的选项名。
-
-    只认行首缩进的选项定义行，避免把说明文字里顺带提到的选项也算进来
-    （上游帮助文本里就会引用别的参数名）。
-    """
-    found = set()
-    for line in (help_text or "").splitlines():
-        if not line[:1].isspace():
-            continue
-        stripped = line.strip()
-        if not stripped.startswith("-"):
-            continue
-        for name in _OPT_RE.findall(stripped.split("  ")[0]):
-            found.add(name)
-    return found
+def parse_options(help_text: str):
+    from utils.tool_search import parse_cli_options
+    return parse_cli_options(help_text)
 
 
 def probe(infer_exe: Path, timeout: int = 60) -> dict:

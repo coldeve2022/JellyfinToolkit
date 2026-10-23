@@ -15,6 +15,8 @@ service 里，换一个站就得动主流程；抽成基类之后，加站点 = 
 from __future__ import annotations
 
 import time
+import re
+import unicodedata
 from typing import Any, Callable
 
 from censor.releases.models import ReleaseCandidate, ReleaseQuery, normalize_number
@@ -34,6 +36,15 @@ def same_number(left: str, right: str) -> bool:
     # 允许站点写成 PIYO170 而本地是 PIYO-170 这类差异（已在 normalize 中处理），
     # 但不允许 PIYO-17 命中 PIYO-170
     return False
+
+
+def contains_number(text: str, number: str) -> bool:
+    """Match a complete identifier without erasing its surrounding boundaries."""
+    key = normalize_number(number)
+    if not key:
+        return False
+    pattern = r"(?<![A-Z0-9])" + r"[\s_.-]*".join(re.escape(c) for c in key) + r"(?![A-Z0-9])"
+    return bool(re.search(pattern, unicodedata.normalize("NFKC", str(text)).upper()))
 
 
 class ReleaseSource:

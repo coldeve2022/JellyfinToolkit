@@ -26,6 +26,8 @@ from censor.numbering import parse_number
 from censor.releases.base import ReleaseSource, same_number
 from censor.releases.html import attr, clean
 from censor.releases.models import MagnetLink, ReleaseCandidate, ReleaseQuery
+from censor.tag_signals import classify_tag
+from censor.releases.transport import TransportError
 
 __all__ = ["JavDbSource", "UNCENSORED_MAKERS", "UNCENSORED_WORDS"]
 
@@ -54,7 +56,7 @@ class JavDbSource(ReleaseSource):
     title = "JavDB"
     homepage = BASE
     capabilities = ("http",)
-    version = "2"
+    version = "4"
 
     def search(self, query: ReleaseQuery, *, should_stop=lambda: False,
                log=lambda _m: None, limit: int = 4) -> list[ReleaseCandidate]:
@@ -65,10 +67,13 @@ class JavDbSource(ReleaseSource):
         keyword = query.number or query.title_hint
         search_url = f"{BASE}/search?q={urllib.parse.quote(keyword)}&f=all"
         page = self.transport.get(search_url)
+        if not page.strip():
+            raise TransportError('搜索响应为空，无法查证')
         rows = self._parse_search(page, query)
         log(f"JavDB 搜索「{keyword}」命中 {len(rows)} 条同番号条目")
 
         out: list[ReleaseCandidate] = []
+        errors = []
         for row in rows[: max(1, limit)]:
             if should_stop():
                 break
@@ -76,8 +81,20 @@ class JavDbSource(ReleaseSource):
                 detail = self.transport.get(BASE + row["href"], referer=search_url)
             except Exception as exc:  # noqa: BLE001 - 单条失败不影响其它条目
                 log(f"JavDB 详情读取失败 {row['href']}：{exc}")
+                errors.append(str(exc))
                 continue
-            out.append(self._parse_detail(detail, row, query))
+            try:
+                candidate = self._parse_detail(detail, row, query)
+            except (ValueError, TypeError) as exc:
+                errors.append(str(exc))
+                continue
+            if not query.number or same_number(candidate.number, query.number):
+                out.append(candidate)
+            else:
+                errors.append("详情番号与查询不一致")
+        self.incomplete_reason = "；".join(errors)
+        if errors and not out:
+            raise TransportError(self.incomplete_reason)
         return out
 
     # ── 解析：搜索页 ──
@@ -104,7 +121,9 @@ class JavDbSource(ReleaseSource):
     # ── 解析：详情页 ──
     def _parse_detail(self, page: str, row: dict, query: ReleaseQuery) -> ReleaseCandidate:
         fields = self._panel_fields(page)
-        number = self._squash(fields.get("番號", "") or row.get("number", ""))
+        number = self._squash(fields.get("番號", "") or fields.get("番号", ""))
+        if not number:
+            raise ValueError('详情缺少结构化番号，无法查证')
         categories = tuple(self._categories(page))
         maker = fields.get("片商", "")
         title = row.get("title") or fields.get("標題", "")
@@ -122,7 +141,7 @@ class JavDbSource(ReleaseSource):
             categories=categories,
             uncensored=uncensored,
             uncensored_reason=reason,
-            uncensored_confidence=0.9 if uncensored else 0.0,
+            uncensored_confidence=(0.55 if reason.startswith("标题") else 0.9) if uncensored else 0.0,
             magnets=tuple(self._parse_magnets(page)),
         )
 
@@ -159,13 +178,21 @@ class JavDbSource(ReleaseSource):
 
         out: list[MagnetLink] = []
         seen: set[str] = set()
-        for match in re.finditer(_MAGNET_ITEM, page or ""):
+        items = list(re.finditer(_MAGNET_ITEM, page or ""))
+        for index, match in enumerate(items):
             start = match.start()
-            block = page[start:start + 2000]
+            end = items[index + 1].start() if index + 1 < len(items) else len(page)
+            depth = 0
+            for tag in re.finditer(r'</?div\b[^>]*>', page[start:end], re.I):
+                depth += -1 if tag.group().startswith('</') else 1
+                if depth == 0:
+                    end = start + tag.end()
+                    break
+            block = page[start:end]
             href = attr(block, "href")
             if not href.startswith("magnet:"):
                 link = re.search(r'href="(magnet:[^"]+)"', block)
-                href = link.group(1) if link else ""
+                href = attr(link.group(0), "href") if link else ""
             if not href.startswith("magnet:") or href in seen:
                 continue
             seen.add(href)
@@ -203,14 +230,11 @@ class JavDbSource(ReleaseSource):
             return True, f"番号属于天生无码系列（{movie.provider}）"
         if maker and maker in UNCENSORED_MAKERS:
             return True, f"片商为无码厂牌（{maker}）"
-        hits = [word for word in UNCENSORED_WORDS
-                if any(word.lower() in str(cat).lower() for cat in categories)]
+        hits = [str(cat) for cat in categories if classify_tag(cat)[0]]
         if hits:
             return True, f"类别含无码标记（{hits[0]}）"
-        lowered = str(title).lower()
-        hits = [word for word in UNCENSORED_WORDS if word.lower() in lowered]
-        if hits:
-            return True, f"标题含无码标记（{hits[0]}）"
+        if classify_tag(title)[0]:
+            return True, "标题含无码标记（仅为软线索）"
         return False, ""
 
     def require_transport(self) -> None:

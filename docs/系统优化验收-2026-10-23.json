@@ -1,0 +1,109 @@
+{
+  "version": "3.20.0",
+  "baseline": "a4e2b3b",
+  "scope": "source workspace, synthetic/offline and localhost only",
+  "pytest_offline": {
+    "passed": 1334,
+    "skipped": 1,
+    "seconds": 150.24,
+    "exit_code": 0
+  },
+  "pytest_loopback": {
+    "passed": 1,
+    "seconds": 0.45,
+    "execution": "outside sandbox, localhost synthetic data",
+    "exit_code": 0
+  },
+  "combined": {
+    "passed": 1335,
+    "skipped": 1
+  },
+  "static_checks": {
+    "ruff": "passed",
+    "compileall": "passed",
+    "version_consistency": "passed"
+  },
+  "ui": [
+    {
+      "scale": "1",
+      "pages_navigated": 19,
+      "closed": true,
+      "tasks_running": false,
+      "button_bounds_ok": true
+    },
+    {
+      "scale": "1.25",
+      "pages_navigated": 19,
+      "closed": true,
+      "tasks_running": false,
+      "button_bounds_ok": true
+    },
+    {
+      "scale": "1.5",
+      "pages_navigated": 19,
+      "closed": true,
+      "tasks_running": false,
+      "button_bounds_ok": true
+    }
+  ],
+  "original_defects_fixed": [
+    "F01",
+    "F02",
+    "F03",
+    "F04",
+    "F05",
+    "F06",
+    "F07",
+    "F08",
+    "F09",
+    "F10",
+    "F11",
+    "F12",
+    "F13",
+    "F14",
+    "F15",
+    "F16",
+    "F17",
+    "F18"
+  ],
+  "independent_review": {
+    "critical": 0,
+    "important_fixed": 11,
+    "regressions_observed_red_then_green": 17,
+    "planned_followups_completed": 2,
+    "followup_tests_passed": 5
+  },
+  "performance": {
+    "scope": "8s synthetic clip; 24 identical timestamp samples at 1280x720 gray; not real-library throughput",
+    "baseline": "a4e2b3b",
+    "runs": {
+      "before": {
+        "sampling_seconds": 4.561668700014707,
+        "sampling_subprocesses": 25,
+        "evidence_seconds": 0.5824686999840196,
+        "evidence_subprocesses": 6,
+        "samples": 24,
+        "retained_batch_pixel_bytes": 22118400
+      },
+      "after": {
+        "sampling_seconds": 4.254028800001834,
+        "sampling_subprocesses": 25,
+        "evidence_seconds": 0.39302390001830645,
+        "evidence_subprocesses": 0,
+        "samples": 24,
+        "retained_batch_pixel_bytes": 22118400
+      }
+    },
+    "timestamp_and_pixel_hashes_identical": true,
+    "production_raw_frame_retention": {
+      "before": "all sampled frames",
+      "after": "current decoded frame plus selected output evidence; temporary disk spool"
+    }
+  },
+  "deferred_minors": [],
+  "unverified": [
+    "current external site/proxy availability",
+    "real long-film/HDD/NAS throughput and RSS peak",
+    "packaged executable"
+  ]
+}

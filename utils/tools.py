@@ -441,14 +441,14 @@ def configured_ffmpeg() -> str:
     return _configured.get("ffmpeg", "")
 
 
-def resolve_tool(name: str, *, force: bool = False) -> Optional[str]:
+def resolve_tool(name: str, *, force: bool = False, configured_path: str | None = None) -> Optional[str]:
     """定位 ffmpeg / ffprobe：用户配置优先，其次程序目录/PATH/常见位置。"""
-    if not force and name in _tool_cache:
+    if configured_path is None and not force and name in _tool_cache:
         return _tool_cache[name] or None
 
     extra: list[str] = []
     if name in ("ffmpeg", "ffprobe"):
-        cfg_path = configured_ffmpeg()
+        cfg_path = configured_ffmpeg() if configured_path is None else configured_path
         if cfg_path:
             p = Path(cfg_path)
             if name == "ffmpeg":
@@ -457,5 +457,6 @@ def resolve_tool(name: str, *, force: bool = False) -> Optional[str]:
                 sibling = p.with_name("ffprobe.exe" if sys.platform == "win32" else "ffprobe")
                 extra.append(str(sibling))
     found = find_binary(name, extra) or ""
-    _tool_cache[name] = found
+    if configured_path is None:
+        _tool_cache[name] = found
     return found or None

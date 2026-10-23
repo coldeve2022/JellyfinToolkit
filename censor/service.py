@@ -51,6 +51,7 @@ class CensorOptions:
 
 class CensorService:
     """有码检测服务（无 UI 依赖，可在脚本 / 测试里直接用）。"""
+    _active_work_dirs = set()
 
     def __init__(
         self,
@@ -65,6 +66,7 @@ class CensorService:
         self.store = store or VerdictStore(self._default_db_path())
         self.policy = policy or FusionPolicy()
         self._tools: tuple[str, str] | None = None
+        self._tools_config = None
 
     # ── 路径 ──
     def _default_db_path(self) -> Path:
@@ -88,14 +90,15 @@ class CensorService:
     # ── 工具解析 ──
     def tools(self) -> tuple[str, str]:
         """(ffmpeg, ffprobe)；解析不到就是空串，检测器会自己报告不可用。"""
-        if self._tools is not None:
+        tool_config = self._cfg_get("merge_ffmpeg_path", "")
+        if self._tools is not None and self._tools_config == tool_config:
             return self._tools
         ffmpeg = ffprobe = ""
         try:
             from utils.tools import resolve_tool
 
-            ffmpeg = resolve_tool("ffmpeg") or ""
-            ffprobe = resolve_tool("ffprobe") or ""
+            ffmpeg = resolve_tool("ffmpeg", configured_path=tool_config) or ""
+            ffprobe = resolve_tool("ffprobe", configured_path=tool_config) or ""
         except Exception:  # noqa: BLE001 - 独立使用时退化为直接找 PATH
             import shutil
 
@@ -104,7 +107,12 @@ class CensorService:
         if not ffmpeg and self.cfg is not None:
             ffmpeg = str(getattr(self.cfg, "ffmpeg_path", "") or "")
         self._tools = (ffmpeg, ffprobe)
+        self._tools_config = tool_config
         return self._tools
+
+    def refresh_tools(self):
+        self._tools = None
+        self._tools_config = None
 
     # ── 缓存查询（给界面"不重复检查"用）──
     def cached_result(
@@ -220,6 +228,7 @@ class CensorService:
             work_dir=self._thumb_dir(target) / uuid.uuid4().hex,
         )
         ctx.number = parse_from_path(target)
+        self._active_work_dirs.add(str(ctx.work_dir.resolve()))
         if opts.frame_samples is not None:
             ctx.shared['requested_samples'] = max(6, min(600, int(opts.frame_samples)))
         # 只有真要抽帧时才去解析 ffmpeg —— 纯元数据模式不该依赖外部工具
@@ -321,6 +330,7 @@ class CensorService:
                 self.store.put(result)
         except Exception as exc:  # noqa: BLE001 - 缓存写失败不该影响结果
             log(f"⚠️ 结果缓存写入失败：{exc}")
+        self._active_work_dirs.discard(str(ctx.work_dir.resolve()))
         return result
 
     def _active_detectors(self, opts: CensorOptions) -> list[BaseDetector]:
@@ -371,7 +381,8 @@ class CensorService:
         return {
             key: value
             for key, value in raw.items()
-            if key.startswith("censor_") or key in self._ANALYSIS_CONFIG_KEYS
+            if (key.startswith("censor_") and key not in {"censor_workers", "censor_memory_mb", "censor_verify_replacements"})
+            or key in self._ANALYSIS_CONFIG_KEYS
         }
 
     def _analysis_signature(self, target, opts, active, server_tags, label=None):
@@ -462,5 +473,47 @@ class CensorService:
     def stats(self) -> StoreStats:
         return self.store.stats()
 
+    def remove_label(self, path: str | Path) -> VideoVerdict | None:
+        target = str(path)
+        self.store.remove_label(target, identify_file(target).serialize())
+        cached = self.store.get(target)
+        if cached is not None:
+            cached.verdict = fuse([e for e in cached.verdict.evidence
+                                   if e.source is not EvidenceSource.MANUAL], self.policy)
+            cached.analysis_signature = ""  # A prior manual result may have skipped visuals.
+            self.store.put(cached)
+        return cached
+
     def review_queue(self, limit: int = 500) -> list[VideoVerdict]:
         return self.store.review_queue(limit)
+
+    def cleanup_thumbnails(self, max_bytes=512 * 1024 * 1024, min_age_seconds=86400):
+        """Only unlink old unreferenced evidence inside this service's work root."""
+        root = self.work_dir.resolve()
+        live = self.store.referenced_thumbnails()
+        active = tuple(Path(path) for path in self._active_work_dirs)
+        files, total, removed = [], 0, 0
+        if not root.exists():
+            return dict(removed_bytes=0, remaining_bytes=0)
+        for path in root.rglob('*'):
+            try:
+                resolved = path.resolve()
+                if not path.is_file() or root not in resolved.parents:
+                    continue
+                stat = path.stat()
+                total += stat.st_size
+                if (str(resolved) not in live and not any(run in resolved.parents for run in active)
+                        and time.time() - stat.st_mtime >= min_age_seconds):
+                    files.append((stat.st_mtime, path, stat.st_size))
+            except OSError:
+                continue
+        for _, path, size in sorted(files):
+            if total <= max_bytes:
+                break
+            try:
+                path.unlink()
+                total -= size
+                removed += size
+            except OSError:
+                continue
+        return dict(removed_bytes=removed, remaining_bytes=total)

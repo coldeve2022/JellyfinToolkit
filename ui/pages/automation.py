@@ -53,6 +53,8 @@ class AutomationPage(QWidget):
         root.addWidget(hint)
 
         self.cb_scan_video = QCheckBox("逐文件检查损坏/不兼容（较慢）")
+        self.cb_pixelation_scan = QCheckBox("画面像素化检查（复用有效缓存）")
+        self.cb_release_lookup = QCheckBox("检索已人工确认有码的作品版本（联网）")
         self.cb_check_old = QCheckBox("检查旧合并是否损坏")
         self.cb_merge = QCheckBox("合并 ready 分集")
         self.cb_dedup = QCheckBox("重复版本建议删除者 → 可恢复隔离区")
@@ -60,6 +62,8 @@ class AutomationPage(QWidget):
         self.cb_jellyfin = QCheckBox("清洗 Jellyfin 脏标签")
         for cb in (
             self.cb_scan_video,
+            self.cb_pixelation_scan,
+            self.cb_release_lookup,
             self.cb_check_old,
             self.cb_merge,
             self.cb_dedup,
@@ -114,6 +118,8 @@ class AutomationPage(QWidget):
     def _options(self, apply_all: bool) -> dict:
         return {
             "scan_video": self.cb_scan_video.isChecked(),
+            "pixelation_scan": self.cb_pixelation_scan.isChecked(),
+            "release_lookup": self.cb_release_lookup.isChecked(),
             "check_old": self.cb_check_old.isChecked(),
             "apply_merge": apply_all and self.cb_merge.isChecked(),
             "apply_dedup": apply_all and self.cb_dedup.isChecked(),
@@ -263,7 +269,8 @@ class AutomationPage(QWidget):
             return
         flags = {
             name: getattr(self, "cb_" + name).isChecked()
-            for name in ("scan_video", "check_old", "merge", "dedup", "delete", "jellyfin")
+            for name in ("scan_video", "check_old", "merge", "dedup", "delete", "jellyfin",
+                         "pixelation_scan", "release_lookup")
         }
         try:
             Path(path).write_text(
@@ -299,4 +306,6 @@ class AutomationPage(QWidget):
         self._invalidate_preview()
         for name in names:
             getattr(self, "cb_" + name).setChecked(flags[name])
+        for name in ("pixelation_scan", "release_lookup"):
+            getattr(self, "cb_" + name).setChecked(flags.get(name) is True)
         self.log_panel.log("已载入步骤模板；请先只读审计，审阅本次实际目标。")

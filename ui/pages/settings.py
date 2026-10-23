@@ -618,6 +618,12 @@ class SettingsPage(QWidget):
         btn_row.addWidget(reset_btn)
         layout.addLayout(btn_row)
 
+        from ui.release_settings import ReleaseSettings
+        release_group = QGroupBox("版本检索：来源、网络与缓存")
+        release_layout = QVBoxLayout(release_group)
+        self.release_settings = ReleaseSettings(self.cfg)
+        release_layout.addWidget(self.release_settings)
+        layout.addWidget(release_group)
         layout.addStretch()
 
         scroll.setWidget(content)
@@ -1101,12 +1107,15 @@ class SettingsPage(QWidget):
                 raise ValueError("映射必须为remote/local非空的数组")
             if self.spin_th_delete.value() >= self.spin_th_keep.value():
                 raise ValueError("建议删除阈值必须低于可能喜欢阈值")
+            release_values = self.release_settings.validated_values()
         except (ValueError, TypeError) as exc:
             QMessageBox.warning(self, "设置未保存", str(exc))
             return
         import copy
 
         previous_config = copy.deepcopy(vars(self.cfg))
+        for name, value in release_values.items():
+            setattr(self.cfg, name, value)
         self.cfg.jellyfin_user_id = self.combo_user.currentData() or ""
         self.cfg.library_path_mappings = mappings
         self.cfg.merge_ffmpeg_path = self.input_ffmpeg_path.text().strip()

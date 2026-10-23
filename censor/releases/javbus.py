@@ -16,10 +16,11 @@ import re
 import urllib.parse
 
 from censor.numbering import parse_number
-from censor.releases.base import ReleaseSource
+from censor.releases.base import ReleaseSource, same_number
 from censor.releases.html import clean, numbers
 from censor.releases.models import MagnetLink, ReleaseCandidate, ReleaseQuery
 from censor.releases.transport import TransportBlocked, TransportNotFound
+from censor.tag_signals import classify_tag
 
 __all__ = ["JavBusSource"]
 
@@ -39,7 +40,7 @@ class JavBusSource(ReleaseSource):
     title = "JavBus"
     homepage = BASE
     capabilities = ("http", "cookie")
-    version = "1"
+    version = "3"
 
     def search(self, query: ReleaseQuery, *, should_stop=lambda: False,
                log=lambda _m: None, limit: int = 2) -> list[ReleaseCandidate]:
@@ -47,10 +48,13 @@ class JavBusSource(ReleaseSource):
             return []
         number = query.number.strip().upper().replace("_", "-")
         candidate = self._fetch_movie(number, referer=BASE, log=log)
-        if candidate is not None:
+        if candidate is not None and same_number(candidate.number, query.number):
             return [candidate]
         # 有码分支没有，再试无码分支
-        return [c] if (c := self._fetch_movie(f"uncensored/{number}", BASE, log)) else []
+        if should_stop():
+            return []
+        c = self._fetch_movie(f"uncensored/{number}", BASE, log)
+        return [c] if c and same_number(c.number, query.number) else []
 
     # ── 内部 ──
     def _fetch_movie(self, slug: str, referer: str, log) -> ReleaseCandidate | None:
@@ -63,7 +67,7 @@ class JavBusSource(ReleaseSource):
             raise          # 被 Cloudflare 拦是"没查成"，必须如实上报
         except Exception as exc:  # noqa: BLE001 - 超时等算"该站这次没给出"
             log(f"JavBus {slug} 不可用：{exc}")
-            return None
+            raise
         if "識別碼" not in page and "识别码" not in page:
             return None
 
@@ -77,8 +81,7 @@ class JavBusSource(ReleaseSource):
         uncensored = uc == 1
         reason = "JavBus 标记为無碼（uc=1）" if uncensored else ""
         if not uncensored:
-            hits = [w for w in ("無碼", "无码", "無修正", "无修正", "流出", "破解")
-                    if any(w in c for c in categories) or w in maker]
+            hits = [text for text in (*categories, maker) if classify_tag(text)[0]]
             if hits:
                 uncensored, reason = True, f"JavBus 类别/发行商含无码标记（{hits[0]}）"
         if not uncensored:

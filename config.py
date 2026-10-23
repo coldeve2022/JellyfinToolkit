@@ -165,6 +165,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "censor_candidates": 18,
     # 并行检测几部片。纯 I/O + numpy，4~6 一般能吃满机械盘带宽
     "censor_workers": 4,
+    "censor_memory_mb": 512,
+    "censor_verify_replacements": False,
     # 分析分辨率：960x540 是实测的性价比拐点（1280 的管道开销翻倍、精度提升有限）。
     # 再往下调会让马赛克块缩到 8px 以下，直接漏检
     "censor_sample_width": 960,
@@ -195,9 +197,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "release_enabled": True,
     # 启用的检索源（注册名来自 censor/releases/__init__.py），按优先级排序
     "release_sources": ["javdb", "javbus", "supjav"],
-    # Supjav 走"站点索引"检索（它整站挂在 Cloudflare 后面，直连必被拦），
-    # 用搜索引擎的索引查 site:supjav.com <番号>。顺序即尝试顺序
+    # Supjav 默认**站内优先**：用独立浏览器会话读站内搜索与详情页（只取文字元数据）。
+    # 站内被 Cloudflare 拦时退到搜索引擎索引（site:supjav.com <番号>）；
+    # index 模式是旧的"只查索引"兼容行为
     "release_supjav_engines": ["bing", "duckduckgo"],
+    "release_supjav_mode": "auto",
     # 检索走哪个代理。留空 = 自动（环境变量 → Windows 系统代理 → 直连）
     "release_proxy": "",
     # Cloudflare 旁路服务（FlareSolverr 兼容，形如 http://127.0.0.1:8000）。
@@ -209,6 +213,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "release_retries": 2,             # 同一线路重试次数（4xx 不重试）
     "release_min_interval": 1.5,      # 同站两次请求最小间隔（秒），别把站点打挂
     "release_max_requests": 40,       # 单次检索请求上限
+    "release_source_workers": 2,
     "release_detail_limit": 4,        # 每个站点最多抓几个条目的详情
     "release_cache_days": 7,          # 检索结果缓存天数
     # 你**确认「有码」**之后自动去查无码版（算法猜的"疑似有码"不会触发）；
@@ -377,6 +382,7 @@ def _coerce_config(data: dict) -> dict:
         "lada_vram_low": (0.0, 1024.0),
         "censor_frame_samples": (6, 600), "censor_candidates": (1, 20),
         "censor_workers": (1, 16),
+        "censor_memory_mb": (64, 8192),
         "censor_sample_width": (320, 3840), "censor_sample_height": (180, 2160),
         "censor_window": (48, 512), "censor_stride": (16, 512),
         "censor_min_block": (4, 64), "censor_max_block": (8, 128),
@@ -384,6 +390,7 @@ def _coerce_config(data: dict) -> dict:
         "release_timeout": (3.0, 300.0), "release_retries": (0, 5),
         "release_bypass_timeout": (5.0, 300.0),
         "release_min_interval": (0.0, 60.0), "release_max_requests": (1, 400),
+        "release_source_workers": (1, 3),
         "release_detail_limit": (1, 20), "release_cache_days": (0, 3650),
         "censor_min_coverage": (0.0, 1.0), "censor_min_ratio": (1.0, 1000.0),
         "censor_strong_score": (1.0, 1000.0), "censor_review_score": (0.0, 1000.0),
@@ -399,7 +406,10 @@ def _coerce_config(data: dict) -> dict:
     for key, choices in {"library_source": {"auto", "db", "api"},
                          "server_type": {"auto", "jellyfin", "emby"},
                          "engine": {"v1", "v2"}, "theme": {"dark", "light"},
-                         "lada_cpu_affinity": {"auto", "off", "custom"}}.items():
+                         "lada_cpu_affinity": {"auto", "off", "custom"},
+                         # Supjav 三种检索方式：手改成别的值会让 supjav.search
+                         # 走不可预期分支，所以在这里就收回到默认值
+                         "release_supjav_mode": {"auto", "direct", "index"}}.items():
         if out[key] not in choices:
             out[key] = DEFAULT_CONFIG[key]
     return out
@@ -522,6 +532,8 @@ class ToolkitConfig:
     censor_frame_samples: int = DEFAULT_CONFIG["censor_frame_samples"]
     censor_candidates: int = DEFAULT_CONFIG["censor_candidates"]
     censor_workers: int = DEFAULT_CONFIG["censor_workers"]
+    censor_memory_mb: int = DEFAULT_CONFIG["censor_memory_mb"]
+    censor_verify_replacements: bool = DEFAULT_CONFIG["censor_verify_replacements"]
     censor_sample_width: int = DEFAULT_CONFIG["censor_sample_width"]
     censor_sample_height: int = DEFAULT_CONFIG["censor_sample_height"]
     censor_window: int = DEFAULT_CONFIG["censor_window"]
@@ -543,6 +555,7 @@ class ToolkitConfig:
         default_factory=lambda: list(DEFAULT_CONFIG["release_sources"]))
     release_supjav_engines: List[str] = field(
         default_factory=lambda: list(DEFAULT_CONFIG["release_supjav_engines"]))
+    release_supjav_mode: str = DEFAULT_CONFIG["release_supjav_mode"]
     release_proxy: str = DEFAULT_CONFIG["release_proxy"]
     release_cf_bypass_url: str = DEFAULT_CONFIG["release_cf_bypass_url"]
     release_bypass_timeout: float = DEFAULT_CONFIG["release_bypass_timeout"]
@@ -550,6 +563,7 @@ class ToolkitConfig:
     release_retries: int = DEFAULT_CONFIG["release_retries"]
     release_min_interval: float = DEFAULT_CONFIG["release_min_interval"]
     release_max_requests: int = DEFAULT_CONFIG["release_max_requests"]
+    release_source_workers: int = DEFAULT_CONFIG["release_source_workers"]
     release_detail_limit: int = DEFAULT_CONFIG["release_detail_limit"]
     release_cache_days: int = DEFAULT_CONFIG["release_cache_days"]
     release_auto_lookup: bool = DEFAULT_CONFIG["release_auto_lookup"]

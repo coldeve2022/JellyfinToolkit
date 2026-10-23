@@ -27,6 +27,10 @@ import urllib.parse
 import urllib.request
 import zlib
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
+import threading
+from copy import copy, deepcopy
 
 __all__ = [
     "TransportError", "TransportBlocked", "TransportNotFound", "HttpTransport",
@@ -58,6 +62,53 @@ class TransportBlocked(TransportError):
 
 class TransportNotFound(TransportError):
     """站点明确回答"没有这个东西"（404/410）。**重试没有意义。**"""
+
+
+class TransportCancelled(TransportError):
+    """The query was stopped; never retry or interpret as an empty response."""
+
+
+_query = ContextVar("release_query", default=None)
+_site_readers = {}
+_site_readers_lock = threading.Lock()
+
+
+def register_site_reader(host, reader):
+    """Register a local browser reader without exporting its cookies."""
+    if host != 'supjav.com':
+        raise ValueError('Only the Supjav metadata reader is supported')
+    with _site_readers_lock:
+        if reader is None:
+            _site_readers.pop(host, None)
+        else:
+            _site_readers[host] = reader
+
+
+@contextmanager
+def query_scope(limit=40, should_stop=None):
+    """Budget shared by every source/route for one work, isolated per context."""
+    token = _query.set({"count": 0, "limit": max(1, int(limit)), "stop": should_stop,
+                        "lock": threading.Lock()})
+    try:
+        yield
+    finally:
+        _query.reset(token)
+
+
+def _check_stop():
+    state = _query.get()
+    if state and state["stop"] and state["stop"]():
+        raise TransportCancelled("检索已取消")
+
+
+def _pause(seconds):
+    deadline = time.monotonic() + seconds
+    while True:
+        _check_stop()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, .05))
 
 
 #: 设成 1 就彻底禁止联网（CI / 离线环境 / 只想看本地结果时用）
@@ -192,6 +243,9 @@ class HttpTransport:
         self.config = config or TransportConfig()
         self._last_hit: dict[str, float] = {}
         self._requests = 0
+        self._host_lock = threading.Lock()
+        self._host_gates = {}
+        self._request_lock = threading.Lock()
         self.failures: list[str] = []
         #: 已经验证能通的线路会挪到最前面，避免每次都从坏线路开始重试
         self._routes: list[str] = []
@@ -205,6 +259,16 @@ class HttpTransport:
             self.config.proxy = self._routes[0]
 
     # ── 对外 ──
+    def fork(self):
+        """Independent routing state with shared per-host scheduling."""
+        clone = copy(self)
+        clone.config = deepcopy(self.config)
+        clone._routes = list(self._routes)
+        clone.failures = []
+        clone._requests = 0
+        clone._request_lock = threading.Lock()
+        return clone
+
     @property
     def description(self) -> str:
         if self.config.proxy:
@@ -215,28 +279,48 @@ class HttpTransport:
         """取一个文本页面。返回解压后的字符串。"""
         return self.request(url, referer=referer, headers=headers).decode("utf-8", "replace")
 
+    def get_site_text(self, url, **kwargs):
+        with _site_readers_lock:
+            reader = _site_readers.get(urllib.parse.urlsplit(url).hostname)
+        if reader is None:
+            return self.get(url, **kwargs)
+        transport = _BrowserReaderTransport(self.config, reader)
+        transport._last_hit, transport._host_lock, transport._host_gates = self._last_hit, self._host_lock, self._host_gates
+        return transport.get(url, **kwargs)
+
     def request(self, url: str, *, referer: str = "", headers: dict | None = None) -> bytes:
         if offline():
             raise TransportError(f"离线模式（{OFFLINE_ENV}=1）：已禁止联网检索")
-        if self._requests >= self.config.max_requests:
-            raise TransportError(f"单次检索请求数已达上限 {self.config.max_requests}")
         host = urllib.parse.urlsplit(url).netloc
-        self._throttle(host)
-        self._requests += 1
 
         last: Exception | None = None
         routes = [self._routes[0]] if self._pinned and self._routes else (list(self._routes) or [""])
         for route in routes:
             self.config.proxy = route
             for attempt in range(self.config.retries + 1):
+                _check_stop()
+                state = _query.get()
+                limit = min(state["limit"], self.config.max_requests) if state else self.config.max_requests
+                self._throttle(host)
+                _check_stop()
+                # Reserve immediately before actual I/O, after any host wait.
+                with state['lock'] if state else self._request_lock:
+                    count = state['count'] if state else self._requests
+                    if count >= limit:
+                        raise TransportError(f"单次检索请求数已达上限 {limit}")
+                    self._requests += 1
+                    if state:
+                        state['count'] += 1
                 try:
                     body = self._once(url, referer, headers)
-                except (TransportBlocked, TransportNotFound):
+                except (TransportBlocked, TransportNotFound, TransportCancelled):
                     raise
                 except TransportError as exc:
                     last = exc
                     if attempt < self.config.retries:
-                        time.sleep(min(1.5 * (attempt + 1), 5.0))
+                        if state and state["count"] >= limit:
+                            raise TransportError(f"单次检索请求数已达上限 {limit}") from exc
+                        _pause(min(1.5 * (attempt + 1), 5.0))
                     continue
                 # 这条线路通了就钉住，下次直接用
                 index = self._routes.index(route) if route in self._routes else -1
@@ -255,11 +339,21 @@ class HttpTransport:
         gap = self.config.min_interval
         if gap <= 0:
             return
-        last = self._last_hit.get(host, 0.0)
-        wait = gap - (time.monotonic() - last)
-        if wait > 0:
-            time.sleep(wait)
-        self._last_hit[host] = time.monotonic()
+        with self._host_lock:
+            gate = self._host_gates.setdefault(host, threading.Lock())
+        while not gate.acquire(timeout=.05):
+            _check_stop()
+        try:
+            last = self._last_hit.get(host, 0.0)
+            wait = gap - (time.monotonic() - last)
+            if wait > 0:
+                _pause(wait)
+            self._last_hit[host] = time.monotonic()
+        finally:
+            gate.release()
+
+    def query_scope(self, should_stop=None):
+        return query_scope(self.config.max_requests, should_stop)
 
     def _once(self, url: str, referer: str, extra: dict | None = None) -> bytes:
         headers = {
@@ -278,6 +372,8 @@ class HttpTransport:
         if self.config.proxy:
             handlers.append(urllib.request.ProxyHandler(
                 {"http": self.config.proxy, "https": self.config.proxy}))
+        else:
+            handlers.append(urllib.request.ProxyHandler({}))
         opener = urllib.request.build_opener(*handlers)
         try:
             with opener.open(request, timeout=self.config.timeout) as response:
@@ -317,6 +413,20 @@ class HttpTransport:
     def _looks_blocked(body: bytes) -> bool:
         head = body[:4000].decode("utf-8", "replace")
         return any(marker in head for marker in _CHALLENGE_MARKERS)
+
+
+class _BrowserReaderTransport(HttpTransport):
+    def __init__(self, config, reader):
+        super().__init__(config)
+        self.reader = reader
+
+    def _once(self, url, referer, extra=None):
+        state = _query.get()
+        html = self.reader(url, timeout=max(self.config.timeout, self.config.bypass_timeout),
+                           should_stop=state.get('stop') if state else None)
+        if self._looks_blocked(html.encode('utf-8')):
+            raise TransportBlocked('Supjav 浏览器会话仍需人工验证')
+        return html.encode('utf-8')
 
 
 class FlareSolverrTransport(HttpTransport):
@@ -411,12 +521,22 @@ class FallbackTransport(HttpTransport):
         super().__init__(fallback.config)
         self.primary = primary
         self.fallback = fallback
+        for route in (primary, fallback):
+            route._last_hit = self._last_hit
+            route._host_lock = self._host_lock
+            route._host_gates = self._host_gates
         self._consecutive = 0
         self._bypass_off = False
 
     @property
     def description(self) -> str:
         return f"旁路优先，失败回退（{self.primary.description}）"
+
+    def fork(self):
+        clone = super().fork()
+        clone.primary = self.primary.fork()
+        clone.fallback = self.fallback.fork()
+        return clone
 
     def get(self, url: str, *, referer: str = "", headers: dict | None = None) -> str:
         return self._run("get", url, referer, headers)
@@ -430,6 +550,8 @@ class FallbackTransport(HttpTransport):
                 body = getattr(self.primary, method)(url, referer=referer, headers=headers)
                 self._consecutive = 0
                 return body
+            except TransportCancelled:
+                raise
             except TransportBlocked as exc:
                 self._note_failure(f"旁路未能通过挑战：{exc}")
             except TransportError as exc:

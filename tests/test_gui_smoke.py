@@ -127,6 +127,7 @@ def test_censorship_page_classifies(qapp, cfg, tmp_path, qtbot):
 
     page._start_scan([str(tmp_path)])
     qtbot.waitUntil(lambda: page._worker is not None, timeout=3000)
+    qtbot.waitUntil(lambda: page.table.rowCount() == 2, timeout=10000)
     assert _wait_worker(page._worker)
     qapp.processEvents()
 

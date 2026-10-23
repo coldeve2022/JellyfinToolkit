@@ -329,51 +329,10 @@ class MosaicCvDetector(BaseDetector):
         p = MosaicParams.from_config(ctx.cfg)
         sampler = self._sampler(ctx)
         requested = int(ctx.shared.get('requested_samples', ctx.cfg_get("censor_frame_samples", 60)))
-        try:
-            ctx.progress('精确取样', 0, requested)
-            frames = sampler.sample(
-                ctx.path,
-                count=requested,
-                duration=ctx.duration,
-                should_stop=ctx.should_stop,
-                log=ctx.log,
-                progress=lambda done, total: ctx.progress('精确取样', done, total),
-            )
-        finally:
-            ctx.shared["sampled_frames"] = getattr(sampler, "last_sampled_count", 0)
-        if not frames:
-            raise DetectorError("没有可分析的画面帧")
-        ctx.shared["sampled_frames"] = len(frames)
+        candidates, max_score, sampled, unique_frames, independent_strong = self._analyze_stream(ctx, sampler, p, requested)
         ctx.duration = ctx.duration or getattr(sampler, "last_duration", 0.0)
-        # Analyze incrementally to keep progress accurate on cancellation.
-        scored = []
-        maximum = 0.0
-        for frame in frames:
-            if ctx.should_stop():
-                raise SamplingCancelled("画面分析已取消")
-            candidates_one, score = analyze_frames([frame], p, top=1, should_stop=ctx.should_stop)
-            scored.extend(candidates_one)
-            maximum = max(maximum, score)
-            ctx.shared["analyzed_frames"] = ctx.shared.get("analyzed_frames", 0) + 1
-            ctx.progress('分析画面', ctx.shared['analyzed_frames'], len(frames))
-        candidates = select_candidates(
-            scored, gap_seconds=p.candidate_gap_seconds, minimum_score=p.review_score
-        )
-        independent_strong = sum(c.score >= p.strong_score for c in candidates)
-        max_score = maximum
-        candidates = candidates[: int(ctx.cfg_get("censor_candidates", 18))]
-        unique_frames = len({hashlib.sha256(f.data).digest() for f in frames})
-        low_risk = (max_score < p.review_score and len(frames) >= 24
-                    and len(frames) >= .8 * requested
-                    and unique_frames >= 4)
-        # Quiet videos still need an inspectable coverage overview. These zero
-        # score images never contribute to the detection decision.
-        if len(candidates) < 6:
-            overview = [FrameCandidate(f.timestamp, 0., frame_hash=hashlib.sha256(f.data).hexdigest())
-                        for f in frames[::max(1, len(frames) // 6)]]
-            occupied = {c.timestamp for c in candidates}
-            candidates.extend(c for c in overview[:6] if c.timestamp not in occupied)
-        self._write_thumbs(ctx, sampler, candidates, frames)
+        low_risk = (max_score < p.review_score and sampled >= 24
+                    and sampled >= .8 * requested and unique_frames >= 4)
         ctx.shared["candidates"] = candidates
         ctx.shared["visual_score"] = max_score
 
@@ -396,12 +355,66 @@ class MosaicCvDetector(BaseDetector):
                 (
                     f"抽样疑似像素化，独立强证据不足（最高结构分 {max_score:.1f}）"
                     if max_score >= p.review_score
-                    else f"{'抽样低风险' if low_risk else '抽样证据不足'}：{len(frames)}帧、"
+                    else f"{'抽样低风险' if low_risk else '抽样证据不足'}：{sampled}帧、"
                          f"{unique_frames}种画面，最高结构分 {max_score:.1f}；不代表全片不存在"
                 ),
                 review_required=not low_risk,
             )
         ]
+
+    def _analyze_stream(self, ctx, sampler, p, requested):
+        import tempfile
+        method = getattr(sampler, 'iter_samples', None) or sampler.sample
+        frames = method(ctx.path, count=requested, duration=ctx.duration,
+            should_stop=ctx.should_stop, log=ctx.log,
+            progress=lambda done, total: ctx.progress('精确取样', done, total))
+        scored, overview, records, hashes = [], [], {}, set()
+        maximum, sampled = 0., 0
+        ctx.shared['analyzed_frames'] = 0
+        # Only candidate/overview pixels are spooled, never an entire frame list
+        # in memory. The temporary stream is closed on success, failure or stop.
+        with tempfile.TemporaryFile() as spool:
+            try:
+                for frame in frames:
+                    if ctx.should_stop():
+                        raise SamplingCancelled('画面分析已取消')
+                    sampled += 1
+                    ctx.shared['sampled_frames'] = sampled
+                    hits, score = analyze_frames([frame], p, top=1, should_stop=ctx.should_stop)
+                    scored.extend(hits)
+                    maximum = max(maximum, score)
+                    digest = hashlib.sha256(frame.data).hexdigest()
+                    hashes.add(digest)
+                    is_overview = sampled <= 6 or (sampled - 1) % max(1, requested // 6) == 0
+                    if hits or is_overview:
+                        records[frame.timestamp] = (spool.tell(), frame.width, frame.height, frame.channels)
+                        spool.write(frame.data)
+                    if is_overview:
+                        overview.append(FrameCandidate(frame.timestamp, 0., frame_hash=digest))
+                    ctx.shared['analyzed_frames'] = sampled
+                    ctx.progress('分析画面', sampled, requested)
+            finally:
+                if hasattr(frames, 'close'):
+                    frames.close()
+                ctx.shared['sampled_frames'] = max(sampled, getattr(sampler, 'last_sampled_count', 0))
+            if not sampled:
+                raise DetectorError('没有可分析的画面帧')
+            candidates = select_candidates(scored, gap_seconds=p.candidate_gap_seconds,
+                                           minimum_score=p.review_score)
+            strong = sum(c.score >= p.strong_score for c in candidates)
+            candidates = candidates[:int(ctx.cfg_get('censor_candidates', 18))]
+            if len(candidates) < 6:
+                occupied = {c.timestamp for c in candidates}
+                step = max(1, len(overview) // 6)
+                candidates.extend(c for c in overview[::step][:6] if c.timestamp not in occupied)
+            pixels = []
+            for candidate in candidates:
+                offset, width, height, channels = records[candidate.timestamp]
+                spool.seek(offset)
+                pixels.append(SampledFrame(candidate.timestamp, width, height,
+                                           spool.read(width * height * channels), channels))
+            self._write_thumbs(ctx, sampler, candidates, pixels)
+        return candidates, maximum, sampled, len(hashes), strong
 
     # ── 内部 ──
     def _sampler(self, ctx: ProbeContext):
@@ -441,13 +454,13 @@ class MosaicCvDetector(BaseDetector):
             ctx.progress('保存证据图', idx, len(candidates))
             if ctx.should_stop():
                 raise SamplingCancelled("缩略图生成已取消")
-            out = Path(ctx.work_dir) / f"{stem}_{idx:02d}.jpg"
+            out = Path(ctx.work_dir) / f"{stem}_{idx:02d}.png"
             if sampler.write_sampled_thumbnail(
                 by_time[cand.timestamp], out, should_stop=ctx.should_stop, box=cand.box
             ):
                 cand.thumb_path = str(out)
             if cand.box:
-                crop = out.with_name(out.stem + '_crop.jpg')
+                crop = out.with_name(out.stem + '_crop.png')
                 if sampler.write_sampled_thumbnail(by_time[cand.timestamp], crop,
                         should_stop=ctx.should_stop, box=cand.box, crop=True):
                     cand.crop_path = str(crop)

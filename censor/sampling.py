@@ -14,6 +14,8 @@ import subprocess
 import threading
 import tempfile
 import time
+import struct
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -159,6 +161,15 @@ class FrameSampler:
         log: Optional[Callable[[str], None]] = None,
         progress: Optional[Callable[[int, int], None]] = None,
     ) -> list[SampledFrame]:
+        return list(self.iter_samples(path, count, duration=duration, should_stop=should_stop,
+                                      log=log, progress=progress))
+
+    def iter_samples(
+        self, path: str | Path, count: int = 60, *, duration: float = 0.,
+        should_stop: Callable[[], bool] = _never_stop,
+        log: Optional[Callable[[str], None]] = None,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ):
         """Stratified accurate seeks; source keyframes are decoded, never duplicated by fps."""
         if count < 1:
             raise SamplingError('抽帧数量必须为正数')
@@ -168,7 +179,6 @@ class FrameSampler:
         self.last_duration = dur
         self.last_sampled_count = 0
         deadline = time.monotonic() + self.timeout
-        frames = []
         for index in range(count):
             if should_stop():
                 raise SamplingCancelled('抽帧已取消')
@@ -191,15 +201,14 @@ class FrameSampler:
                 frame = self.frame_at(path, earlier, should_stop=should_stop,
                                       timeout=min(60., remaining))
             if frame is not None:
-                frames.append(frame)
-                self.last_sampled_count = len(frames)
+                self.last_sampled_count += 1
+                yield frame
             if log and (index % 10 == 0 or index == count - 1):
-                log(f'精确取样 {index + 1}/{count}，有效 {len(frames)} 帧')
+                log(f'精确取样 {index + 1}/{count}，有效 {self.last_sampled_count} 帧')
             if progress:
                 progress(index + 1, count)
-        if not frames:
+        if not self.last_sampled_count:
             raise SamplingError('抽帧未输出任何完整帧')
-        return frames
 
     def sample_keyframes(
         self,
@@ -403,6 +412,10 @@ class FrameSampler:
         """Encode the exact analyzed pixels, avoiding a second approximate seek."""
         out = Path(out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
+        if out.suffix.lower() == '.png':
+            if should_stop():
+                raise SamplingCancelled('证据图生成已取消')
+            return self._write_png(frame, out, box=box, crop=crop)
         fmt = "gray" if frame.channels == 1 else "rgb24"
         filters = []
         if box:
@@ -441,6 +454,42 @@ class FrameSampler:
         )
         return done.returncode == 0 and out.exists() and out.stat().st_size > 0
 
+    @staticmethod
+    def _write_png(frame, out, *, box=None, crop=False):
+        """Lossless evidence from exact pixels using only the standard library."""
+        w, h, channels = frame.width, frame.height, frame.channels
+        data = frame.data
+        if len(data) != w * h * channels or channels not in (1, 3):
+            raise SamplingError('证据图像素长度或通道无效')
+        if box:
+            x0, y0, x1, y1 = map(int, box)
+            x0, y0 = max(0, min(w - 1, x0)), max(0, min(h - 1, y0))
+            x1, y1 = max(x0 + 1, min(w, x1)), max(y0 + 1, min(h, y1))
+            if crop:
+                data = b''.join(data[(y * w + x0) * channels:(y * w + x1) * channels]
+                                for y in range(y0, y1))
+                w, h = x1 - x0, y1 - y0
+            else:
+                if channels == 1:
+                    rgb = bytearray(w * h * 3)
+                    rgb[0::3] = rgb[1::3] = rgb[2::3] = data
+                    data, channels = rgb, 3
+                else:
+                    data = bytearray(data)
+                for y in range(y0, y1):
+                    for x in (range(x0, x1) if y < y0 + 3 or y >= y1 - 3
+                              else tuple(range(x0, min(x0 + 3, x1))) + tuple(range(max(x0, x1 - 3), x1))):
+                        pos = (y * w + x) * 3
+                        data[pos:pos + 3] = b'\xff\x00\x00'
+        stride = w * channels
+        raw = b''.join(b'\x00' + bytes(data[y * stride:(y + 1) * stride]) for y in range(h))
+        def chunk(kind, payload):
+            return struct.pack('>I', len(payload)) + kind + payload + struct.pack('>I', zlib.crc32(kind + payload))
+        payload = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8,
+                    0 if channels == 1 else 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw, 3)) + chunk(b'IEND', b''))
+        out.write_bytes(payload)
+        return True
+
     def frame_at(self, path: str | Path, timestamp: float, *,
                   should_stop=_never_stop, timeout=60.) -> Optional[SampledFrame]:
         """精确跳到某一秒取一帧（给复核界面做缩略图用）。"""
@@ -451,6 +500,7 @@ class FrameSampler:
             "-nostdin",
             "-ss",
             f"{max(timestamp, 0):.6f}",
+            "-threads", "1",
             "-i",
             str(path),
             "-frames:v",

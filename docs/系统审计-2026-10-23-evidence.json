@@ -1,0 +1,1554 @@
+{
+  "date": "2026-10-23",
+  "offline": true,
+  "modules": [
+    {
+      "path": "auto_orchestrator.py",
+      "lines": 97,
+      "classes": 0,
+      "functions": 2
+    },
+    {
+      "path": "auto_pipeline.py",
+      "lines": 70,
+      "classes": 0,
+      "functions": 2
+    },
+    {
+      "path": "automation/__init__.py",
+      "lines": 2,
+      "classes": 0,
+      "functions": 0
+    },
+    {
+      "path": "automation/orchestrator.py",
+      "lines": 484,
+      "classes": 0,
+      "functions": 15
+    },
+    {
+      "path": "automation/pipeline.py",
+      "lines": 181,
+      "classes": 0,
+      "functions": 7
+    },
+    {
+      "path": "automation/plans.py",
+      "lines": 120,
+      "classes": 0,
+      "functions": 7
+    },
+    {
+      "path": "censor/__init__.py",
+      "lines": 82,
+      "classes": 0,
+      "functions": 1
+    },
+    {
+      "path": "censor/base.py",
+      "lines": 117,
+      "classes": 3,
+      "functions": 11
+    },
+    {
+      "path": "censor/candidates.py",
+      "lines": 27,
+      "classes": 0,
+      "functions": 1
+    },
+    {
+      "path": "censor/evaluation.py",
+      "lines": 181,
+      "classes": 1,
+      "functions": 4
+    },
+    {
+      "path": "censor/file_signals.py",
+      "lines": 152,
+      "classes": 4,
+      "functions": 6
+    },
+    {
+      "path": "censor/fusion.py",
+      "lines": 132,
+      "classes": 1,
+      "functions": 3
+    },
+    {
+      "path": "censor/identity.py",
+      "lines": 39,
+      "classes": 1,
+      "functions": 2
+    },
+    {
+      "path": "censor/jobs.py",
+      "lines": 180,
+      "classes": 1,
+      "functions": 19
+    },
+    {
+      "path": "censor/models.py",
+      "lines": 157,
+      "classes": 7,
+      "functions": 11
+    },
+    {
+      "path": "censor/mosaic_cv.py",
+      "lines": 453,
+      "classes": 3,
+      "functions": 16
+    },
+    {
+      "path": "censor/numbering.py",
+      "lines": 227,
+      "classes": 1,
+      "functions": 11
+    },
+    {
+      "path": "censor/registry.py",
+      "lines": 131,
+      "classes": 2,
+      "functions": 14
+    },
+    {
+      "path": "censor/releases/__init__.py",
+      "lines": 67,
+      "classes": 0,
+      "functions": 1
+    },
+    {
+      "path": "censor/releases/base.py",
+      "lines": 81,
+      "classes": 1,
+      "functions": 6
+    },
+    {
+      "path": "censor/releases/html.py",
+      "lines": 52,
+      "classes": 0,
+      "functions": 5
+    },
+    {
+      "path": "censor/releases/index_search.py",
+      "lines": 219,
+      "classes": 4,
+      "functions": 12
+    },
+    {
+      "path": "censor/releases/javbus.py",
+      "lines": 168,
+      "classes": 1,
+      "functions": 8
+    },
+    {
+      "path": "censor/releases/javdb.py",
+      "lines": 219,
+      "classes": 1,
+      "functions": 10
+    },
+    {
+      "path": "censor/releases/models.py",
+      "lines": 192,
+      "classes": 5,
+      "functions": 15
+    },
+    {
+      "path": "censor/releases/service.py",
+      "lines": 280,
+      "classes": 2,
+      "functions": 16
+    },
+    {
+      "path": "censor/releases/store.py",
+      "lines": 275,
+      "classes": 2,
+      "functions": 19
+    },
+    {
+      "path": "censor/releases/supjav.py",
+      "lines": 140,
+      "classes": 1,
+      "functions": 5
+    },
+    {
+      "path": "censor/releases/transport.py",
+      "lines": 462,
+      "classes": 7,
+      "functions": 25
+    },
+    {
+      "path": "censor/review_route.py",
+      "lines": 188,
+      "classes": 2,
+      "functions": 10
+    },
+    {
+      "path": "censor/sampling.py",
+      "lines": 522,
+      "classes": 5,
+      "functions": 17
+    },
+    {
+      "path": "censor/service.py",
+      "lines": 466,
+      "classes": 2,
+      "functions": 18
+    },
+    {
+      "path": "censor/store.py",
+      "lines": 479,
+      "classes": 2,
+      "functions": 22
+    },
+    {
+      "path": "censor/tag_signals.py",
+      "lines": 33,
+      "classes": 0,
+      "functions": 1
+    },
+    {
+      "path": "config.py",
+      "lines": 627,
+      "classes": 1,
+      "functions": 13
+    },
+    {
+      "path": "main.py",
+      "lines": 250,
+      "classes": 0,
+      "functions": 9
+    },
+    {
+      "path": "ui/__init__.py",
+      "lines": 1,
+      "classes": 0,
+      "functions": 0
+    },
+    {
+      "path": "ui/censor_gallery.py",
+      "lines": 224,
+      "classes": 3,
+      "functions": 19
+    },
+    {
+      "path": "ui/censor_release.py",
+      "lines": 343,
+      "classes": 3,
+      "functions": 20
+    },
+    {
+      "path": "ui/censor_scan.py",
+      "lines": 188,
+      "classes": 1,
+      "functions": 9
+    },
+    {
+      "path": "ui/layout.py",
+      "lines": 136,
+      "classes": 0,
+      "functions": 5
+    },
+    {
+      "path": "ui/main_window.py",
+      "lines": 381,
+      "classes": 2,
+      "functions": 14
+    },
+    {
+      "path": "ui/pages/__init__.py",
+      "lines": 1,
+      "classes": 0,
+      "functions": 0
+    },
+    {
+      "path": "ui/pages/automation.py",
+      "lines": 302,
+      "classes": 1,
+      "functions": 12
+    },
+    {
+      "path": "ui/pages/censor_replace.py",
+      "lines": 390,
+      "classes": 2,
+      "functions": 23
+    },
+    {
+      "path": "ui/pages/censorship.py",
+      "lines": 1018,
+      "classes": 2,
+      "functions": 57
+    },
+    {
+      "path": "ui/pages/db_tools.py",
+      "lines": 304,
+      "classes": 2,
+      "functions": 13
+    },
+    {
+      "path": "ui/pages/dedup.py",
+      "lines": 589,
+      "classes": 1,
+      "functions": 25
+    },
+    {
+      "path": "ui/pages/delete.py",
+      "lines": 562,
+      "classes": 1,
+      "functions": 23
+    },
+    {
+      "path": "ui/pages/insight.py",
+      "lines": 386,
+      "classes": 1,
+      "functions": 14
+    },
+    {
+      "path": "ui/pages/lada.py",
+      "lines": 768,
+      "classes": 2,
+      "functions": 45
+    },
+    {
+      "path": "ui/pages/merge.py",
+      "lines": 1726,
+      "classes": 3,
+      "functions": 85
+    },
+    {
+      "path": "ui/pages/nfo_fix.py",
+      "lines": 304,
+      "classes": 2,
+      "functions": 18
+    },
+    {
+      "path": "ui/pages/onboarding.py",
+      "lines": 215,
+      "classes": 1,
+      "functions": 9
+    },
+    {
+      "path": "ui/pages/profile.py",
+      "lines": 624,
+      "classes": 1,
+      "functions": 27
+    },
+    {
+      "path": "ui/pages/repair.py",
+      "lines": 575,
+      "classes": 1,
+      "functions": 19
+    },
+    {
+      "path": "ui/pages/replace.py",
+      "lines": 325,
+      "classes": 2,
+      "functions": 17
+    },
+    {
+      "path": "ui/pages/review.py",
+      "lines": 1491,
+      "classes": 2,
+      "functions": 66
+    },
+    {
+      "path": "ui/pages/settings.py",
+      "lines": 1344,
+      "classes": 1,
+      "functions": 49
+    },
+    {
+      "path": "ui/pages/subtitle.py",
+      "lines": 324,
+      "classes": 1,
+      "functions": 22
+    },
+    {
+      "path": "ui/pages/subtitle_gen.py",
+      "lines": 726,
+      "classes": 2,
+      "functions": 40
+    },
+    {
+      "path": "ui/pages/tasks.py",
+      "lines": 329,
+      "classes": 1,
+      "functions": 16
+    },
+    {
+      "path": "ui/review_workspace.py",
+      "lines": 321,
+      "classes": 3,
+      "functions": 13
+    },
+    {
+      "path": "ui/scope_selector.py",
+      "lines": 216,
+      "classes": 1,
+      "functions": 13
+    },
+    {
+      "path": "ui/services.py",
+      "lines": 638,
+      "classes": 4,
+      "functions": 33
+    },
+    {
+      "path": "ui/styles.py",
+      "lines": 364,
+      "classes": 0,
+      "functions": 3
+    },
+    {
+      "path": "ui/table_tools.py",
+      "lines": 63,
+      "classes": 2,
+      "functions": 5
+    },
+    {
+      "path": "ui/theme.py",
+      "lines": 100,
+      "classes": 0,
+      "functions": 5
+    },
+    {
+      "path": "ui/widgets.py",
+      "lines": 802,
+      "classes": 13,
+      "functions": 58
+    },
+    {
+      "path": "utils/__init__.py",
+      "lines": 1,
+      "classes": 0,
+      "functions": 0
+    },
+    {
+      "path": "utils/actor_clean.py",
+      "lines": 184,
+      "classes": 0,
+      "functions": 8
+    },
+    {
+      "path": "utils/ai_profile.py",
+      "lines": 199,
+      "classes": 1,
+      "functions": 10
+    },
+    {
+      "path": "utils/ai_results.py",
+      "lines": 61,
+      "classes": 0,
+      "functions": 3
+    },
+    {
+      "path": "utils/ai_scoring.py",
+      "lines": 194,
+      "classes": 1,
+      "functions": 12
+    },
+    {
+      "path": "utils/censor_tags.py",
+      "lines": 151,
+      "classes": 0,
+      "functions": 6
+    },
+    {
+      "path": "utils/console.py",
+      "lines": 49,
+      "classes": 0,
+      "functions": 2
+    },
+    {
+      "path": "utils/cpu_affinity.py",
+      "lines": 230,
+      "classes": 1,
+      "functions": 8
+    },
+    {
+      "path": "utils/deck_state.py",
+      "lines": 111,
+      "classes": 1,
+      "functions": 11
+    },
+    {
+      "path": "utils/file_ops.py",
+      "lines": 439,
+      "classes": 1,
+      "functions": 16
+    },
+    {
+      "path": "utils/file_scan.py",
+      "lines": 98,
+      "classes": 0,
+      "functions": 4
+    },
+    {
+      "path": "utils/fonts.py",
+      "lines": 92,
+      "classes": 0,
+      "functions": 5
+    },
+    {
+      "path": "utils/gpu.py",
+      "lines": 145,
+      "classes": 1,
+      "functions": 8
+    },
+    {
+      "path": "utils/jellyfin_api.py",
+      "lines": 392,
+      "classes": 1,
+      "functions": 20
+    },
+    {
+      "path": "utils/labels.py",
+      "lines": 161,
+      "classes": 1,
+      "functions": 15
+    },
+    {
+      "path": "utils/lada_tool.py",
+      "lines": 560,
+      "classes": 0,
+      "functions": 20
+    },
+    {
+      "path": "utils/library.py",
+      "lines": 1101,
+      "classes": 2,
+      "functions": 32
+    },
+    {
+      "path": "utils/library_api.py",
+      "lines": 334,
+      "classes": 1,
+      "functions": 12
+    },
+    {
+      "path": "utils/library_scope.py",
+      "lines": 181,
+      "classes": 0,
+      "functions": 9
+    },
+    {
+      "path": "utils/library_source.py",
+      "lines": 309,
+      "classes": 1,
+      "functions": 10
+    },
+    {
+      "path": "utils/local_ai.py",
+      "lines": 374,
+      "classes": 2,
+      "functions": 14
+    },
+    {
+      "path": "utils/media_filter.py",
+      "lines": 224,
+      "classes": 2,
+      "functions": 15
+    },
+    {
+      "path": "utils/media_server.py",
+      "lines": 311,
+      "classes": 1,
+      "functions": 13
+    },
+    {
+      "path": "utils/media_types.py",
+      "lines": 104,
+      "classes": 0,
+      "functions": 7
+    },
+    {
+      "path": "utils/merge.py",
+      "lines": 1317,
+      "classes": 4,
+      "functions": 49
+    },
+    {
+      "path": "utils/merge_archive.py",
+      "lines": 525,
+      "classes": 0,
+      "functions": 20
+    },
+    {
+      "path": "utils/merge_executor.py",
+      "lines": 343,
+      "classes": 0,
+      "functions": 6
+    },
+    {
+      "path": "utils/merge_repair.py",
+      "lines": 355,
+      "classes": 0,
+      "functions": 8
+    },
+    {
+      "path": "utils/metadata_labels.py",
+      "lines": 28,
+      "classes": 0,
+      "functions": 1
+    },
+    {
+      "path": "utils/naming.py",
+      "lines": 74,
+      "classes": 0,
+      "functions": 2
+    },
+    {
+      "path": "utils/nfo.py",
+      "lines": 244,
+      "classes": 0,
+      "functions": 8
+    },
+    {
+      "path": "utils/nfo_source.py",
+      "lines": 80,
+      "classes": 0,
+      "functions": 4
+    },
+    {
+      "path": "utils/proc.py",
+      "lines": 364,
+      "classes": 2,
+      "functions": 9
+    },
+    {
+      "path": "utils/profile.py",
+      "lines": 265,
+      "classes": 0,
+      "functions": 9
+    },
+    {
+      "path": "utils/replacement.py",
+      "lines": 116,
+      "classes": 0,
+      "functions": 4
+    },
+    {
+      "path": "utils/review_facets.py",
+      "lines": 78,
+      "classes": 2,
+      "functions": 4
+    },
+    {
+      "path": "utils/scoring.py",
+      "lines": 610,
+      "classes": 1,
+      "functions": 29
+    },
+    {
+      "path": "utils/scoring_service.py",
+      "lines": 64,
+      "classes": 0,
+      "functions": 2
+    },
+    {
+      "path": "utils/scoring_v2.py",
+      "lines": 404,
+      "classes": 0,
+      "functions": 12
+    },
+    {
+      "path": "utils/state_context.py",
+      "lines": 184,
+      "classes": 1,
+      "functions": 19
+    },
+    {
+      "path": "utils/subtitle_clean.py",
+      "lines": 548,
+      "classes": 1,
+      "functions": 23
+    },
+    {
+      "path": "utils/tag_norm.py",
+      "lines": 145,
+      "classes": 0,
+      "functions": 5
+    },
+    {
+      "path": "utils/tool_search.py",
+      "lines": 209,
+      "classes": 0,
+      "functions": 8
+    },
+    {
+      "path": "utils/tools.py",
+      "lines": 461,
+      "classes": 0,
+      "functions": 29
+    },
+    {
+      "path": "utils/trash.py",
+      "lines": 96,
+      "classes": 1,
+      "functions": 10
+    },
+    {
+      "path": "utils/video_health.py",
+      "lines": 203,
+      "classes": 0,
+      "functions": 3
+    },
+    {
+      "path": "utils/whisper_tool.py",
+      "lines": 576,
+      "classes": 0,
+      "functions": 21
+    },
+    {
+      "path": "workers/__init__.py",
+      "lines": 1,
+      "classes": 0,
+      "functions": 0
+    },
+    {
+      "path": "workers/ai.py",
+      "lines": 166,
+      "classes": 5,
+      "functions": 12
+    },
+    {
+      "path": "workers/ai_score.py",
+      "lines": 88,
+      "classes": 1,
+      "functions": 3
+    },
+    {
+      "path": "workers/automation.py",
+      "lines": 45,
+      "classes": 1,
+      "functions": 3
+    },
+    {
+      "path": "workers/database.py",
+      "lines": 266,
+      "classes": 1,
+      "functions": 9
+    },
+    {
+      "path": "workers/ffmpeg.py",
+      "lines": 436,
+      "classes": 2,
+      "functions": 26
+    },
+    {
+      "path": "workers/ingest.py",
+      "lines": 54,
+      "classes": 1,
+      "functions": 3
+    },
+    {
+      "path": "workers/jellyfin_sync.py",
+      "lines": 77,
+      "classes": 4,
+      "functions": 8
+    },
+    {
+      "path": "workers/lada_restore.py",
+      "lines": 289,
+      "classes": 2,
+      "functions": 12
+    },
+    {
+      "path": "workers/merge.py",
+      "lines": 165,
+      "classes": 2,
+      "functions": 9
+    },
+    {
+      "path": "workers/merge_archive.py",
+      "lines": 132,
+      "classes": 3,
+      "functions": 9
+    },
+    {
+      "path": "workers/merge_repair.py",
+      "lines": 230,
+      "classes": 2,
+      "functions": 8
+    },
+    {
+      "path": "workers/scanner.py",
+      "lines": 115,
+      "classes": 1,
+      "functions": 8
+    },
+    {
+      "path": "workers/scorer.py",
+      "lines": 80,
+      "classes": 2,
+      "functions": 7
+    },
+    {
+      "path": "workers/trash.py",
+      "lines": 53,
+      "classes": 1,
+      "functions": 3
+    },
+    {
+      "path": "workers/whisper_gen.py",
+      "lines": 230,
+      "classes": 1,
+      "functions": 7
+    }
+  ],
+  "observations": [
+    {
+      "id": "R01",
+      "description": "Request budget persists across independent lookups",
+      "sources": [
+        {
+          "fake": "命中 1 条"
+        },
+        {
+          "fake": "命中 1 条"
+        },
+        {
+          "fake": "失败：单次检索请求数已达上限 2"
+        }
+      ],
+      "requests": 2
+    },
+    {
+      "id": "R02",
+      "description": "Cancellation replaces successful cache and completes pending queue",
+      "result": "unknown",
+      "note": "站点无此番号",
+      "sources": {
+        "fake": "已取消"
+      },
+      "cached": "unknown",
+      "queue_stats": {
+        "done": 1
+      }
+    },
+    {
+      "id": "R03",
+      "description": "Transient failure is reused as a fresh report",
+      "attempts": 1,
+      "first": "站点请求失败，未能查证",
+      "second_elapsed": 0.0
+    },
+    {
+      "id": "R04",
+      "description": "Replacement list includes confirmation for an older file version",
+      "current_label": null,
+      "confirmed_count": 1
+    },
+    {
+      "id": "R05",
+      "description": "Disabled release feature still executes transport",
+      "requests": 1
+    },
+    {
+      "id": "R06",
+      "description": "Title-only evidence receives hard confirmation in JavDB parser",
+      "confidence": 0.9,
+      "reason": "标题含无码标记（Uncensored）",
+      "availability": "confirmed"
+    },
+    {
+      "id": "R07",
+      "description": "Changing worker count invalidates completed analysis",
+      "status": "completed",
+      "before": true,
+      "after": false
+    },
+    {
+      "id": "R15",
+      "description": "JavBus accepts a different identifier from the returned page",
+      "requested": "DEMO-999",
+      "returned": [
+        "PIYO-170"
+      ]
+    },
+    {
+      "id": "R16",
+      "description": "Supjav identifier fallback has no left boundary",
+      "title": "XNCRA-026",
+      "wanted": "NCRA026",
+      "matched": true
+    },
+    {
+      "id": "R17",
+      "description": "Structurally invalid JSON escapes cache loader",
+      "value": null,
+      "error": "AttributeError: 'list' object has no attribute 'get'"
+    },
+    {
+      "id": "R18",
+      "description": "Title negation is ignored by release keyword classifiers",
+      "javdb": [
+        true,
+        "标题含无码标记（Uncensored）"
+      ],
+      "supjav": [
+        true,
+        0.85,
+        "站点标题含无码/破解标记（uncensored）"
+      ]
+    },
+    {
+      "id": "R19",
+      "description": "Source construction errors are reported as nonexistent identifiers",
+      "sources": {},
+      "note": "站点无此番号"
+    },
+    {
+      "id": "R20",
+      "description": "Service keeps previously resolved tools after resolver configuration changes",
+      "original_tools": [
+        "old/ffmpeg",
+        "old/ffprobe"
+      ],
+      "after_change": [
+        "old/ffmpeg",
+        "old/ffprobe"
+      ]
+    },
+    {
+      "id": "R08",
+      "description": "Replacement page has no event or show-time refresh hook",
+      "has_show_event_override": false
+    },
+    {
+      "id": "R09",
+      "description": "Lookup-new button skips expired reports",
+      "targets_started": [],
+      "summary": "都已查过 —— 要重查请用「全部重查」"
+    },
+    {
+      "id": "R10",
+      "description": "Sorting while replacing row cells",
+      "checks": 128,
+      "mismatches": 28,
+      "examples": [
+        {
+          "states": [
+            "confirmed",
+            "confirmed",
+            "likely"
+          ],
+          "order": "DescendingOrder",
+          "actual": {
+            "B123": "2",
+            "A123": "7"
+          }
+        },
+        {
+          "states": [
+            "confirmed",
+            "confirmed",
+            "none"
+          ],
+          "order": "DescendingOrder",
+          "actual": {
+            "B123": "2",
+            "A123": "7"
+          }
+        },
+        {
+          "states": [
+            "confirmed",
+            "confirmed",
+            "unknown"
+          ],
+          "order": "DescendingOrder",
+          "actual": {
+            "B123": "2",
+            "A123": "7"
+          }
+        }
+      ]
+    },
+    {
+      "id": "R11",
+      "description": "Reopening replacement page does not update changed manual labels",
+      "before": 1,
+      "after": 1,
+      "current_store_count": 0
+    },
+    {
+      "id": "R12",
+      "description": "Candidate index retains previously displayed reports",
+      "visible_rows": 1,
+      "retained_candidates": 10
+    },
+    {
+      "id": "R13",
+      "description": "Copy-magnet action offers a censored candidate as fallback",
+      "availability": "none",
+      "button_enabled": true,
+      "fallback_uncensored": false
+    },
+    {
+      "id": "R14",
+      "description": "Replacement layout minimum size at desktop content width",
+      "requested_width": 900,
+      "actual_width": 900,
+      "minimum_hint": 574
+    }
+  ],
+  "baseline": {
+    "commit": "a4e2b3b",
+    "version": "3.19.3",
+    "ruff": "passed",
+    "pytest_sandbox": {
+      "passed": 1260,
+      "skipped": 1,
+      "failed": 1,
+      "seconds": 93.74
+    },
+    "pytest_host_loopback": {
+      "passed": 1,
+      "seconds": 0.41
+    },
+    "combined_passed": 1261,
+    "combined_skipped": 1,
+    "product_modified": false
+  },
+  "synthetic_benchmark": {
+    "scope": "synthetic frame-level mechanism benchmark; not real-video accuracy",
+    "python_version": "3.13.7",
+    "platform": "Windows",
+    "algorithm_version": "3",
+    "params": {
+      "window": 160,
+      "stride": 120,
+      "min_block": 6,
+      "max_block": 56,
+      "edge_threshold": 1.5,
+      "min_step": 2.0,
+      "row_step": 2,
+      "min_chunks": 5,
+      "min_coverage": 0.6,
+      "min_ratio": 3.0,
+      "ratio_cap": 40.0,
+      "strong_score": 32.0,
+      "review_score": 6.0,
+      "windows": [
+        80,
+        160,
+        240
+      ],
+      "candidate_gap_seconds": 10.0,
+      "min_phase_consistency": 0.7
+    },
+    "sample_count": 38,
+    "ambiguous_count": 4,
+    "confusion": {
+      "tp": 22,
+      "tn": 10,
+      "fp": 0,
+      "fn": 2
+    },
+    "groups": {
+      "development/texture": {
+        "count": 1,
+        "detected": 0
+      },
+      "development/gradient": {
+        "count": 1,
+        "detected": 0
+      },
+      "development/text": {
+        "count": 1,
+        "detected": 0
+      },
+      "development/stripes": {
+        "count": 1,
+        "detected": 0
+      },
+      "development/checkerboard": {
+        "count": 1,
+        "detected": 0
+      },
+      "development/letterbox": {
+        "count": 1,
+        "detected": 0
+      },
+      "development/low_resolution": {
+        "count": 1,
+        "detected": 1
+      },
+      "development/local_pixelation": {
+        "count": 12,
+        "detected": 11
+      },
+      "validation/texture": {
+        "count": 1,
+        "detected": 0
+      },
+      "validation/gradient": {
+        "count": 1,
+        "detected": 0
+      },
+      "validation/text": {
+        "count": 1,
+        "detected": 0
+      },
+      "validation/stripes": {
+        "count": 1,
+        "detected": 0
+      },
+      "validation/checkerboard": {
+        "count": 1,
+        "detected": 0
+      },
+      "validation/letterbox": {
+        "count": 1,
+        "detected": 0
+      },
+      "validation/low_resolution": {
+        "count": 1,
+        "detected": 1
+      },
+      "validation/local_pixelation": {
+        "count": 12,
+        "detected": 11
+      }
+    },
+    "rows": [
+      {
+        "case_id": "development/texture",
+        "category": "texture",
+        "split": "development",
+        "seed": 17,
+        "expected": false,
+        "detected": false,
+        "score": 0.0,
+        "block_size": 0,
+        "elapsed_seconds": 0.01234909999766387
+      },
+      {
+        "case_id": "development/gradient",
+        "category": "gradient",
+        "split": "development",
+        "seed": 17,
+        "expected": false,
+        "detected": false,
+        "score": 0.0,
+        "block_size": 0,
+        "elapsed_seconds": 0.01055949999135919
+      },
+      {
+        "case_id": "development/text",
+        "category": "text",
+        "split": "development",
+        "seed": 17,
+        "expected": false,
+        "detected": false,
+        "score": 5.399999642372109,
+        "block_size": 8,
+        "elapsed_seconds": 0.01371960001415573
+      },
+      {
+        "case_id": "development/stripes",
+        "category": "stripes",
+        "split": "development",
+        "seed": 17,
+        "expected": false,
+        "detected": false,
+        "score": 0.0,
+        "block_size": 0,
+        "elapsed_seconds": 0.0202104999916628
+      },
+      {
+        "case_id": "development/checkerboard",
+        "category": "checkerboard",
+        "split": "development",
+        "seed": 17,
+        "expected": null,
+        "detected": false,
+        "score": 6.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.024138799984939396
+      },
+      {
+        "case_id": "development/letterbox",
+        "category": "letterbox",
+        "split": "development",
+        "seed": 17,
+        "expected": false,
+        "detected": false,
+        "score": 0.0,
+        "block_size": 0,
+        "elapsed_seconds": 0.0081814999866765
+      },
+      {
+        "case_id": "development/low_resolution",
+        "category": "low_resolution",
+        "split": "development",
+        "seed": 17,
+        "expected": null,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.026057500013848767
+      },
+      {
+        "case_id": "development/local_pixelation/8/edge",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.01603690002229996
+      },
+      {
+        "case_id": "development/local_pixelation/8/edge/linear075",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 6,
+        "elapsed_seconds": 0.008078999991994351
+      },
+      {
+        "case_id": "development/local_pixelation/8/center",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.012888900004327297
+      },
+      {
+        "case_id": "development/local_pixelation/8/center/linear075",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": true,
+        "score": 36.85439586639404,
+        "block_size": 6,
+        "elapsed_seconds": 0.006353300006594509
+      },
+      {
+        "case_id": "development/local_pixelation/16/edge",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.013932100002421066
+      },
+      {
+        "case_id": "development/local_pixelation/16/edge/linear075",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 12,
+        "elapsed_seconds": 0.008633700024802238
+      },
+      {
+        "case_id": "development/local_pixelation/16/center",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.012935500009916723
+      },
+      {
+        "case_id": "development/local_pixelation/16/center/linear075",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 12,
+        "elapsed_seconds": 0.006040599982952699
+      },
+      {
+        "case_id": "development/local_pixelation/24/edge",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 12,
+        "elapsed_seconds": 0.01511519998894073
+      },
+      {
+        "case_id": "development/local_pixelation/24/edge/linear075",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 9,
+        "elapsed_seconds": 0.006119600002421066
+      },
+      {
+        "case_id": "development/local_pixelation/24/center",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 12,
+        "elapsed_seconds": 0.013872599985916167
+      },
+      {
+        "case_id": "development/local_pixelation/24/center/linear075",
+        "category": "local_pixelation",
+        "split": "development",
+        "seed": 17,
+        "expected": true,
+        "detected": false,
+        "score": 16.36935315896335,
+        "block_size": 9,
+        "elapsed_seconds": 0.006708000000799075
+      },
+      {
+        "case_id": "validation/texture",
+        "category": "texture",
+        "split": "validation",
+        "seed": 104729,
+        "expected": false,
+        "detected": false,
+        "score": 0.0,
+        "block_size": 0,
+        "elapsed_seconds": 0.010875899984966964
+      },
+      {
+        "case_id": "validation/gradient",
+        "category": "gradient",
+        "split": "validation",
+        "seed": 104729,
+        "expected": false,
+        "detected": false,
+        "score": 0.0,
+        "block_size": 0,
+        "elapsed_seconds": 0.010068300005514175
+      },
+      {
+        "case_id": "validation/text",
+        "category": "text",
+        "split": "validation",
+        "seed": 104729,
+        "expected": false,
+        "detected": false,
+        "score": 5.399999642372109,
+        "block_size": 8,
+        "elapsed_seconds": 0.002532599988626316
+      },
+      {
+        "case_id": "validation/stripes",
+        "category": "stripes",
+        "split": "validation",
+        "seed": 104729,
+        "expected": false,
+        "detected": false,
+        "score": 0.0,
+        "block_size": 0,
+        "elapsed_seconds": 0.01890520000597462
+      },
+      {
+        "case_id": "validation/checkerboard",
+        "category": "checkerboard",
+        "split": "validation",
+        "seed": 104729,
+        "expected": null,
+        "detected": false,
+        "score": 6.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.025732200010679662
+      },
+      {
+        "case_id": "validation/letterbox",
+        "category": "letterbox",
+        "split": "validation",
+        "seed": 104729,
+        "expected": false,
+        "detected": false,
+        "score": 0.0,
+        "block_size": 0,
+        "elapsed_seconds": 0.007800799998221919
+      },
+      {
+        "case_id": "validation/low_resolution",
+        "category": "low_resolution",
+        "split": "validation",
+        "seed": 104729,
+        "expected": null,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.026733300008345395
+      },
+      {
+        "case_id": "validation/local_pixelation/8/edge",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.014338500011945143
+      },
+      {
+        "case_id": "validation/local_pixelation/8/edge/linear075",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 6,
+        "elapsed_seconds": 0.0074899999890476465
+      },
+      {
+        "case_id": "validation/local_pixelation/8/center",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.01239219997660257
+      },
+      {
+        "case_id": "validation/local_pixelation/8/center/linear075",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": true,
+        "score": 37.07625865936279,
+        "block_size": 6,
+        "elapsed_seconds": 0.006087699992349371
+      },
+      {
+        "case_id": "validation/local_pixelation/16/edge",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.014406600006623194
+      },
+      {
+        "case_id": "validation/local_pixelation/16/edge/linear075",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 12,
+        "elapsed_seconds": 0.007582299993373454
+      },
+      {
+        "case_id": "validation/local_pixelation/16/center",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 8,
+        "elapsed_seconds": 0.012961600004928187
+      },
+      {
+        "case_id": "validation/local_pixelation/16/center/linear075",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 12,
+        "elapsed_seconds": 0.0065842999902088195
+      },
+      {
+        "case_id": "validation/local_pixelation/24/edge",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 12,
+        "elapsed_seconds": 0.015387199993710965
+      },
+      {
+        "case_id": "validation/local_pixelation/24/edge/linear075",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 9,
+        "elapsed_seconds": 0.005715899984352291
+      },
+      {
+        "case_id": "validation/local_pixelation/24/center",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": true,
+        "score": 40.0,
+        "block_size": 12,
+        "elapsed_seconds": 0.013393799978075549
+      },
+      {
+        "case_id": "validation/local_pixelation/24/center/linear075",
+        "category": "local_pixelation",
+        "split": "validation",
+        "seed": 104729,
+        "expected": true,
+        "detected": false,
+        "score": 14.285683291298255,
+        "block_size": 9,
+        "elapsed_seconds": 0.0066383999946992844
+      }
+    ],
+    "performance": {
+      "python": "3.13.7",
+      "cpu_count": 20,
+      "noise_1280x720_runs": [
+        0.17564659999334253,
+        0.17569830000866205,
+        0.18738190000294708
+      ],
+      "noise_1280x720_median_seconds": 0.17569830000866205,
+      "default_raw_frame_buffer_bytes": 55296000,
+      "note": "Synthetic single-frame timings; not real-library throughput or accuracy.",
+      "sampling": {
+        "synthetic_duration_seconds": 8,
+        "samples": 24,
+        "elapsed_seconds": 3.5026205999893136,
+        "subprocess_count": 25,
+        "sampling_threads_explicit": false
+      }
+    }
+  }
+}
