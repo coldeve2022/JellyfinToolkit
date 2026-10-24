@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -191,22 +192,62 @@ class StoreStats:
         )
 
 
+def open_sqlite(db_path, *, timeout: float = 15.0, attempts: int = 3,
+                probe: bool = True):
+    """打开 SQLite 连接，并对 Windows 上的"瞬时可写性"做兜底。
+
+    为什么需要它：杀毒软件/备份工具的实时扫描会短暂锁住 db 与 -wal 文件，
+    SQLite 会把这种状态报成 ``attempt to write a readonly database``。
+    对使用者来说就是"偶尔有几个视频保存失败"，其实重试一次就好。
+
+    两件事：
+    1. ``PRAGMA journal_mode=WAL`` 失败（网络盘、部分安全软件）时退回默认日志模式；
+    2. 连接阶段用一次 ``BEGIN IMMEDIATE`` 探真实写权限 —— 只读会在这里暴露，
+       而不是等用户代码写到一半才炸。探针失败只重试"打开"这一步，不重放事务体，
+       所以不会造成重复写入。
+    """
+    last: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        conn = sqlite3.connect(str(db_path), timeout=timeout)
+        try:
+            conn.execute("PRAGMA busy_timeout=15000")
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                try:
+                    conn.execute("PRAGMA journal_mode=DELETE")
+                except sqlite3.OperationalError:
+                    pass
+            if probe:
+                # 只在初始化时探一次写权限：每次连接都做会明显拖慢批量扫描
+                conn.execute("BEGIN IMMEDIATE")
+                conn.rollback()
+            return conn
+        except sqlite3.OperationalError as exc:
+            last = exc
+            conn.close()
+            if attempt + 1 >= max(1, attempts):
+                break
+            time.sleep(0.08 * (attempt + 1))
+    raise last if last is not None else sqlite3.OperationalError("无法打开数据库")
+
+
 class VerdictStore:
     """SQLite 结果缓存。线程安全靠"每次操作新建连接"，简单且够用。"""
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # 初始化时探一次真实写权限（瞬时只读会在这里被重试掉）
+        open_sqlite(self.db_path).close()
         self._ensure_schema()
 
     # ── 基础设施 ──
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(str(self.db_path), timeout=15)
+        conn = open_sqlite(self.db_path, probe=False)
         try:
             self._schema_version(conn)
-            conn.execute("PRAGMA busy_timeout=15000")
-            conn.execute("PRAGMA journal_mode=WAL")
             with conn:
                 yield conn
         finally:

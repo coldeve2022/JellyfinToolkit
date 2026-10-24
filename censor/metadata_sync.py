@@ -97,7 +97,11 @@ class MetadataSyncService:
 
     @contextmanager
     def _connect(self):
-        db = sqlite3.connect(str(self.db_path), timeout=15)
+        # 与 VerdictStore 用同一个开库函数：WAL 不可用会降级，瞬时只读会重试，
+        # 否则杀软扫描期间会偶发 "attempt to write a readonly database"。
+        from censor.store import open_sqlite
+
+        db = open_sqlite(self.db_path)
         db.row_factory = sqlite3.Row
         try:
             with db:
