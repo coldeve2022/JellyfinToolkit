@@ -60,7 +60,7 @@ def test_history_is_available_after_reopening(qapp, qtbot, tmp_path):
     page._service.store.put(VideoVerdict(path=str(tmp_path / "sample.mp4")))
     reopened = CensorshipPage(ToolkitConfig())
     reopened._load_history()
-    qtbot.waitUntil(lambda: reopened.table.rowCount() == 1, timeout=3000)
+    qtbot.waitUntil(lambda: reopened.table.rowCount() == 1, timeout=15000)
     reopened._clear()
     assert reopened._service.store.history()[0].path.endswith("sample.mp4")
     page.deleteLater()

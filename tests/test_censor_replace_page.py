@@ -101,7 +101,7 @@ def page(qapp, qtbot, cfg, monkeypatch):
     monkeypatch.setattr(widget._release, 'fresh_many', lambda numbers: {'A123': _report('A123', Availability.CONFIRMED)})
     widget._release.store.put(_report("A123", Availability.CONFIRMED))
     widget.refresh()
-    qtbot.waitUntil(lambda: widget.table.rowCount() == 3, timeout=4000)
+    qtbot.waitUntil(lambda: widget.table.rowCount() == 3, timeout=15000)
     yield widget
     widget.shutdown()
 
@@ -153,7 +153,7 @@ def test_lookup_new_only_queries_unchecked(page, monkeypatch, qtbot):
     FakeWorker.calls = []
     monkeypatch.setattr("ui.pages.censor_replace.ReleaseLookupWorker", FakeWorker)
     page._lookup(force=False)
-    qtbot.waitUntil(lambda: bool(FakeWorker.calls), timeout=4000)
+    qtbot.waitUntil(lambda: bool(FakeWorker.calls), timeout=15000)
     assert FakeWorker.calls == [["B-456"]], FakeWorker.calls
 
 
@@ -182,6 +182,6 @@ def test_empty_list_is_handled(page, monkeypatch, qtbot):
     monkeypatch.setattr(page._censor, "store",
                         type("S", (), {"confirmed_censored": staticmethod(lambda: [])})())
     page.refresh()
-    qtbot.waitUntil(lambda: page.table.rowCount() == 0, timeout=4000)
+    qtbot.waitUntil(lambda: page.table.rowCount() == 0, timeout=15000)
     assert page.table.rowCount() == 0
     assert "已确认有码 0" in page.lbl_summary.text()

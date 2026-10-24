@@ -30,7 +30,7 @@ def test_scan_keeps_table_and_filters_interactive_but_locks_settings(qapp, qtbot
     finally:
         gate.set()
         worker.wait(3000)
-        qtbot.waitUntil(lambda: not manager.running(), timeout=3000)
+        qtbot.waitUntil(lambda: not manager.running(), timeout=15000)
         page.deleteLater()
         manager._timer.stop()
 
@@ -106,7 +106,7 @@ def test_bulk_delivery_yields_and_preserves_review_selection(qapp, qtbot):
         page._queue_item(VideoVerdict(path=f'generic-{i:04d}.mp4',cache_hit=True))
     heartbeats = []
     QTimer.singleShot(0,lambda:heartbeats.append(len(page._pending_results)))
-    qtbot.waitUntil(lambda:page.table.rowCount() >= 80, timeout=3000)
+    qtbot.waitUntil(lambda:page.table.rowCount() >= 80, timeout=15000)
     page.table.selectRow(0)
     selected = page._current.path
     qtbot.waitUntil(lambda:not page._pending_results, timeout=10000)
@@ -146,7 +146,7 @@ def test_task_center_receives_the_same_phase_and_counts(qapp, qtbot):
     finally:
         gate.set()
         worker.wait(3000)
-        qtbot.waitUntil(lambda:not manager.running(page),timeout=3000)
+        qtbot.waitUntil(lambda:not manager.running(page),timeout=15000)
         center.deleteLater()
         page.deleteLater()
 

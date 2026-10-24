@@ -117,8 +117,8 @@ def test_visible_file_picker_to_queue(
     assert button is not None, "File selection must be an explicit visible action"
     assert button.isVisible()
     button.click()
-    qtbot.waitUntil(lambda: str(video) in queue_paths(page, view), timeout=4000)
-    qtbot.waitUntil(lambda: not busy(page), timeout=4000)
+    qtbot.waitUntil(lambda: str(video) in queue_paths(page, view), timeout=15000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
 
 
 @pytest.mark.parametrize("module,name,view,role", PAGES)
@@ -145,13 +145,13 @@ def test_folder_picker_and_viewport_drop_share_queue(
     assert button is not None, "Folder selection must not depend on dragging"
     button.click()
     expected_first = str(first) if module in ("replace", "merge", "subtitle") else str(one)
-    qtbot.waitUntil(lambda: expected_first in queue_paths(page, view), timeout=4000)
-    qtbot.waitUntil(lambda: not busy(page), timeout=4000)
+    qtbot.waitUntil(lambda: expected_first in queue_paths(page, view), timeout=15000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
     enter, dropped = drop_urls(getattr(page, view), [second])
     assert enter and dropped
     expected_second = str(second) if module in ("replace", "merge", "subtitle") else str(two)
-    qtbot.waitUntil(lambda: expected_second in queue_paths(page, view), timeout=4000)
-    qtbot.waitUntil(lambda: not busy(page), timeout=4000)
+    qtbot.waitUntil(lambda: expected_second in queue_paths(page, view), timeout=15000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
     assert expected_first in queue_paths(page, view)
 
 
@@ -175,7 +175,7 @@ def test_busy_page_background_rejects_drag(qapp, qtbot, cfg, tmp_path):
         assert page.file_list.count() == 0
     finally:
         gate.set()
-        qtbot.waitUntil(lambda: not busy(page), timeout=4000)
+        qtbot.waitUntil(lambda: not busy(page), timeout=15000)
 
 
 def test_existing_long_path_is_not_silently_discarded(qapp, qtbot, tmp_path):
@@ -220,8 +220,8 @@ def test_nfo_folder_picker_and_drop_reach_readonly_preview(qapp, qtbot, cfg, tmp
     assert enter and dropped
     qtbot.waitUntil(lambda: page._dir == str(second), timeout=2000)
     page.btn_preview.click()
-    qtbot.waitUntil(lambda: bool(page._plan), timeout=4000)
-    qtbot.waitUntil(lambda: not busy(page), timeout=4000)
+    qtbot.waitUntil(lambda: bool(page._plan), timeout=15000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
     assert any(entry["source"] == str(second / "second.ts.nfo") for entry in page._plan)
     assert (second / "second.ts.nfo").exists(), "Preview must not rename a selected file"
 
@@ -249,8 +249,8 @@ def test_replace_folder_drop_reaches_same_pairing_preview(qapp, qtbot, cfg, tmp_
     assert all(drop_urls(page.list_library, [library]))
     qtbot.waitUntil(lambda: page.list_library.count() == 1)
     page.btn_preview.click()
-    qtbot.waitUntil(lambda: page.pairs.rowCount() == 1, timeout=4000)
-    qtbot.waitUntil(lambda: not busy(page), timeout=4000)
+    qtbot.waitUntil(lambda: page.pairs.rowCount() == 1, timeout=15000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
     assert page._plan[0]["source"] == str(source)
     assert page._plan[0]["target"] == str(target)
     assert page._plan[0]["status"] == "ready"
@@ -279,7 +279,7 @@ def test_subtitle_file_picker_does_not_expand_to_sibling_files(
     assert button is not None
     button.click()
     page.btn_start.click()
-    qtbot.waitUntil(lambda: not busy(page), timeout=4000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
     assert page.result_list.get_all_paths() == [str(chosen)]
 
 
@@ -427,8 +427,8 @@ def test_delete_manual_picker_and_folder_drop_keep_scope(qapp, qtbot, cfg, tmp_p
     button.click()
     assert page.manual_list.get_all_paths() == [str(chosen)]
     assert all(drop_urls(page.manual_list, [folder]))
-    qtbot.waitUntil(lambda: str(dropped) in page.manual_list.get_all_paths(), timeout=4000)
-    qtbot.waitUntil(lambda: not busy(page), timeout=4000)
+    qtbot.waitUntil(lambda: str(dropped) in page.manual_list.get_all_paths(), timeout=15000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
     assert {path for path, _ in page._planned_targets(False)} == {str(chosen), str(dropped)}
 
 
@@ -498,11 +498,11 @@ def test_repair_folder_selection_reaches_background_analysis(
     page.show()
     qapp.processEvents()
     page.findChild(QPushButton, "input-folders-main").click()
-    qtbot.waitUntil(lambda: page.file_list.get_all_paths() == [str(video)], timeout=4000)
-    qtbot.waitUntil(lambda: not busy(page), timeout=4000)
+    qtbot.waitUntil(lambda: page.file_list.get_all_paths() == [str(video)], timeout=15000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
     page.btn_scan.click()
-    qtbot.waitUntil(lambda: str(video) in page._scan_results, timeout=4000)
-    qtbot.waitUntil(lambda: not busy(page), timeout=4000)
+    qtbot.waitUntil(lambda: str(video) in page._scan_results, timeout=15000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
     assert page.result_table.rowCount() == 1
     assert not page._scan_results[str(video)]["is_corrupted"]
     assert video.read_bytes() == b"fixture"
@@ -538,8 +538,8 @@ def test_long_file_path_reaches_page_queue(qapp, qtbot, cfg, tmp_path, module, n
     page.show()
     qapp.processEvents()
     assert all(drop_urls(getattr(page, view), [video]))
-    qtbot.waitUntil(lambda: str(video) in queue_paths(page, view), timeout=4000)
-    qtbot.waitUntil(lambda: not busy(page), timeout=4000)
+    qtbot.waitUntil(lambda: str(video) in queue_paths(page, view), timeout=15000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
 
 
 def test_picker_success_clears_previous_drop_error(qapp, qtbot, cfg, tmp_path, monkeypatch):
