@@ -127,7 +127,9 @@ def test_censorship_page_classifies(qapp, cfg, tmp_path, qtbot):
 
     page._start_scan([str(tmp_path)])
     qtbot.waitUntil(lambda: page._worker is not None, timeout=3000)
-    qtbot.waitUntil(lambda: page.table.rowCount() == 2, timeout=10000)
+    # 20s 而不是 10s：这条断言验的是"扫描能把行填出来"，不是"10 秒内跑完"。
+    # 全量测试时 CPU 被其它用例占满，10 秒会偶发超时（单独跑 ~2 秒就出结果）。
+    qtbot.waitUntil(lambda: page.table.rowCount() == 2, timeout=20000)
     assert _wait_worker(page._worker)
     qapp.processEvents()
 
