@@ -43,6 +43,7 @@ def test_old_page_capture_cannot_complete_a_new_navigation(qapp, qtbot):
     from PySide6.QtCore import QUrl
     import time
     session = SupjavBrowserSession()
+    session._ensure_window()
     qtbot.addWidget(session.window)
     class Page:
         def url(self):
@@ -60,6 +61,7 @@ def test_browser_worker_handoff_runs_navigation_on_gui(qapp, qtbot, monkeypatch)
     from ui.supjav_browser import SupjavBrowserSession
     import threading
     session = SupjavBrowserSession()
+    session._ensure_window()
     qtbot.addWidget(session.window)
     seen, result = [], []
     def navigate(request):

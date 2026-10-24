@@ -64,15 +64,15 @@ class SupjavBrowserSession(QObject):
 
     def __init__(self):
         super().__init__(QApplication.instance())
-        self.window = QDialog()
-        self.window.setWindowTitle('Supjav 文字元数据会话')
-        self.window.resize(900, 650)
-        layout = QVBoxLayout(self.window)
+        # 窗口与布局**懒创建**：注册 reader 时不该凭空多出一个顶层窗口。
+        # （以前一构造就建 QDialog，凡是走到"准备通道"的路径都会留下窗口，
+        #  在 GUI 测试里表现为跨用例的时序干扰。）
+        self.window = None
+        self._layout = None
         self.status = QLabel('独立浏览器会话；只读取文字元数据，图片、播放器、下载与新窗口已阻止。\n'
                             '出现 Cloudflare 时请手动完成验证；会话仅在本地保存。浏览器使用系统网络设置。')
         self.status.setWordWrap(True)
-        layout.addWidget(self.status)
-        self._layout, self._page, self._profile, self._view = layout, None, None, None
+        self._page, self._profile, self._view = None, None, None
         self._current = None
         self._lock = Lock()
         self._disposed = False
@@ -83,6 +83,16 @@ class SupjavBrowserSession(QObject):
         self._timer.setInterval(700)
         self._timer.timeout.connect(self._poll)
         QApplication.instance().aboutToQuit.connect(self.dispose)
+
+    def _ensure_window(self) -> None:
+        if self.window is not None:
+            return
+        self.window = QDialog()
+        self.window.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.window.setWindowTitle('Supjav 文字元数据会话')
+        self.window.resize(900, 650)
+        self._layout = QVBoxLayout(self.window)
+        self._layout.addWidget(self.status)
 
     def _ensure_visible(self) -> None:
         """让窗口真的显示出来，但不抢焦点。
@@ -95,8 +105,7 @@ class SupjavBrowserSession(QObject):
             return
         self._ensure_page()
         try:
-            self.window.setAttribute(Qt.WA_ShowWithoutActivating, True)
-            if not self.window.isVisible():
+            if self.window is not None and not self.window.isVisible():
                 self.window.show()
         except RuntimeError:
             pass
@@ -145,6 +154,7 @@ class SupjavBrowserSession(QObject):
         base = os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA') or str(DATA_DIR)
         root = Path(base) / 'JellyfinToolkit' / 'supjav-browser'
         root.mkdir(parents=True, exist_ok=True)
+        self._ensure_window()
         # 用默认 profile：命名 profile + 自定义 storage 在本机实测会导致
         # loadFinished=False、URL 始终为空（Chromium 的存储初始化失败），
         # 而默认 profile 持久化在 LOCALAPPDATA，路径是 ASCII，稳定。
@@ -334,7 +344,8 @@ class SupjavBrowserSession(QObject):
             self._registered = False
         if self._current:
             self._complete(self._current, error='浏览器会话已关闭')
-        self.window.close()
+        if self.window is not None:
+            self.window.close()
         if self._view is not None:
             self._layout.removeWidget(self._view)
             self._view.deleteLater()
