@@ -118,7 +118,7 @@ class ReleasePanel(QWidget):
         self.lbl_summary.setProperty("cssClass", "muted-label")
         self.lbl_summary.setWordWrap(True)
         header.addWidget(self.lbl_summary, 1)
-        self.btn_lookup = QPushButton("检索无码版")
+        self.btn_lookup = QPushButton("查询这条")
         self.btn_lookup.setToolTip("到已启用的站点查这部作品是否有无码流出/破解版")
         header.addWidget(self.btn_lookup)
         layout.addLayout(header)
@@ -138,7 +138,7 @@ class ReleasePanel(QWidget):
         layout.addWidget(self.table)
 
         row = QHBoxLayout()
-        self.btn_open = QPushButton("打开页面")
+        self.btn_open = QPushButton("打开链接")
         self.btn_open.clicked.connect(self.open_page)
         self.btn_magnet = QPushButton("复制磁链")
         self.btn_magnet.setProperty("cssClass", "accent")
@@ -243,8 +243,8 @@ class ReleasePanel(QWidget):
         self.btn_open.setEnabled(has_page)
         self.btn_magnet.setEnabled(has_magnet)
         if not has_magnet:
-            self.btn_magnet.setText("无磁链")
-        elif self.btn_magnet.text() == "无磁链":
+            self.btn_magnet.setText("复制磁链")
+        elif self.btn_magnet.text() == "复制磁链":
             self.btn_magnet.setText("复制磁链")
 
     def summary_for(self, report: Optional[ReleaseReport]) -> str:

@@ -122,26 +122,33 @@ def test_lookup_site_reports_engine_failures_separately():
 
 # ── Supjav 判定 ─────────────────────────────────────────────
 
-def test_supjav_index_title_is_a_soft_lead_until_verified():
+def test_supjav_index_title_counts_as_site_marker():
+    """索引标题本身就是 Supjav 的标注，按它定档即可，不再强制人工复核。
+
+    （旧策略要求索引结果必须回站内核验才算数。实际上索引拿到的就是站点
+    自己的标题，且番号已严格复核；一律降级会让用户逐条确认 —— 这正是
+    用户反馈"确认压根不难、别都推给我"的问题。）
+    """
     transport = FakeTransport({"bing.com": fixture("bing_supjav_ncra026.html")})
     found = SupjavSource(transport, {"release_supjav_engines": ["bing"]}).search(
         ReleaseQuery(number="NCRA-026"))
     assert found, "应当命中 NCRA-026"
     top = found[0]
     assert top.uncensored
-    assert 0 < top.uncensored_confidence < 0.8, "搜索索引标题需要核对，不能代替条目确证"
+    assert top.uncensored_confidence >= 0.8, "站点标注应当足以定档"
     assert "supjav.com" in top.page_url
 
 
-def test_supjav_reducing_mosaic_is_soft_evidence():
-    """[Reducing Mosaic] 是减码版，不能算"确有"，但也不能当没看见。"""
-    from censor.releases.supjav import WEAK_CONFIDENCE, WEAK_HINTS
+def test_supjav_reducing_mosaic_is_a_usable_version():
+    """[Reducing Mosaic] 算"有得换"，只在依据里备注可能仍有残余码。
 
+    改这条是因为：用户要的是"别一条条让我确认"。减码版下载后自己看一眼即可，
+    没必要在列表里堆成"疑似需核对"。
+    """
     ok, confidence, reason = SupjavSource._judge("[Reducing Mosaic] PIYO-170 标题")
-    assert ok and confidence == WEAK_CONFIDENCE
-    assert confidence < 0.8, "软依据不足以判确有"
-    assert "减码" in reason or "薄码" in reason
-    assert WEAK_HINTS
+    assert ok is True
+    assert confidence >= 0.8, "要达到 HARD_EVIDENCE 才不会退回'疑似'"
+    assert "减码" in reason or "薄码" in reason or "reducing" in reason.lower()
 
 
 def test_supjav_plain_title_is_not_uncensored():

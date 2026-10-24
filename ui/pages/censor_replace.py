@@ -141,7 +141,7 @@ class CensorReplacePage(QWidget):
         layout.setSpacing(7)
 
         toolbar = QHBoxLayout()
-        title = QLabel("找替换 · 已确认有码")
+        title = QLabel("找无码版")
         title.setProperty("cssClass", "page-title")
         toolbar.addWidget(title)
         toolbar.addStretch()
@@ -149,7 +149,7 @@ class CensorReplacePage(QWidget):
         self.btn_refresh.setToolTip("重新读库里的「已确认有码」记录")
         self.btn_refresh.clicked.connect(self.refresh)
         toolbar.addWidget(self.btn_refresh)
-        self.btn_lookup_new = QPushButton("检索未查与过期")
+        self.btn_lookup_new = QPushButton("查询未查")
         self.btn_lookup_new.setToolTip("只查还没有结果或结果已过期的番号")
         self.btn_lookup_new.setProperty("cssClass", "accent")
         self.btn_lookup_new.clicked.connect(lambda: self._lookup(force=False))
@@ -179,7 +179,7 @@ class CensorReplacePage(QWidget):
         self.btn_export.setToolTip("把番号与检索结果导出为 CSV，方便在别处反复检索")
         self.btn_export.clicked.connect(self._export)
         toolbar.addWidget(self.btn_export)
-        settings = QPushButton("检索设置…")
+        settings = QPushButton("设置…")
         settings.clicked.connect(self._settings)
         toolbar.addWidget(settings)
         more = QPushButton('更多')
@@ -190,7 +190,7 @@ class CensorReplacePage(QWidget):
             menu.addAction(button.text(), button.click)
         more.setMenu(menu)
         toolbar.addWidget(more)
-        selected = QPushButton('检索所选')
+        selected = QPushButton('查询选中')
         selected.clicked.connect(self._lookup_selected)
         toolbar.insertWidget(2, selected)
         layout.addLayout(toolbar)
@@ -252,7 +252,7 @@ class CensorReplacePage(QWidget):
         self.files.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.files.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         right_lay.addWidget(self.files, 1)
-        local = QPushButton("导入已下载候选并审阅替换…")
+        local = QPushButton("导入新版本…")
         local.clicked.connect(self._import_candidate)
         right_lay.addWidget(local)
         body.addWidget(right)
@@ -467,14 +467,15 @@ class CensorReplacePage(QWidget):
         # 无番号的片子无法检索，不能算进"待查" —— 否则待查数永远降不到 0
         for row in searchable:
             counts[row.state_key] += 1
+        # 只留 5 个数：原来拼了 9 段，读起来比数字本身还费劲
+        checked = counts['confirmed'] + counts['likely'] + counts['none']
         self.lbl_summary.setText(
-            f"已确认有码 {len(rows)} 个番号（{sum(len(r.paths) for r in rows)} 个文件）"
-            f" · 可检索 {len(searchable)} · 待查 {counts['todo']}"
-            f" · 确有 {counts['confirmed']} · 疑似 {counts['likely']}"
-            f" · 未见 {counts['none']} · 未查 {counts['unknown']}"
-            + ("（没有番号的片子无法检索）" if len(rows) > len(searchable) else "")
-            + (f" · 本次只处理检查页送来的 {len(self._focus_numbers)} 个"
-               if self._focus_numbers else ""))
+            f"{len(rows)} 部 · 已查 {checked} · 待查 {counts['todo']}"
+            f" · 有 {counts['confirmed']} · 疑似 {counts['likely']} · 未见 {counts['none']}"
+            + (" · 只查送来的这部份" if self._focus_numbers else ""))
+        self.lbl_summary.setToolTip(
+            f"共 {sum(len(r.paths) for r in rows)} 个文件；可检索 {len(searchable)} 部"
+            + ("；其余没有番号，无法检索" if len(rows) > len(searchable) else ""))
 
     # ── 选择 ──
     def _on_row_selected(self) -> None:

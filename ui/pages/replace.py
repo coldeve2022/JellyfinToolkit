@@ -277,10 +277,10 @@ class ReplacePage(QWidget):
         buttons = QHBoxLayout()
         for attribute, text, callback in (
             ('btn_preview', '1. 预览配对', self._preview),
-            ('btn_prepare', '2. 保存继承快照', self._prepare_upgrade),
+            ('btn_prepare', '2. 保存进度快照', self._prepare_upgrade),
             ('btn_start', '3. 审阅后替换…', self._start),
-            ('btn_verify', '4. 验证继承', self._verify_upgrade),
-            ('btn_reload', '载入上次快照', self._reload_upgrade),
+            ('btn_verify', '4. 核对结果', self._verify_upgrade),
+            ('btn_reload', '载入上次记录', self._reload_upgrade),
             ('btn_stop', '停止', self._stop)):
             button = QPushButton(text)
             button.clicked.connect(callback)
@@ -291,7 +291,7 @@ class ReplacePage(QWidget):
         clear.clicked.connect(self._clear)
         buttons.addWidget(clear)
         layout.addLayout(buttons)
-        self.stats = QLabel('只管理本地候选；没有经过确认的替换操作。')
+        self.stats = QLabel('按 1 → 4 依次操作')
         self.stats.setWordWrap(True)
         self.stats.setProperty('cssClass', 'muted-label')
         layout.addWidget(self.stats)

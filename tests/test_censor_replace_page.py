@@ -134,9 +134,10 @@ def test_unqueried_rows_say_never_checked(page):
 
 def test_uncached_number_is_reported_in_summary(page):
     text = page.lbl_summary.text()
-    assert "已确认有码 3 个番号" in text, text
+    assert "3 部" in text, text
     assert "待查 1" in text, text
-    assert "没有番号" in text, "无番号的片子要说明无法检索"
+    # "没有番号的片子无法检索"从主行移到了悬停提示（主行只留 5 个数）
+    assert "没有番号" in page.lbl_summary.toolTip(), "无番号的片子要说明无法检索"
 
 
 def test_selecting_row_shows_candidates_and_files(page):
@@ -184,4 +185,4 @@ def test_empty_list_is_handled(page, monkeypatch, qtbot):
     page.refresh()
     qtbot.waitUntil(lambda: page.table.rowCount() == 0, timeout=15000)
     assert page.table.rowCount() == 0
-    assert "已确认有码 0" in page.lbl_summary.text()
+    assert "0 部" in page.lbl_summary.text()

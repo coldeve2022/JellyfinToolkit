@@ -207,7 +207,7 @@ class ReleaseReport:
             tail = "有磁链" if self.has_download else "无磁链"
             return f"确有（{count} 条 · {tail}）"
         if self.availability is Availability.LIKELY:
-            return "疑似（需核对）"
+            return "疑似"
         if self.availability is Availability.NONE:
             return "未见无码版"
         return "未查" + (f"（{self.note}）" if self.note else "")

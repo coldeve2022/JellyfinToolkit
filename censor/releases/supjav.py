@@ -29,9 +29,9 @@ from urllib.parse import quote
 from censor.numbering import parse_number
 from censor.releases.base import (ReleaseSource, contains_number,
                                   search_keyword)
+from censor.tag_signals import version_level
 from censor.releases.index_search import lookup_site
 from censor.releases.models import ReleaseCandidate, ReleaseQuery, normalize_number
-from censor.tag_signals import classify_tag
 from censor.releases.transport import TransportError
 from censor.releases.supjav_pages import search_links, detail_metadata, article_url
 
@@ -118,9 +118,13 @@ class SupjavSource(ReleaseSource):
         title, categories = detail_metadata(self._page(url), query.number)
         uncensored, confidence, reason = self._judge(title)
         for label, path in categories:
-            positive, negative = classify_tag(label)
-            if positive and not negative:
-                uncensored, confidence, reason = True, .9, f'站内详情分类：{label}'
+            level, _hit = version_level(label)
+            if level == 'strong':
+                uncensored, confidence, reason = True, .92, f'站内分类：{label}'
+                break
+            if level == 'soft':
+                # 减码版：算"有得换"，但把残余码的风险写进依据
+                uncensored, confidence, reason = True, .85, f'站内分类：{label}（减码版）'
                 break
         if confidence < .8:
             reason = f'站内主标题核验；{reason}' if reason else '站内主标题已核验，未见明确版本标记'
@@ -215,20 +219,22 @@ class SupjavSource(ReleaseSource):
 
     @staticmethod
     def _judge(title: str) -> tuple[bool, float, str]:
-        """返回 ``(是否无码条目, 依据强度, 依据说明)``。
+        """返回 ``(是否可用的无码条目, 依据强度, 依据说明)``。
 
-        分两档是因为 Supjav 上有一类介于中间的条目：``[Reducing Mosaic]``
-        这类"减码/薄码"版 —— 码被动过，但不保证已经全无码。把它当"确有"会
-        让用户白下一次，当"有码"又会漏掉线索，所以单列成"疑似"。
+        Supjav 自己会在标题和分类里标版本，所以按它的标注直接定档，不再
+        一律降级成"需核对"：
+
+        - 无码 / 流出 / 破解 → 0.85（确有）
+        - 减码 / 薄码（``[Reducing Mosaic]``）→ 0.80（**也算有得换**，
+          只把"可能仍有残余码"写进说明，不逼用户逐条复核）
+        - 明确标"有码" → 否
+        - 中文字幕 / 4K / 60FPS 这类前缀 → 不参与判断
         """
-        lowered = str(title or "").lower()
-        uncensored, censored = classify_tag(title)
-        if censored and not uncensored and not any(h in lowered for h in WEAK_HINTS):
-            return False, 0., "标题否定无码或明确标注有码"
-        strong = [hint for hint in UNCENSORED_HINTS if hint.lower() in lowered and uncensored]
-        if strong:
-            return True, 0.55, f"索引标题含无码/破解标记（{strong[0]}），需打开条目核对"
-        weak = [hint for hint in WEAK_HINTS if hint.lower() in lowered]
-        if weak:
-            return True, WEAK_CONFIDENCE, f"站点标题含减码/薄码标记（{weak[0]}），未必全无码"
+        level, hit = version_level(title)
+        if level == "strong":
+            return True, 0.85, f"站点标注「{hit}」"
+        if level == "soft":
+            return True, 0.80, f"站点标注「{hit}」减码版 —— 码被处理过，可能仍有残余"
+        if level == "censored":
+            return False, 0., f"站点标注「{hit}」，不是无码版"
         return False, 0.0, ""

@@ -75,14 +75,20 @@ def test_direct_challenge_is_never_reported_as_empty_success():
         SupjavSource(Transport(blocked=True), {'release_supjav_mode': 'direct'}).search(ReleaseQuery(number='DEMO-123'))
 
 
-def test_auto_mode_keeps_unverified_index_as_partial_soft_lead(monkeypatch):
+def test_auto_mode_uses_index_marker_but_still_reports_blocked_site(monkeypatch):
+    """站内被拦时，索引标题照样能定档；但必须如实报告"站内没查成"。
+
+    旧策略把这种情况降级成"软线索 + 等人工"。检索源里已经被拦了，
+    人工也没法让站内变通；不如直接按站点标注给结论，同时把未完成写进报告。
+    """
     from censor.releases.index_search import IndexHit
     monkeypatch.setattr('censor.releases.supjav.lookup_site', lambda *a, **kw:
         ([IndexHit('https://supjav.com/100.html', 'DEMO-123 Uncensored')], {'bing': '命中 1 条'}))
     source = SupjavSource(Transport(blocked=True), {'release_supjav_mode': 'auto'})
     found = source.search(ReleaseQuery(number='DEMO-123'))
-    assert found and found[0].uncensored_confidence < .8
-    assert source.incomplete_reason and '站内' in source.incomplete_reason
+    assert found and found[0].uncensored_confidence >= .8
+    assert source.incomplete_reason and '站内' in source.incomplete_reason, \
+        "站内没查成这件事必须留在报告里"
 
 
 def test_valid_direct_no_results_does_not_need_index(monkeypatch):
