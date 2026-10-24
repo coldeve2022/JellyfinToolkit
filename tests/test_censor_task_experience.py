@@ -1,4 +1,5 @@
 """Interactive scanning, explicit cache reuse and review lifecycle regressions."""
+from pathlib import Path
 from threading import Event
 
 from PySide6.QtCore import QThread
@@ -165,7 +166,12 @@ def test_cache_heavy_worker_throttles_status_events(tmp_path, monkeypatch):
         path = tmp_path / f'generic-{i}.mp4'
         path.write_bytes(b'generic fixture')
         paths.append(str(path))
-    svc = CensorService({'censor_visual_enabled':False},data_dir=tmp_path / 'state')
+    # 数据库放项目内而不是 %TEMP%：Temp 目录有杀软/清理程序实时扫描，
+    # SQLite 的 -wal 写入偶发失败会让"30 个文件全成功"这条断言随机崩溃，
+    # 而与"节流"这个被测语义无关。素材文件仍用 tmp_path。
+    state = Path(__file__).resolve().parent.parent / 'build' / 'scan-state' / tmp_path.name
+    state.mkdir(parents=True, exist_ok=True)
+    svc = CensorService({'censor_visual_enabled':False},data_dir=state)
     worker = CensorScanWorker(svc,paths,CensorOptions(detect_visual=False))
     # One fixed reporting interval; file completions must not bypass throttling.
     worker._clock = lambda: 1.
