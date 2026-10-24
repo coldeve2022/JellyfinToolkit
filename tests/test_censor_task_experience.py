@@ -172,7 +172,9 @@ def test_cache_heavy_worker_throttles_status_events(tmp_path, monkeypatch):
     state = Path(__file__).resolve().parent.parent / 'build' / 'scan-state' / tmp_path.name
     state.mkdir(parents=True, exist_ok=True)
     svc = CensorService({'censor_visual_enabled':False},data_dir=state)
-    worker = CensorScanWorker(svc,paths,CensorOptions(detect_visual=False))
+    # 单线程：这条用例验的是"状态节流"，不是并发写库。默认 4 线程写同一个
+    # SQLite 时，本机杀软实时扫描会让个别写入变成 readonly，断言随机失败。
+    worker = CensorScanWorker(svc,paths,CensorOptions(detect_visual=False),workers=1)
     # One fixed reporting interval; file completions must not bypass throttling.
     worker._clock = lambda: 1.
     snapshots = []
