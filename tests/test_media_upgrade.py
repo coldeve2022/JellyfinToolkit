@@ -225,14 +225,23 @@ def test_journal_intent_links_private_inheritance_snapshot(tmp_path):
     assert op['inheritance_snapshot_id'] == prepared['snapshot_id']
 
 
-def test_configured_server_missing_key_blocks_execution(tmp_path):
+def test_configured_server_missing_key_degrades_to_local_only(tmp_path):
+    """配了服务器但没填 API Key：不当错误拦下来，只降级为"换本地文件"。
+
+    以前这种情况整条链路被堵死 —— 用户明明只是想换掉有码文件，却因为
+    一个可选的继承功能填不全而完全动不了。现在照常替换，但必须写清楚
+    "本次不继承用户状态"，不能让人误以为进度也搬过去了。
+    """
     from utils.media_upgrade import MediaUpgradeService
     old, new = pair(tmp_path)
     svc = MediaUpgradeService(SimpleNamespace(jellyfin_server='http://fixture', jellyfin_api_key=''), tmp_path / 'private')
     prepared = svc.prepare(svc.preview([new], [old]))
-    assert prepared['rows'][0]['status'] == 'blocked'
-    assert svc.execute(prepared, validator=lambda stage: True)['fail'] == 1
-    assert old.read_bytes() == b'old video'
+    row = prepared['rows'][0]
+    assert row['status'] == 'ready'
+    assert row['server'] is None
+    assert 'API Key' in row.get('inheritance_note', '')
+    assert svc.execute(prepared, validator=lambda stage: True)['ok'] == 1
+    assert old.read_bytes() != b'old video', "应当真的换掉了文件"
 
 
 def test_server_remote_path_is_mapped_exactly_and_preserved(tmp_path, monkeypatch):

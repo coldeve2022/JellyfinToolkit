@@ -16,7 +16,8 @@ import uuid
 from urllib.parse import urlencode, quote, urlsplit, urlunsplit
 
 from utils.file_ops import OperationJournal, file_hash, path_key
-from utils.replacement import preview_release_replacements, execute_replacements, validate_restored_output
+from utils.replacement import (execute_replacements, preview_release_replacements,
+                               transcode_container, validate_restored_output)
 
 # Documented editable BaseItemDto fields. Do not persist credentials or read-only streams.
 METADATA_FIELDS = ('Name', 'OriginalTitle', 'SortName', 'Overview', 'PremiereDate',
@@ -253,7 +254,17 @@ class MediaUpgradeService:
         for row in plan['rows']:
             other = index.get(path_key(row['source']))
             if not other or any(row.get(k) != other.get(k) for k in (
-                    'source', 'target', 'candidates', 'source_identity', 'target_identity')):
+                    'source', 'source_identity')):
+                raise ValueError('原始配对计划已变化，请重新预览')
+            target = row.get('target') or ''
+            if row.get('chosen'):
+                # 用户从多个原文件里手动指定了一个：只要它仍在候选里就认可。
+                # 重新预览时这一行仍是"多候选"（target 为空），不能据此判失效。
+                allowed = set(other.get('candidates') or []) | set(row.get('candidates') or [])
+                if target not in allowed:
+                    raise ValueError('选定的原文件已不在候选里，请重新预览')
+                continue
+            if target != (other.get('target') or ''):
                 raise ValueError('原始配对计划已变化，请重新预览')
             if row['status'] == 'ready' and other['status'] != 'ready':
                 raise ValueError('原始配对已不再唯一，请重新预览')
@@ -266,13 +277,23 @@ class MediaUpgradeService:
         snapshot.update(snapshot_id=snapshot_id, status='prepared', server_context=deepcopy(self.server_context))
         for row in snapshot['rows']:
             _stop(cancel)
-            if row['status'] != 'ready':
+            if row['status'] not in ('ready', 'container_convert'):
                 continue
+            if row.get('chosen') and row.get('target'):
+                # 预览只给"唯一匹配"的行算过 target 侧身份；手动指定的这里补上
+                row['target_identity'] = _identity(row['target'])
+                row['target_hash'] = file_hash(row['target'])
             try:
                 row['sidecars'] = _sidecars(row['target'])
                 if self.configuration_error:
-                    raise ValueError(self.configuration_error)
-                row['server'] = deepcopy(self.server.capture(row['target'], cancel)) if self.server else None
+                    # 只是没填 API Key，不该挡住"换本地文件"这件事。
+                    # 降级为"不继承用户状态"，并把原因写进这一行，用户看得见。
+                    row['server'] = None
+                    row['inheritance_note'] = self.configuration_error + '；本次只替换本地文件'
+                elif self.server is not None:
+                    row['server'] = deepcopy(self.server.capture(row['target'], cancel))
+                else:
+                    row['server'] = None
                 self._check_files(row)
             except (OSError, ValueError) as exc:
                 row.update(status='blocked', error=str(exc))
@@ -300,7 +321,8 @@ class MediaUpgradeService:
     def _check_files(row):
         if _identity(row['source']) != row['source_identity'] or _identity(row['target']) != row['target_identity']:
             raise ValueError('文件身份/内容已变化，请重新审阅')
-        if Path(row['source']).suffix.lower() != Path(row['target']).suffix.lower():
+        if (not row.get('convert_container')
+                and Path(row['source']).suffix.lower() != Path(row['target']).suffix.lower()):
             raise ValueError('封装格式不一致')
         _same_sidecars(row)
 
@@ -315,6 +337,26 @@ class MediaUpgradeService:
             else:
                 results.update(fail=max(1, len(prepared.get('rows', []))), error=str(exc))
             return results
+        # 配对校验通过后，把"封装不同"的行先转成目标封装：之后所有校验
+        # （身份/hash/暂存比对）都按转换后的文件走，不需要在流程里到处特判。
+        converted_files = []
+        for row in saved['rows']:
+            if not row.get('convert_container') or not row.get('target'):
+                continue
+            try:
+                temp = transcode_container(row['source'], Path(row['target']).suffix, log=log)
+            except (OSError, ValueError) as exc:
+                row.update(status='blocked', error=str(exc))
+                continue
+            converted_files.append(temp)
+            row['converted_from'] = row['source']
+            row['source'] = temp
+            row['source_identity'] = _identity(temp)
+            row['source_hash'] = file_hash(temp)
+            row['status'] = 'ready'
+            # 已经转好了：下层 execute_replacements 不要再转一次
+            row['convert_container'] = False
+
         for row in saved['rows']:
             if cancel and cancel():
                 results['cancelled'] = True
@@ -386,6 +428,12 @@ class MediaUpgradeService:
                     results['fail'] += 1
             results['rows'].append(outcome)
         _write_private(self.data_dir / 'results' / (uuid.uuid4().hex + '.json'), results)
+        # 转封装的临时文件用完即删（失败时也删，原始文件不在这里）
+        for temp in converted_files:
+            try:
+                Path(temp).unlink(missing_ok=True)
+            except OSError:
+                pass
         return results
 
     def verify(self, prepared, cancel=None):

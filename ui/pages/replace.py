@@ -62,6 +62,10 @@ def apply_candidate_choice(rows, index, path) -> bool:
     entry['target'] = path
     entry['status'] = 'ready'
     entry['error'] = ''
+    # 标记"这是用户手动从候选里指定的"：保存快照时不能拿重新预览的结果
+    # 严格比对 target —— 重新预览时这一行仍然是多候选（target 为空），
+    # 严格比会判定"计划已变化"，于是保存失败、让你重新预览、又回到待选 —— 死循环。
+    entry['chosen'] = True
     return True
 
 
@@ -429,7 +433,9 @@ class ReplacePage(QWidget):
         for entry in rows:
             row = self.pairs.rowCount()
             self.pairs.insertRow(row)
-            summary = entry.get('inheritance_summary', '')
+            # 降级提示（如"没配 API Key，本次只换本地文件"）必须盖过默认说明，
+            # 否则用户会以为观看进度也跟着搬过去了
+            summary = entry.get('inheritance_note') or entry.get('inheritance_summary', '')
             if entry.get('server'):
                 summary = f"元数据已快照；{len(entry['server'].get('users', {}))} 个用户状态；保留 NFO/字幕"
             if entry.get('error'):
