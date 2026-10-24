@@ -8,7 +8,7 @@ Identical sampled pixels do not count as independent temporal evidence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 import math
 import hashlib
 from pathlib import Path
@@ -17,7 +17,8 @@ from typing import Any, Optional
 from censor.base import BaseDetector, DetectorError, ProbeContext
 from censor.candidates import select_candidates
 from censor.models import CensorState, Evidence, EvidenceSource, FrameCandidate
-from censor.sampling import SampledFrame, SamplingCancelled
+from censor.sampling import SampledFrame, SamplingCancelled, SamplingError
+from censor.triage import triage_plan
 
 __all__ = [
     "MosaicParams",
@@ -309,7 +310,7 @@ class MosaicCvDetector(BaseDetector):
     """把 :func:`analyze_frame` 接到检测器框架上。"""
 
     name = "visual.mosaic_cv"
-    version = "3"
+    version = "5"
     capabilities = ("visual", "ffmpeg")
     title = "画面网格检测（CV）"
 
@@ -329,10 +330,21 @@ class MosaicCvDetector(BaseDetector):
         p = MosaicParams.from_config(ctx.cfg)
         sampler = self._sampler(ctx)
         requested = int(ctx.shared.get('requested_samples', ctx.cfg_get("censor_frame_samples", 60)))
+        plan = triage_plan(ctx.path, ctx.cfg, requested,
+                           explicit=('requested_samples' in ctx.shared
+                                     or bool(ctx.shared.get('explicit_visual'))
+                                     or bool(ctx.shared.get('deep_recheck'))))
+        ctx.shared['triage'] = plan
         candidates, max_score, sampled, unique_frames, independent_strong = self._analyze_stream(ctx, sampler, p, requested)
         ctx.duration = ctx.duration or getattr(sampler, "last_duration", 0.0)
-        low_risk = (max_score < p.review_score and sampled >= 24
-                    and sampled >= .8 * requested and unique_frames >= 4)
+        low_risk = (plan['low_risk'] if plan['enabled'] and plan['phase'] == 'initial' else
+                    (max_score < p.review_score and sampled >= 24
+                     and sampled >= .8 * requested and unique_frames >= 4))
+        plan['low_risk'] = bool(low_risk)
+        prefix = (f"快速分流（{sampled}/{requested}计划帧，实际覆盖"
+                  f"{plan['coverage_start']:.1f}–{plan['coverage_end']:.1f}s/"
+                  f"{ctx.duration:.1f}s）"
+                  if plan['enabled'] and plan['phase'] == 'initial' else '')
         ctx.shared["candidates"] = candidates
         ctx.shared["visual_score"] = max_score
 
@@ -355,7 +367,7 @@ class MosaicCvDetector(BaseDetector):
                 (
                     f"抽样疑似像素化，独立强证据不足（最高结构分 {max_score:.1f}）"
                     if max_score >= p.review_score
-                    else f"{'抽样低风险' if low_risk else '抽样证据不足'}：{sampled}帧、"
+                    else prefix + f"{'抽样低风险' if low_risk else '抽样证据不足'}：{sampled}帧、"
                          f"{unique_frames}种画面，最高结构分 {max_score:.1f}；不代表全片不存在"
                 ),
                 review_required=not low_risk,
@@ -363,14 +375,76 @@ class MosaicCvDetector(BaseDetector):
         ]
 
     def _analyze_stream(self, ctx, sampler, p, requested):
+        import inspect
         import tempfile
+        import time
         method = getattr(sampler, 'iter_samples', None) or sampler.sample
-        frames = method(ctx.path, count=requested, duration=ctx.duration,
-            should_stop=ctx.should_stop, log=ctx.log,
-            progress=lambda done, total: ctx.progress('精确取样', done, total))
+        plan = ctx.shared['triage']
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if plan['enabled'] and 'sample_indices' not in parameters:
+            plan.update(enabled=False, phase='full', fallback='sampler_without_sample_indices',
+                        initial_indices=list(range(requested)), order=list(range(requested)),
+                        initial_samples=requested)
         scored, overview, records, hashes = [], [], {}, set()
+        timestamps = []
+        # Cache compact analysis only, never decoded pixel buffers. Dimensions
+        # are part of the key so equal byte strings of different shapes differ.
+        analyses, pixel_records = {}, {}
+        limit = max(1, min(20, int(ctx.cfg_get('censor_candidates', 18))))
+        first_count = plan['initial_samples']
+        overview_count = min(6, limit, max(1, first_count))
+        overview_positions = {round(i * (first_count - 1) / max(1, overview_count - 1))
+                              for i in range(overview_count)}
         maximum, sampled = 0., 0
         ctx.shared['analyzed_frames'] = 0
+        ctx.shared['reused_frames'] = 0
+        def initial_is_low_risk():
+            duration = ctx.duration or getattr(sampler, 'last_duration', 0.)
+            enough_coverage = (duration > 0 and timestamps and
+                               min(timestamps) <= .15 * duration and max(timestamps) >= .85 * duration)
+            return bool(maximum < p.review_score and sampled >= 24
+                        and sampled >= .8 * first_count and len(hashes) >= 4 and enough_coverage)
+
+        def staged_frames():
+            # A named parameter is required: old plugins accepting **kwargs may
+            # silently ignore selected indices and must get the complete plan.
+            stages = [plan['initial_indices']]
+            if plan['enabled']:
+                stages.append(plan['order'][first_count:])
+            timeout = getattr(sampler, 'timeout', 900.)
+            deadline = time.monotonic() + float(timeout)
+            for phase, indices in enumerate(stages):
+                if phase:
+                    if initial_is_low_risk():
+                        plan['low_risk'] = True
+                        return
+                    plan.update(phase='refined', refined=True)
+                kwargs = dict(count=requested, duration=ctx.duration or getattr(sampler, 'last_duration', 0.),
+                              should_stop=ctx.should_stop, log=ctx.log,
+                              progress=lambda done, total: ctx.progress('精确取样', done, total))
+                if plan['enabled']:
+                    kwargs['sample_indices'] = indices
+                    if 'deadline' in parameters:
+                        kwargs['deadline'] = deadline
+                stream = method(ctx.path, **kwargs)
+                previous = sampled
+                try:
+                    yield from stream
+                except SamplingError as exc:
+                    if not plan['enabled'] or str(exc) != '抽帧未输出任何完整帧':
+                        raise
+                finally:
+                    if hasattr(stream, 'close'):
+                        stream.close()
+                    count = max(sampled, previous + getattr(sampler, 'last_sampled_count', 0))
+                    ctx.shared['sampled_frames'] = count
+            if plan['enabled'] and plan['phase'] == 'initial':
+                plan['low_risk'] = initial_is_low_risk()
+
+        frames = staged_frames()
         # Only candidate/overview pixels are spooled, never an entire frame list
         # in memory. The temporary stream is closed on success, failure or stop.
         with tempfile.TemporaryFile() as spool:
@@ -379,16 +453,26 @@ class MosaicCvDetector(BaseDetector):
                     if ctx.should_stop():
                         raise SamplingCancelled('画面分析已取消')
                     sampled += 1
+                    timestamps.append(frame.timestamp)
                     ctx.shared['sampled_frames'] = sampled
-                    hits, score = analyze_frames([frame], p, top=1, should_stop=ctx.should_stop)
+                    digest = hashlib.sha256(frame.data).hexdigest()
+                    key = (frame.width, frame.height, frame.channels, digest)
+                    if key in analyses:
+                        original_hits, score = analyses[key]
+                        hits = [replace(hit, timestamp=frame.timestamp) for hit in original_hits]
+                        ctx.shared['reused_frames'] += 1
+                    else:
+                        hits, score = analyze_frames([frame], p, top=1, should_stop=ctx.should_stop)
+                        analyses[key] = (hits, score)
                     scored.extend(hits)
                     maximum = max(maximum, score)
-                    digest = hashlib.sha256(frame.data).hexdigest()
-                    hashes.add(digest)
-                    is_overview = sampled <= 6 or (sampled - 1) % max(1, requested // 6) == 0
+                    hashes.add(key)
+                    is_overview = sampled - 1 in overview_positions
                     if hits or is_overview:
-                        records[frame.timestamp] = (spool.tell(), frame.width, frame.height, frame.channels)
-                        spool.write(frame.data)
+                        if key not in pixel_records:
+                            pixel_records[key] = (spool.tell(), frame.width, frame.height, frame.channels)
+                            spool.write(frame.data)
+                        records[frame.timestamp] = pixel_records[key]
                     if is_overview:
                         overview.append(FrameCandidate(frame.timestamp, 0., frame_hash=digest))
                     ctx.shared['analyzed_frames'] = sampled
@@ -396,17 +480,23 @@ class MosaicCvDetector(BaseDetector):
             finally:
                 if hasattr(frames, 'close'):
                     frames.close()
-                ctx.shared['sampled_frames'] = max(sampled, getattr(sampler, 'last_sampled_count', 0))
+                ctx.shared['sampled_frames'] = max(sampled, ctx.shared.get('sampled_frames', 0))
             if not sampled:
                 raise DetectorError('没有可分析的画面帧')
+            plan.update(sampled_samples=sampled, coverage_start=min(timestamps),
+                        coverage_end=max(timestamps))
             candidates = select_candidates(scored, gap_seconds=p.candidate_gap_seconds,
                                            minimum_score=p.review_score)
             strong = sum(c.score >= p.strong_score for c in candidates)
-            candidates = candidates[:int(ctx.cfg_get('censor_candidates', 18))]
-            if len(candidates) < 6:
+            candidates = candidates[:limit]
+            if len(candidates) < min(6, limit):
                 occupied = {c.timestamp for c in candidates}
-                step = max(1, len(overview) // 6)
-                candidates.extend(c for c in overview[::step][:6] if c.timestamp not in occupied)
+                available = [c for c in overview if c.timestamp not in occupied]
+                slots = min(min(6, limit) - len(candidates), len(available))
+                # Preserve both ends even when strong candidates consume slots.
+                positions = {round(i * (len(available) - 1) / max(1, slots - 1))
+                             for i in range(slots)}
+                candidates.extend(available[i] for i in sorted(positions))
             pixels = []
             for candidate in candidates:
                 offset, width, height, channels = records[candidate.timestamp]

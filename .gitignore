@@ -4,6 +4,7 @@
 # ─────────────────────────────────────────────────────────────
 config.json
 config.local.json
+data-profile.json
 data/
 AppData/
 portable.txt

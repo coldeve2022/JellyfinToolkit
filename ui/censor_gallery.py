@@ -32,12 +32,17 @@ class EvidenceImage(QLabel):
     def __init__(self, text: str = "", *, tile=(186, 104)):
         super().__init__(text)
         self._source = QPixmap()
+        self._fallback = text
         self._tile = tile
         self.setAlignment(Qt.AlignCenter)
-        self.setFixedSize(*tile)
+        if tile is None:
+            self.setMinimumSize(1, 1)
+            self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        else:
+            self.setFixedSize(*tile)
+            self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("点击放大")
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setProperty("cssClass", "evidence-tile")
 
     def set_source(self, pixmap: QPixmap, *, expand: bool = False) -> None:
@@ -47,6 +52,7 @@ class EvidenceImage(QLabel):
 
     def _render(self) -> None:
         if self._source.isNull():
+            self.setText(self._fallback)
             return
         mode = Qt.KeepAspectRatio
         self.setPixmap(self._source.scaled(self.size(), mode, Qt.SmoothTransformation))
@@ -98,9 +104,6 @@ class EvidenceGallery(QScrollArea):
 
     def set_preferences(self, width=186, columns=0):
         self._tile_width, self._columns = int(width), int(columns)
-        for label in self.labels:
-            label.setFixedSize(self._tile_width, max(72, self._tile_width * 9 // 16))
-            label._render()
         self._reflow()
 
     def _reflow(self):
@@ -108,7 +111,13 @@ class EvidenceGallery(QScrollArea):
             return
         while self.grid.count():
             self.grid.takeAt(0)
-        available = max(1, (self.viewport().width() - 8) // (self._tile_width + 6))
+        margins = self.grid.contentsMargins()
+        content_width = max(1, self.viewport().width() - margins.left() - margins.right())
+        tile_width = min(self._tile_width, content_width)
+        for label in self.labels:
+            label.setFixedSize(tile_width, max(1, tile_width * 9 // 16))
+            label._render()
+        available = max(1, (content_width + 6) // (tile_width + 6))
         columns = min(self._columns or available, available)
         for index, cell in enumerate(self._cells):
             self.grid.addWidget(cell, index // columns, index % columns)
@@ -145,6 +154,9 @@ class EvidenceGallery(QScrollArea):
         box.addWidget(image)
 
         caption = QLabel(self._caption(index, candidate))
+        caption.setWordWrap(True)
+        caption.setMinimumWidth(1)
+        caption.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         caption.setProperty("cssClass", "muted-label")
         caption.setToolTip(candidate.thumb_path or "无缩略图")
         box.addWidget(caption)
@@ -169,10 +181,8 @@ class EvidenceGallery(QScrollArea):
 
     @staticmethod
     def _set_image(label, path: str) -> None:
-        if path and os.path.isfile(path):
-            pixmap = QPixmap(path)
-            if not pixmap.isNull():
-                label.set_source(pixmap)
+        pixmap = QPixmap(path) if path and os.path.isfile(path) else QPixmap()
+        label.set_source(pixmap)
 
 
 class _EvidenceDialog(QDialog):
@@ -184,8 +194,11 @@ class _EvidenceDialog(QDialog):
         self._candidates = list(candidates or [candidate])
         self._index = index
         self._on_navigate = on_navigate
-        self.resize(1180, 720)
         self._build()
+        screen = self.screen()
+        available = screen.availableGeometry() if screen else None
+        self.resize(min(1180, max(1, available.width() - 32)) if available else 1180,
+                    min(720, max(1, available.height() - 64)) if available else 720)
         self._load(index)
 
     def _build(self) -> None:
@@ -194,18 +207,16 @@ class _EvidenceDialog(QDialog):
         self.title.setWordWrap(True)
         outer.addWidget(self.title)
         row = QHBoxLayout()
-        self.frame = QLabel()
-        self.frame.setAlignment(Qt.AlignCenter)
-        self.frame.setMinimumSize(520, 520)
-        self.frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.crop = QLabel()
-        self.crop.setAlignment(Qt.AlignCenter)
-        self.crop.setMinimumSize(360, 520)
-        self.crop.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.frame = EvidenceImage("整帧：无图像", tile=None)
+        self.crop = EvidenceImage("局部：无图像", tile=None)
+        for image in (self.frame, self.crop):
+            image.setCursor(Qt.ArrowCursor)
+            image.setToolTip("双击关闭 · 方向键切换")
         row.addWidget(self.frame, 3)
         row.addWidget(self.crop, 2)
         outer.addLayout(row, 1)
         hint = QLabel("← → 切换上一张 / 下一张 · Esc 或双击关闭 · 方框是算法候选区域，不代表确认")
+        hint.setWordWrap(True)
         hint.setProperty("cssClass", "muted-label")
         outer.addWidget(hint)
 
@@ -227,6 +238,10 @@ class _EvidenceDialog(QDialog):
     @staticmethod
     def _assign(label: QLabel, path: str, fallback: str) -> None:
         pixmap = QPixmap(path) if path and os.path.isfile(path) else QPixmap()
+        if isinstance(label, EvidenceImage):
+            label._fallback = fallback + "：无图像"
+            label.set_source(pixmap)
+            return
         if pixmap.isNull():
             label.setText(fallback + "：无图像")
             return

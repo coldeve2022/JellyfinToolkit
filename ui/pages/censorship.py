@@ -11,18 +11,18 @@ from collections import Counter, deque
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
     QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget, QDialog, QDialogButtonBox, QSpinBox,
     QMenu, QProgressBar, QSizePolicy, QMessageBox,
-    QLineEdit, QCheckBox,
+    QLineEdit, QCheckBox, QScrollArea,
 )
 
 from censor import CensorOptions, CensorService, CensorState, VideoVerdict
 from censor.fusion import explain, fuse
-from censor.models import EvidenceSource
+from censor.models import EvidenceSource, ProcessingStatus
 from censor.jobs import ScanJobs, scan_priority as scan_priority
 from censor.releases import ReleaseService
 from censor.releases.models import normalize_number
@@ -32,16 +32,40 @@ from censor.review_route import (
 )
 from ui.censor_gallery import EvidenceGallery
 from config import ToolkitConfig
-from ui.services import busy, start_task, stop_page, CallWorker
+from ui.services import busy, start_task, stop_page
 from ui.widgets import FileInputActions
 from ui.censor_scan import CensorScanWorker
+from ui.censor_history import HistoryLoadWorker
 from ui.censor_release import ConnectionCheck
 
 __all__ = ["CensorshipPage"]
 
 #: 表格列：**结论**与**处理**是两个独立维度，不再挤在一格里
 #: （以前一列里混着"疑似·待复核""人工确认未见""低风险·未确证"，无法单独筛）
-_COLUMNS = ["文件名", "标识", "结论", "处理", "结构分", "依据", "记录来源"]
+_COLUMNS = ["文件名", "标识", "结论", "处理", "结构分", "依据", "记录来源", "喜欢", "播放"]
+
+
+class _SavedHistoryWorker(HistoryLoadWorker):
+    """Keep persisted counts and history reads off the GUI thread."""
+
+    saved_stats = Signal(object)
+
+    def __init__(self, store, *, records=True, parent=None):
+        super().__init__(store, parent=parent)
+        self.records = records
+
+    def run(self):
+        try:
+            self.saved_stats.emit(self.store.stats())
+        except Exception as exc:
+            self.error.emit(f'读取已保存记录计数失败：{exc}')
+        if self.records:
+            super().run()
+
+
+class _FavoriteItem(QTableWidgetItem):
+    def __lt__(self, other):
+        return (self.data(Qt.UserRole + 1) or 0) < (other.data(Qt.UserRole + 1) or 0)
 
 #: 结论（有没有码）用状态色
 _STATE_COLOR = {
@@ -100,14 +124,13 @@ class CensorshipPage(QWidget):
     def __init__(self, cfg: ToolkitConfig, parent=None):
         super().__init__(parent)
         self.cfg = cfg
-        if self.cfg.censor_candidates <= 5:
-            self.cfg.censor_candidates = 18
         self.setAcceptDrops(True)
         self._worker: Optional[CensorScanWorker] = None
         self._service = CensorService(cfg)
         self._jobs = ScanJobs(self._service.store.db_path)
         self._history_offset = 0
         self._history_worker = None
+        self._history_loading = False
         self._pending_results = deque()
         self._category_counts = Counter()
         self._review_overrides = {}
@@ -131,10 +154,28 @@ class CensorshipPage(QWidget):
         # ── 无码版本检索：结果按番号缓存，同一部片的多份副本共用 ──
         self._release_service = ReleaseService(cfg)
         self._restored = False
+        self._startup_cancelled = False
+        self._startup_timer = QTimer(self)
+        self._startup_timer.setSingleShot(True)
+        self._startup_timer.setInterval(40)
+        self._startup_timer.timeout.connect(self._restore_history_once)
+        self._saved_stats_worker = None
         self._conn_check: Optional[ConnectionCheck] = None
+        self._review_shortcuts = {}
+        self._normal_sort = None
+        from ui.jellyfin_review_controls import JellyfinReviewController
+        self.library_review = JellyfinReviewController(self)
         self._setup_ui()
+        self.library_review.changed.connect(self.library_status.setText)
+        self.library_status.setText(self.library_review.last_status)
+        self.library_review.start_auto_refresh()
+        from ui.review_controls import ReviewMetadataController
+        self.metadata_controller = ReviewMetadataController(self)
+        self.metadata_controller.changed.connect(self.sync_status.setText)
+        self.metadata_controller.timer.start(1200)
         from ui.services import events
         events.media_changed.connect(self._media_changed)
+        events.config_changed.connect(self.library_review.reload)
         self._refresh_stats()
         if self._jobs.pending() or self._jobs.unfinished_sources():
             self._stats_label.setText('发现未完成任务，点击“继续未完成”恢复')
@@ -155,12 +196,22 @@ class CensorshipPage(QWidget):
         toolbar.addWidget(library)
         self.more_button = QPushButton('更多')
         menu = QMenu(self.more_button)
+        library_menu = menu.addMenu('Jellyfin 喜欢与播放状态')
+        library_menu.addAction('选择观看账号…', self.library_review.choose_user)
+        library_menu.addAction('同步喜欢和播放状态', self.library_review.refresh)
+        library_menu.addAction('导入喜欢的视频进行检查', self.library_review.import_favorites)
+        library_menu.addAction('只看喜欢且有码的视频', self._show_favorite_censored)
+        sync_menu = menu.addMenu('标签同步')
+        sync_menu.addAction('查看状态 / 重试…', lambda: self.metadata_controller.show_status())
+        sync_menu.addAction('补同步当前筛选中的人工确认…', lambda: self.metadata_controller.backfill())
+        batch_menu = menu.addMenu('批量人工确认（先选中多行）')
+        batch_menu.addAction('选中项确认有马赛克…', lambda: self._batch_label(CensorState.CENSORED))
+        batch_menu.addAction('选中项确认未见马赛克…', lambda: self._batch_label(CensorState.UNCENSORED))
         for text,callback in [('继续未完成任务',self._resume),('重试失败项',self._retry_failed),
                               ('选择延后视频…',self._choose_deferred)]:
             menu.addAction(text,callback)
         history = menu.addMenu('历史与重新分析')
-        history.addAction('加载历史记录',self._load_history)
-        history.addAction('加载更多历史',self._more_history)
+        history.addAction('加载全部历史',self._load_history)
         history.addSeparator()
         history.addAction('忽略缓存，重新分析可见的未复核项',self._reanalyze_visible)
         menu.addSeparator()
@@ -189,6 +240,12 @@ class CensorshipPage(QWidget):
         self.progress_detail.setMaximumHeight(46)
         self.progress_detail.setProperty('cssClass','muted-label')
         layout.addWidget(self.progress_detail)
+        self.data_status = QLabel(
+            f'当前资料库：{self._service.store.db_path.resolve()} · 已保存扫描 / 人工确认：等待读取')
+        self.data_status.setWordWrap(True)
+        self.data_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.data_status.setProperty('cssClass', 'muted-label')
+        layout.addWidget(self.data_status)
 
         splitter = QSplitter(Qt.Horizontal)
         self.splitter = splitter
@@ -218,8 +275,29 @@ class CensorshipPage(QWidget):
         filter_row.addWidget(self.combo_conclusion)
         filter_row.addStretch()
         left_lay.addLayout(filter_row)
+        library_filters = QHBoxLayout()
+        self.combo_favorite = QComboBox()
+        self.combo_favorite.setProperty('taskInteractive', True)
+        for text, value in [('喜欢：全部', 'all'), ('只看喜欢', 'favorite'),
+                            ('只看未喜欢', 'not_favorite'), ('喜欢未同步', 'unknown')]:
+            self.combo_favorite.addItem(text, value)
+        self.combo_playback = QComboBox()
+        self.combo_playback.setProperty('taskInteractive', True)
+        for text, value in [('播放：全部', 'all'), ('未播放', 'unplayed'),
+                            ('播放中', 'progress'), ('已播放', 'played'), ('播放未同步', 'unknown')]:
+            self.combo_playback.addItem(text, value)
+        self.combo_library_sort = QComboBox()
+        self.combo_library_sort.setProperty('taskInteractive', True)
+        self.combo_library_sort.addItem('沿用表格排序', 'normal')
+        self.combo_library_sort.addItem('喜欢优先', 'favorite_first')
+        for control in (self.combo_favorite, self.combo_playback):
+            control.currentIndexChanged.connect(self._apply_filter)
+            library_filters.addWidget(control)
+        self.combo_library_sort.currentIndexChanged.connect(self._apply_library_sort)
+        library_filters.addWidget(self.combo_library_sort)
+        left_lay.addLayout(library_filters)
         self.search = QLineEdit()
-        self.search.setPlaceholderText('搜索文件名、路径或分析依据…')
+        self.search.setPlaceholderText('搜索文件名、路径、标识、Jellyfin 标签或类型…')
         self.search.setClearButtonEnabled(True)
         self.search.setProperty('taskInteractive', True)
         self.search.textChanged.connect(self._apply_filter)
@@ -229,7 +307,7 @@ class CensorshipPage(QWidget):
         self.table.setHorizontalHeaderLabels(_COLUMNS)
         self.table.verticalHeader().hide()
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setSortingEnabled(True)
         header = self.table.horizontalHeader()
         header.setMinimumSectionSize(50)
@@ -251,6 +329,15 @@ class CensorshipPage(QWidget):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_row_menu)
         self.table.files_dropped.connect(self._start_scan)
+        self._table_shortcuts = []
+        for key, callback in [('Ctrl+A', self.table.selectAll), ('Ctrl+C', self._copy_selection),
+                              ('Ctrl+Shift+C', lambda: self._copy_selection(paths=True)),
+                              ('Ctrl+F', lambda: self.search.setFocus()), ('Escape', self.table.clearSelection)]:
+            shortcut = QShortcut(QKeySequence(key), self.table)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.setAutoRepeat(False)
+            shortcut.activated.connect(callback)
+            self._table_shortcuts.append(shortcut)
         left_lay.addWidget(self.table)
         splitter.addWidget(left)
 
@@ -308,6 +395,9 @@ class CensorshipPage(QWidget):
         next_button.clicked.connect(lambda:self._advance_review(self._current.path if self._current else ''))
         row.addWidget(next_button)
         right_lay.addLayout(row)
+        self.btn_send_versions = QPushButton('将选中视频加入版本管理')
+        self.btn_send_versions.clicked.connect(self._send_to_versions)
+        right_lay.addWidget(self.btn_send_versions)
         splitter.addWidget(right)
         splitter.setSizes([580,460])
         layout.addWidget(splitter,1)
@@ -315,13 +405,28 @@ class CensorshipPage(QWidget):
         self._stats_label.setWordWrap(True)
         self._stats_label.setProperty('cssClass','muted-label')
         layout.addWidget(self._stats_label)
+        self.sync_status = QLabel('标签同步：人工确认后自动加入；“更多 → 标签同步”查看状态或补同步')
+        self.sync_status.setWordWrap(True)
+        self.sync_status.setProperty('cssClass', 'muted-label')
+        layout.addWidget(self.sync_status)
+        self.library_status = QLabel()
+        self.library_status.setWordWrap(True)
+        self.library_status.setProperty('cssClass', 'muted-label')
+        layout.addWidget(self.library_status)
 
         self.settings_dialog = QDialog(self)
         self.settings_dialog.setWindowTitle('检查设置')
-        settings = QVBoxLayout(self.settings_dialog)
+        outer_settings = QVBoxLayout(self.settings_dialog)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        settings = QVBoxLayout(body)
+        scroll.setWidget(body)
+        outer_settings.addWidget(scroll)
+        self.settings_dialog.resize(630, 640)
         settings.addWidget(QLabel('每个视频最多保留的证据图片数：'))
         self.evidence_count = QSpinBox()
-        self.evidence_count.setRange(6,20)
+        self.evidence_count.setRange(1,20)
         self.evidence_count.setValue(self.cfg.censor_candidates)
         settings.addWidget(self.evidence_count)
         settings.addWidget(QLabel('并行视频上限（实际并发受 CPU 和内存预算约束）：'))
@@ -337,6 +442,9 @@ class CensorshipPage(QWidget):
         self.verify_replacements = QCheckBox('媒体替换完成后自动检查新版本')
         self.verify_replacements.setChecked(self.cfg.censor_verify_replacements)
         settings.addWidget(self.verify_replacements)
+        from ui.review_controls import ReviewFeatureSettings
+        self.review_settings = ReviewFeatureSettings(self.cfg)
+        settings.addWidget(self.review_settings)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close,
                                    parent=self.settings_dialog)
@@ -344,11 +452,17 @@ class CensorshipPage(QWidget):
         buttons.button(QDialogButtonBox.Close).setText('关闭')
         buttons.accepted.connect(self._save_settings)
         buttons.rejected.connect(self.settings_dialog.reject)
-        settings.addWidget(buttons)
+        outer_settings.addWidget(buttons)
         from ui.workspace_preferences import WorkspacePreferences
         self.workspace = WorkspacePreferences(self, 'pixelation', self.table, splitter=splitter,
             gallery=self.gallery, filters={'view': self.combo_filter, 'conclusion': self.combo_conclusion,
-                                          'search': self.search})
+                                          'search': self.search, 'favorite': self.combo_favorite,
+                                          'playback': self.combo_playback, 'library_sort': self.combo_library_sort})
+        if not self.workspace.state.get('jellyfin_columns_added'):
+            self.table.setColumnHidden(7, False)
+            self.table.horizontalHeader().moveSection(self.table.horizontalHeader().visualIndex(7), 1)
+            self.table.setColumnWidth(7, 82)
+            self.workspace.state['jellyfin_columns_added'] = True
         menu.addSeparator()
         menu.addMenu(self.workspace.menu(self.more_button)).setText('工作区布局与偏好')
 
@@ -358,21 +472,27 @@ class CensorshipPage(QWidget):
             self.scan_workers.setValue(self.cfg.censor_workers)
             self.memory_budget.setValue(self.cfg.censor_memory_mb)
             self.verify_replacements.setChecked(self.cfg.censor_verify_replacements)
+            self.review_settings.reload(self.cfg)
             self.settings_dialog.exec()
 
     def _save_settings(self):
         """设置项改的是内存里的 cfg，这里显式落盘 —— 不必等关程序。"""
         try:
-            self.cfg.censor_candidates = self.evidence_count.value()
-            self.cfg.censor_workers = self.scan_workers.value()
-            self.cfg.censor_memory_mb = self.memory_budget.value()
-            self.cfg.censor_verify_replacements = self.verify_replacements.isChecked()
-            self.cfg.save()
+            from copy import deepcopy
+            updated = deepcopy(self.cfg)
+            updated.censor_candidates = self.evidence_count.value()
+            updated.censor_workers = self.scan_workers.value()
+            updated.censor_memory_mb = self.memory_budget.value()
+            updated.censor_verify_replacements = self.verify_replacements.isChecked()
+            self.review_settings.apply(updated)
+            updated.save()
+            vars(self.cfg).update(vars(updated))
             from ui.services import events
             events.config_changed.emit()
             self._stats_label.setText('设置已保存')
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             self._stats_label.setText(f'设置保存失败：{exc}')
+            return
         self.settings_dialog.accept()
 
     def _show_help(self):
@@ -396,13 +516,44 @@ class CensorshipPage(QWidget):
         else:
             self._stats_label.setText('当前没有可重新分析的未复核项；延后视频请从选择菜单手动勾选')
 
-    # ── 打开页面：把"没做完的活"接过来 ──
+    # ── 首次打开：异步读取完整持久历史，保留已保存的筛选 ──
     def showEvent(self, event):  # noqa: N802 - Qt 约定
         super().showEvent(event)
         if self._restored:
             return
         self._restored = True
-        self._restore_pending()
+        self._startup_timer.start()
+
+    def _restore_history_once(self):
+        if self._startup_cancelled or getattr(self.window(), '_closing', False):
+            return
+        if busy(self):
+            # An import or scan may already own this page. Never interrupt it,
+            # and recheck results when it has finished before deciding to load.
+            self._startup_timer.start()
+            return
+        if self._results:
+            worker = _SavedHistoryWorker(self._service.store, records=False, parent=self)
+            self._saved_stats_worker = worker
+            worker.saved_stats.connect(self._show_saved_stats)
+            worker.error.connect(self._on_log)
+            start_task(self, worker, '读取像素化资料库计数')
+            return
+        self._load_history()
+
+    def _show_saved_stats(self, stats):
+        self.data_status.setText(
+            f'当前资料库：{self._service.store.db_path.resolve()} · '
+            f'已保存扫描 {stats.total} 条 · 人工确认 {stats.labeled} 条')
+
+    def _cancel_startup(self):
+        self._restored = True
+        self._startup_cancelled = True
+        self._startup_timer.stop()
+
+    def closeEvent(self, event):  # noqa: N802 - Qt 约定
+        self._cancel_startup()
+        super().closeEvent(event)
 
     def _restore_pending(self) -> None:
         """自动载入数据库里的待处理项。
@@ -655,19 +806,21 @@ class CensorshipPage(QWidget):
         rows = [self.table.item(r, 0).data(Qt.UserRole) for r in range(self.table.rowCount())]
         start = rows.index(after_path) + 1 if after_path in rows else 0
         for path in rows[start:] + rows[:start]:
-            if path != after_path and needs_review(self._results[path]):
+            if (path != after_path and needs_review(self._results[path])
+                    and self._matches_filter(self._results[path])):
                 row = next(r for r in range(self.table.rowCount())
                            if self.table.item(r, 0).data(Qt.UserRole) == path)
-                if self.table.isRowHidden(row):
-                    self.combo_filter.setCurrentText('只看待复核')
                 self.table.selectRow(row)
                 self._on_row_selected()
                 self.table.scrollToItem(self.table.item(row, 0))
                 return
+        self._clear_current_review('当前筛选范围没有其他待复核视频；可调整筛选或加载全部历史')
+
+    def _clear_current_review(self, message='请选择当前筛选范围内的视频'):
         self._current = None
         self.table.clearSelection()
         self.txt_evidence.clear()
-        self.lbl_review_title.setText('当前列表没有其他待复核视频；可加载更多历史或查看延后列表')
+        self.lbl_review_title.setText(message)
         self.gallery.show_candidates([])
 
     def _choose_deferred(self):
@@ -726,31 +879,75 @@ class CensorshipPage(QWidget):
     def _load_history(self):
         if busy(self):
             return
+        self._cancel_startup()
         self._clear()
+        self._finishing = False
         self._history_offset = 0
-        self._more_history()
-
-    def _more_history(self):
-        if busy(self):
-            return
-        offset = self._history_offset
-        self._history_worker = CallWorker(lambda cancel:self._service.store.history(500,offset))
-        self._history_worker.result.connect(self._on_history_loaded)
+        self._history_loading = True
+        self._history_worker = _SavedHistoryWorker(self._service.store, parent=self)
+        self._history_worker.saved_stats.connect(self._show_saved_stats)
+        self._history_worker.page_ready.connect(self._on_history_loaded)
+        self._history_worker.result.connect(self._on_history_finished)
         self._history_worker.error.connect(self._on_log)
-        start_task(self,self._history_worker,'读取像素化历史')
+        self.progress_title.setText('正在加载全部历史…')
+        self.scan_progress.setRange(0, 0)
+        self._set_running(True)
+        if not start_task(self,self._history_worker,'加载全部像素化历史'):
+            self._history_loading = False
+            self._set_running(False)
 
     def _on_history_loaded(self, rows):
+        sender = self.sender()
+        if isinstance(sender, HistoryLoadWorker) and (
+                sender is not self._history_worker or not self._history_loading):
+            return
+        total = rows.get('total', rows.get('next_offset', 0)) if isinstance(rows, dict) else len(rows)
+        if isinstance(rows, dict):
+            self._history_offset = rows['next_offset']
+            rows = rows['records']
+        else:  # Compatibility for callers delivering the original list API.
+            self._history_offset += len(rows)
         for result in rows:
             result.from_history = True
             self._queue_item(result)
-        self._history_offset += len(rows)
-        self.progress_title.setText(f'历史快照 · 已加载 {self._history_offset} 条，尚未校验当前文件')
-        self.scan_progress.setRange(0,100)
-        self.scan_progress.setValue(100)
-        self.scan_progress.setFormat('历史已加载')
+        self.progress_title.setText(f'正在加载历史 · 已读取 {self._history_offset}/{total} 条，尚未校验当前文件')
+        self.scan_progress.setRange(0,max(1, total))
+        self.scan_progress.setValue(self._history_offset)
+        self.scan_progress.setFormat('%p%')
         self.progress_detail.setText('历史成功只表示当时分析完成；疑似项仍需复核。重新添加文件可校验版本并复用或重算。')
+        if self._history_loading and not self._pending_results:
+            self._history_worker.acknowledge()
+
+    def _on_history_finished(self, summary):
+        if self.sender() is not self._history_worker:
+            return
+        self._history_loading = False
+        self._set_running(False)
+        loaded = len(self._results)
+        if summary.get('error'):
+            title = f'历史读取失败 · 已保留 {loaded} 条'
+        elif summary.get('cancelled'):
+            title = f'历史加载已停止 · 已加载 {loaded} 条，记录仍保存在数据库'
+        else:
+            skipped = summary['read'] - loaded
+            title = f'历史已全部加载 · {loaded} 条，尚未校验当前文件'
+            if skipped:
+                title += f' · 跳过 {skipped} 条损坏记录'
+        self.progress_title.setText(title)
+        self.scan_progress.setRange(0, max(1, summary['total']))
+        value = loaded if summary.get('cancelled') else summary['read']
+        if not summary.get('cancelled') and not summary.get('error'):
+            value = max(1, value)
+        self.scan_progress.setValue(value)
+        self._refresh_stats()
 
     def _stop(self) -> None:
+        self._cancel_startup()
+        self.metadata_controller.pause()
+        if self._history_loading:
+            self._history_loading = False
+            self._pending_results.clear()
+            self._render_timer.stop()
         stop_page(self)
         self.progress_title.setText('已请求停止，正在收尾…')
 
@@ -758,6 +955,13 @@ class CensorshipPage(QWidget):
         self.btn_stop.setEnabled(running)
 
     def shutdown(self) -> None:
+        self._cancel_startup()
+        self.library_review.shutdown()
+        self.metadata_controller.pause()
+        if self._history_loading:
+            self._history_loading = False
+            self._pending_results.clear()
+            self._render_timer.stop()
         self.workspace.save()
         if self._conn_check is not None and self._conn_check.isRunning():
             self._conn_check.stop()
@@ -795,6 +999,8 @@ class CensorshipPage(QWidget):
         self._refresh_stats()
         if not self._pending_results:
             self._render_timer.stop()
+            if self._history_loading:
+                self._history_worker.acknowledge()
             if self._finishing:
                 self._finish_view()
 
@@ -861,6 +1067,7 @@ class CensorshipPage(QWidget):
                 item.setData(Qt.UserRole, result.path)
                 item.setToolTip(result.path)
             self.table.setItem(row, col, item)
+        self._set_library_cells(row, result.path)
         self._row_of[result.path] = row
         if not self._batching:
             self.table.setSortingEnabled(True)
@@ -916,14 +1123,119 @@ class CensorshipPage(QWidget):
     def _matches_filter(self, result) -> bool:
         """视图（我现在想干什么）× 结论（有没有码）—— 两个维度独立的 AND。"""
         words = self.search.text().casefold().split()
-        text = f'{result.path} {result.number} {result.verdict.reason}'.casefold()
+        item = self.library_review.item(result.path)
+        labels = ' '.join(str(value) for value in [item.get('name', ''),
+            *(item.get('tags') or []), *(item.get('genres') or [])])
+        text = f'{result.path} {result.number} {result.verdict.reason} {labels}'.casefold()
         if not all(word in text for word in words):
             return False
         view = self._current_view()
         if not in_view(view, review_bucket(result)):
             return False
         state = self.combo_conclusion.currentData()
-        return not state or result.state.value == state
+        if state and result.state.value != state:
+            return False
+        favorite, played = item.get('is_favorite'), item.get('played')
+        preference = self.combo_favorite.currentData()
+        if ((preference == 'favorite' and favorite is not True)
+                or (preference == 'not_favorite' and favorite is not False)
+                or (preference == 'unknown' and favorite is not None)):
+            return False
+        watching = self.combo_playback.currentData()
+        progress = bool(item.get('has_progress') or item.get('playback_ticks', 0))
+        return not ((watching == 'played' and played is not True)
+                    or (watching == 'unplayed' and (played is not False or progress))
+                    or (watching == 'progress' and (played is None or played or not progress))
+                    or (watching == 'unknown' and played is not None))
+
+    def _set_library_cells(self, row, path):
+        item = self.library_review.item(path)
+        favorite = item.get('is_favorite')
+        cell = _FavoriteItem('♥ 喜欢' if favorite is True else '未喜欢' if favorite is False else '未同步')
+        cell.setData(Qt.UserRole + 1, 2 if favorite is True else 1 if favorite is False else 0)
+        cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
+        cell.setToolTip('所选 Jellyfin 账号的状态；未匹配或未同步保持未知')
+        self.table.setItem(row, 7, cell)
+        played = item.get('played')
+        text = ('未同步' if played is None else '已播放' if played else '播放中'
+                if item.get('has_progress') or item.get('playback_ticks', 0) else '未播放')
+        cell = QTableWidgetItem(text)
+        cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
+        self.table.setItem(row, 8, cell)
+
+    def _apply_library_sort(self):
+        if not hasattr(self, 'table'):
+            return
+        header = self.table.horizontalHeader()
+        if self.combo_library_sort.currentData() == 'favorite_first':
+            if self._normal_sort is None:
+                self._normal_sort = (header.sortIndicatorSection(), header.sortIndicatorOrder())
+            self.table.sortItems(7, Qt.DescendingOrder)
+        elif self._normal_sort is not None:
+            column, order = self._normal_sort
+            self._normal_sort = None
+            self.table.sortItems(column, order)
+
+    def _show_favorite_censored(self):
+        self.combo_filter.setCurrentIndex(self.combo_filter.findData(WorkflowView.ALL.value))
+        self.combo_conclusion.setCurrentIndex(self.combo_conclusion.findData(CensorState.CENSORED.value))
+        self.combo_favorite.setCurrentIndex(self.combo_favorite.findData('favorite'))
+        self._load_history()
+
+    def _selected_visible_paths(self):
+        rows = sorted({index.row() for index in self.table.selectionModel().selectedIndexes()})
+        return [self.table.item(row, 0).data(Qt.UserRole) for row in rows
+                if not self.table.isRowHidden(row)]
+
+    def _copy_selection(self, *, paths=False):
+        from PySide6.QtWidgets import QApplication
+        selected = self._selected_visible_paths()
+        QApplication.clipboard().setText('\n'.join(selected if paths else [os.path.basename(p) for p in selected]))
+
+    def _send_to_versions(self):
+        paths = self._selected_visible_paths()
+        if not paths and self._current and self._matches_filter(self._current):
+            paths = [self._current.path]
+        if not paths:
+            self._flash('先在当前筛选范围选中需要管理版本的视频')
+            return
+        from ui.services import events
+        events.media_upgrade_requested.emit(list(dict.fromkeys(paths)))
+        self._flash(f'已将 {len(paths)} 个选中视频交给版本管理；尚未替换文件')
+
+    def set_review_shortcut(self, name, sequence):
+        button = getattr(self, {'censored': 'btn_censored', 'uncensored': 'btn_uncensored', 'next': 'btn_next'}[name])
+        button.setShortcut(QKeySequence())
+        old = self._review_shortcuts.pop(name, None)
+        if old is not None:
+            old.setEnabled(False)
+            old.deleteLater()
+        shortcut = QShortcut(QKeySequence(sequence), self)
+        shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        shortcut.setAutoRepeat(False)
+        shortcut.activated.connect(lambda: self._run_review_shortcut(name))
+        self._review_shortcuts[name] = shortcut
+        button.setToolTip(f'{QKeySequence(sequence).toString()} · 焦点在复核工作区时可用；输入文字时不确认')
+
+    def _run_review_shortcut(self, name):
+        from PySide6.QtWidgets import QApplication
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)):
+            return
+        if name == 'next':
+            self._advance_review(self._current.path if self._current else '')
+        else:
+            button = self.btn_censored if name == 'censored' else self.btn_uncensored
+            if button.isEnabled():
+                state = CensorState.CENSORED if name == 'censored' else CensorState.UNCENSORED
+                if len(self._selected_visible_paths()) > 1:
+                    self._batch_label(state)
+                else:
+                    self._label(state)
+
+    def on_config_changed(self):
+        from ui.services import refresh_configuration
+        refresh_configuration(self)
+        self.library_review.reload()
 
     def _apply_filter(self) -> None:
         for row in range(self.table.rowCount()):
@@ -931,14 +1243,18 @@ class CensorshipPage(QWidget):
             result = self._results.get(item.data(Qt.UserRole)) if item else None
             if result is not None:
                 self.table.setRowHidden(row,not self._matches_filter(result))
+        if self._current is not None and not self._matches_filter(self._current):
+            if self._selected_visible_paths():
+                self._on_row_selected()
+            else:
+                self._clear_current_review()
 
     # ── 复核 ──
     def _on_row_selected(self) -> None:
-        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
-        if not rows:
+        paths = self._selected_visible_paths()
+        if not paths:
             return
-        item = self.table.item(rows[0].row(), 0)
-        path = item.data(Qt.UserRole) if item else None
+        path = paths[0]
         result = self._results.get(path)
         if result is None:
             return
@@ -955,6 +1271,13 @@ class CensorshipPage(QWidget):
         if result.path:
             lines.insert(1, '调度线索：' + (result.scheduling_note or '历史记录暂无调度线索'))
         lines.insert(0,'记录来源：'+self._record_source(result)+'；分析完成不等于人工确认')
+        for run in result.detector_runs.values():
+            if run.get('status') == 'retained_manual':
+                lines.append('已有当前版本人工确认，保留原始视觉证据；需要新分析可用深入检查。')
+            plan = run.get('triage') or {}
+            if plan.get('enabled'):
+                lines.append(f"分组快速检查：{plan.get('group', '')} · {plan.get('sampled_samples', result.sampled_frames)}/{plan.get('planned_samples', '')} 个计划点 · "
+                             + ('已补检' if plan.get('refined') else '首轮低风险，非人工确认'))
         if result.from_history:
             lines.insert(1,'历史快照尚未校验当前文件；重新添加后将校验文件身份、参数及算法版本。')
         if result.error:
@@ -1000,9 +1323,11 @@ class CensorshipPage(QWidget):
 
     def _resolve_current(self):
         """取当前要标记的那一条：选中 → 当前行 → 第一个可见行。"""
-        if self._current is not None:
+        if self._current is not None and self._matches_filter(self._current):
             return self._current
         row = self.table.currentRow()
+        if row >= 0 and self.table.isRowHidden(row):
+            row = -1
         if row < 0:
             rows = [r for r in range(self.table.rowCount()) if not self.table.isRowHidden(r)]
             row = rows[0] if rows else -1
@@ -1020,7 +1345,7 @@ class CensorshipPage(QWidget):
                 '没有可标记的行：当前视图'
                 f'（{self.combo_filter.currentText()}）里一行都没有'
                 + (f'，共 {total} 条被筛掉了 —— 切到「全部记录」看看' if total else
-                   '。先拖入视频检查，或点「更多 → 加载历史记录」'))
+                   '。先拖入视频检查，或点「更多 → 历史与重新分析 → 加载全部历史」'))
             return
         self._current = current
         path = current.path
@@ -1058,6 +1383,11 @@ class CensorshipPage(QWidget):
                     f"已标记「无码」：{os.path.basename(path)} —— 不需要找替换")
             from ui.services import events
             events.censor_changed.emit([path])
+            message = getattr(self._service, 'last_metadata_sync_error', '')
+            if message:
+                self.sync_status.setText(message)
+            else:
+                self.metadata_controller.schedule()
         self._refresh_stats()
         if self.workspace.state.get('auto_next', True):
             self._advance_review(path)
@@ -1073,11 +1403,62 @@ class CensorshipPage(QWidget):
             self._flash(f'撤回失败：{exc}')
             return
         self._review_overrides.pop(current.path, None)
-        if result:
-            self._on_item(result)
+        if result is None:
+            result = VideoVerdict(path=current.path, status=ProcessingStatus.PARTIAL,
+                error='当前文件无匹配的分析记录，请重新检查；旧版本历史保留')
+            result.verdict.needs_review = True
+        self._on_item(result)
         from ui.services import events
         events.censor_changed.emit([current.path])
+        self.metadata_controller.schedule()
         self._flash('已撤回人工确认，历史保留；可重新检查')
+
+    def _batch_label(self, state):
+        if busy(self):
+            return
+        paths = self._selected_visible_paths()
+        if not paths:
+            self._flash('先用 Ctrl / Shift 选中已审核的视频；只处理当前筛选中可见的选中项')
+            return
+        conclusion = '有马赛克' if state is CensorState.CENSORED else '未见马赛克'
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle('批量人工确认')
+        dialog.setText(f'将 {len(paths)} 个选中视频确认为“{conclusion}”。\n这是你的人工结论；低风险抽样本身不证明全片不存在。确认后按设置同步 NFO / 服务器标签。')
+        dialog.setDetailedText('\n'.join(paths))
+        dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        dialog.button(QMessageBox.Yes).setText(f'确认这 {len(paths)} 个视频')
+        dialog.setDefaultButton(QMessageBox.Cancel)
+        if dialog.exec() == QMessageBox.Yes:
+            self._start_batch_confirmation(paths, state)
+
+    def _start_batch_confirmation(self, paths, state):
+        if busy(self):
+            return
+        items = [self._results[path] for path in dict.fromkeys(paths)
+                 if path in self._results and self._matches_filter(self._results[path])]
+        if not items:
+            return
+        from ui.review_controls import BatchConfirmationWorker
+        worker = BatchConfirmationWorker(self._service, items, state)
+        self._batch_review_worker = worker
+        worker.item_done.connect(self._on_batch_confirmed)
+        worker.result.connect(self._on_batch_confirmation_done)
+        start_task(self, worker, '批量保存人工确认')
+
+    def _on_batch_confirmed(self, result):
+        self._review_overrides[result.path] = result
+        self._queue_item(result)
+
+    def _on_batch_confirmation_done(self, report):
+        from ui.services import events
+        if report['paths']:
+            events.censor_changed.emit(report['paths'])
+        if report['cancelled']:
+            self.metadata_controller.pause()
+        else:
+            self.metadata_controller.schedule()
+        self._flash(f"批量确认已保存 {report['completed']} 个；失败 {report['fail']} 个"
+                    + ('；已停止，已保存的确认保留' if report['cancelled'] else ''))
 
     def _send_lada(self):
         current = self._resolve_current()

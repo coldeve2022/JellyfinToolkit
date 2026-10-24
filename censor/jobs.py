@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
 
@@ -106,8 +107,14 @@ class ScanJobs:
             ).fetchone()
         return row[0] if row else "历史记录暂无调度线索"
 
+    @contextmanager
     def connect(self):
-        return sqlite3.connect(self.db_path, timeout=15)
+        connection = sqlite3.connect(self.db_path, timeout=15)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def key(path):

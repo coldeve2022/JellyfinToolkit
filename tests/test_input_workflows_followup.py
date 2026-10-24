@@ -239,6 +239,9 @@ def test_replace_folder_drop_reaches_same_pairing_preview(qapp, qtbot, cfg, tmp_
     target = library / "Movie.mp4"
     target.write_bytes(b"old fixture")
     page = ReplacePage(cfg)
+    # The reviewed generic upgrade is now the default; exercise the retained
+    # restored-name pairing explicitly in this compatibility regression.
+    page.match_mode.setCurrentIndex(page.match_mode.findData('restored'))
     page.show()
     qapp.processEvents()
     assert all(drop_urls(page.list_restored, [restored]))

@@ -1,6 +1,7 @@
 """Persist presentation choices separately from analysis configuration."""
 from copy import deepcopy
 import base64
+import binascii
 import json
 
 from PySide6.QtCore import QObject, QTimer, QEvent, Qt, QByteArray, QSignalBlocker
@@ -92,11 +93,13 @@ class WorkspacePreferences(QObject):
                 except (ValueError, TypeError):
                     self.state[key] = self._defaults[key]
             if self.state.get('header'):
-                self.table.horizontalHeader().restoreState(QByteArray(base64.b64decode(self.state['header'])))
+                self._restore_layout('header', self.table.horizontalHeader().restoreState)
+            # The identity column cannot be enabled through its disabled menu action.
+            self.table.setColumnHidden(0, False)
             if self.splitter:
                 self.splitter.setOrientation(Qt.Vertical if self.state.get('vertical') else Qt.Horizontal)
                 if self.state.get('splitter'):
-                    self.splitter.restoreState(QByteArray(base64.b64decode(self.state['splitter'])))
+                    self._restore_layout('splitter', self.splitter.restoreState)
             font = QFont(self.owner.font())
             font.setPointSize(self.state['font_size'])
             self.owner.setFont(font)
@@ -115,17 +118,36 @@ class WorkspacePreferences(QObject):
                         control.setText(str(filters[name]))
             shortcuts = self.state.get('shortcuts')
             if not isinstance(shortcuts, dict):
-                shortcuts = self._defaults['shortcuts']
+                shortcuts = {}
+            self.state['shortcuts'] = {
+                name: shortcuts[name] if isinstance(shortcuts.get(name), str) else default
+                for name, default in self._defaults['shortcuts'].items()}
             for name, attr in (("censored", "btn_censored"), ("uncensored", "btn_uncensored"),
                                ("next", "btn_next")):
                 button = getattr(self.owner, attr, None)
                 if button is not None:
-                    button.setShortcut(QKeySequence(str(shortcuts.get(name, ''))))
+                    setter = getattr(self.owner, 'set_review_shortcut', None)
+                    if callable(setter):
+                        setter(name, self.state['shortcuts'][name])
+                    else:
+                        button.setShortcut(QKeySequence(self.state['shortcuts'][name]))
         except (ValueError, TypeError):
             pass
         finally:
             self._applying = False
         self._sync_menus()
+
+    def _restore_layout(self, key, restore):
+        """A damaged layout must not prevent independent preferences restoring."""
+        try:
+            value = self.state[key]
+            if not isinstance(value, str):
+                raise TypeError('Layout state must be base64 text')
+            if restore(QByteArray(base64.b64decode(value, validate=True))):
+                return
+        except (ValueError, TypeError, binascii.Error):
+            pass
+        self.state.pop(key, None)
 
     def reset(self):
         self.state = deepcopy(self._defaults)

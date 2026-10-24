@@ -55,7 +55,7 @@ def source_digest(root):
     return digest.hexdigest()
 
 
-def write_receipt(root, receipt, checks):
+def write_receipt(root, receipt, checks, *, source_dirty=False):
     if set(checks) != REQUIRED or any(code != 0 for code in checks.values()):
         raise ValueError("完整发布检查尚未通过")
     payload = {
@@ -66,6 +66,7 @@ def write_receipt(root, receipt, checks):
         "verified_at": datetime.now(timezone.utc).isoformat(),
         "python": sys.version,
         "platform": sys.platform,
+        "source_dirty": bool(source_dirty),
     }
     path = Path(receipt)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,8 +90,11 @@ def validate_receipt(root, receipt):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--receipt", default=str(ROOT / "build" / "verification.json"))
+    parser.add_argument('--allow-dirty', action='store_true',
+                        help='仅用于本地打包：允许未提交源码，仍完整检查并绑定精确内容摘要')
     args = parser.parse_args()
-    if _git(ROOT, "status", "--porcelain"):
+    dirty = bool(_git(ROOT, "status", "--porcelain"))
+    if dirty and not args.allow_dirty:
         print("发布检查需要已提交的干净源码；先保存并提交所有实现和文档", file=sys.stderr)
         return 1
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONIOENCODING="utf-8")
@@ -110,6 +114,7 @@ def main():
                 "utils",
                 "workers",
                 "automation",
+                "censor",
                 "scripts",
                 "tools",
                 "tests",
@@ -126,7 +131,7 @@ def main():
     if initial_digest != source_digest(ROOT):
         print("检查期间源码变化，拒绝记录为已验证版本", file=sys.stderr)
         return 1
-    write_receipt(ROOT, args.receipt, checks)
+    write_receipt(ROOT, args.receipt, checks, source_dirty=dirty)
     return 0
 
 

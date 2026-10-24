@@ -1,10 +1,14 @@
 """A dedicated metadata-only WebEngine session; no exported browser credentials."""
 from dataclasses import dataclass, field
 from threading import Event, Lock
+import json
+import os
+import sys
 import time
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from PySide6.QtCore import QObject, Signal, Slot, QTimer, QUrl, QThread
+from PySide6.QtCore import QObject, Qt, Signal, Slot, QTimer, QUrl, QThread
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QMessageBox
 
 from censor.releases.supjav_pages import article_url
@@ -20,6 +24,29 @@ def metadata_url(url):
     keys = {key for key in query if not key.startswith('__cf_chl_')}
     return bool((article_url(url) and not keys) or (parsed.path in ('/', '/zh/', '/ja/', '/en/')
                                     and keys == {'s'}))
+
+
+def _debug(message: str) -> None:
+    """排查用日志：设 ``SUPJAV_DEBUG=1`` 才输出到 stderr。"""
+    if os.environ.get("SUPJAV_DEBUG"):
+        print(message, file=sys.stderr, flush=True)
+
+
+def _target_key(url: str):
+    """比较"是不是同一个目标"，忽略 Cloudflare 追加的 __cf_chl_* 与参数顺序。"""
+    parsed = urlsplit(url)
+    query = {
+        key: tuple(sorted(value))
+        for key, value in parse_qs(parsed.query).items()
+        if not key.startswith('__cf_chl_')
+    }
+    return (article_url(url) or parsed.path.rstrip('/'), tuple(sorted(query.items())))
+
+
+def _same_target(effective: str, requested: str) -> bool:
+    if article_url(effective) or article_url(requested):
+        return article_url(effective) == article_url(requested)
+    return _target_key(effective) == _target_key(requested)
 
 
 @dataclass
@@ -57,6 +84,23 @@ class SupjavBrowserSession(QObject):
         self._timer.timeout.connect(self._poll)
         QApplication.instance().aboutToQuit.connect(self.dispose)
 
+    def _ensure_visible(self) -> None:
+        """让窗口真的显示出来，但不抢焦点。
+
+        为什么必须显示：Chromium 对不可见窗口会节流定时器与 rAF，
+        Cloudflare 的挑战脚本靠这些跑完；窗口藏着的时候挑战永远过不去，
+        表现就是"浏览器会话开了，但一直读不到页面"。
+        """
+        if self._disposed:
+            return
+        self._ensure_page()
+        try:
+            self.window.setAttribute(Qt.WA_ShowWithoutActivating, True)
+            if not self.window.isVisible():
+                self.window.show()
+        except RuntimeError:
+            pass
+
     def _ensure_page(self):
         if self._page is not None:
             return
@@ -72,13 +116,17 @@ class SupjavBrowserSession(QObject):
                 kind = info.resourceType()
                 types = QWebEngineUrlRequestInfo.ResourceType
                 challenge = host == 'challenges.cloudflare.com'
+                reason = ''
                 if host not in ('supjav.com', 'www.supjav.com') and not challenge:
-                    info.block(True)
+                    reason = '外域'
                 elif kind in (types.ResourceTypeMedia, types.ResourceTypeImage) and not challenge:
-                    info.block(True)
+                    reason = '媒体/图片'
                 elif kind == types.ResourceTypeMainFrame and not metadata_url(url.toString()):
-                    info.block(True)
+                    reason = '非元数据主框架'
                 elif kind == types.ResourceTypeSubFrame and not challenge:
+                    reason = '子框架'
+                _debug(f"[guard] {kind} block={bool(reason)} {reason} {url.toString()[:90]}")
+                if reason:
                     info.block(True)
 
         class Page(QWebEnginePage):
@@ -86,13 +134,21 @@ class SupjavBrowserSession(QObject):
                 return None
 
             def acceptNavigationRequest(self, url, kind, is_main):
-                return (metadata_url(url.toString()) if is_main else url.host() == 'challenges.cloudflare.com')
+                allowed = (metadata_url(url.toString()) if is_main
+                           else url.host() == 'challenges.cloudflare.com')
+                _debug(f"[accept] main={is_main} allowed={allowed} url={url.toString()!r}")
+                return allowed
 
-        root = DATA_DIR / 'supjav-browser'
+        # 存储路径必须是纯 ASCII：QtWebEngine 的磁盘缓存/LevelDB 在非 ASCII 路径下
+        # 可能初始化失败，表现为 loadFinished=False、URL 一直是空 —— 看起来像
+        # "浏览器开了但什么都没加载"。程序数据目录可能就在中文路径里。
+        base = os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA') or str(DATA_DIR)
+        root = Path(base) / 'JellyfinToolkit' / 'supjav-browser'
         root.mkdir(parents=True, exist_ok=True)
-        profile = QWebEngineProfile('supjav-metadata', self)
-        profile.setPersistentStoragePath(str(root / 'storage'))
-        profile.setCachePath(str(root / 'cache'))
+        # 用默认 profile：命名 profile + 自定义 storage 在本机实测会导致
+        # loadFinished=False、URL 始终为空（Chromium 的存储初始化失败），
+        # 而默认 profile 持久化在 LOCALAPPDATA，路径是 ASCII，稳定。
+        profile = QWebEngineProfile.defaultProfile()
         self._guard = Guard(profile)
         profile.setUrlRequestInterceptor(self._guard)
         profile.downloadRequested.connect(lambda download: download.cancel())
@@ -116,9 +172,54 @@ class SupjavBrowserSession(QObject):
         if self._current is None:
             self._page.load(QUrl('https://supjav.com/?s=SYNTHETIC-NOMATCH-748921'))
 
+    # ── 页面缓存：同一番号二次检索不再过一次 Cloudflare ──
+    def _cache_file(self, url):
+        import hashlib
+        from pathlib import Path
+        from config import DATA_DIR
+
+        folder = Path(DATA_DIR) / 'supjav-browser' / 'pages'
+        return folder / (hashlib.sha1(url.encode('utf-8')).hexdigest() + '.json')
+
+    def _cache_ttl(self) -> float:
+        try:
+            from config import ToolkitConfig
+
+            days = float(getattr(ToolkitConfig.load(), 'release_cache_days', 7) or 7)
+        except Exception:  # noqa: BLE001
+            days = 7.0
+        return max(0.0, days) * 86400.0
+
+    def _cache_get(self, url):
+        ttl = self._cache_ttl()
+        if ttl <= 0:
+            return None
+        try:
+            payload = json.loads(self._cache_file(url).read_text(encoding='utf-8'))
+            if time.time() - float(payload['at']) > ttl:
+                return None
+            html = str(payload.get('html') or '')
+            return html if html.strip() else None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _cache_put(self, url, html) -> None:
+        if not html or not html.strip():
+            return
+        try:
+            path = self._cache_file(url)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({'url': url, 'at': time.time(), 'html': html}),
+                            encoding='utf-8')
+        except OSError:
+            pass
+
     def read(self, url, *, timeout=45., should_stop=None):
         if not metadata_url(url):
             raise TransportError('只允许 Supjav 的搜索与文章元数据地址')
+        cached = self._cache_get(url)
+        if cached is not None:
+            return cached
         if self._disposed:
             # 快速失败：否则后台线程要先把锁等满 timeout 才知道会话没了
             raise TransportError('浏览器会话已关闭，请重新连接 Supjav 会话')
@@ -142,6 +243,7 @@ class SupjavBrowserSession(QObject):
                     raise TransportError('Supjav 浏览器读取超时；请打开会话窗口检查验证或网络')
             if request.error:
                 raise TransportError(request.error)
+            self._cache_put(url, request.html)
             return request.html
         finally:
             self._lock.release()
@@ -150,6 +252,8 @@ class SupjavBrowserSession(QObject):
     def _begin(self, request):
         if request.done.is_set() or self._disposed:
             return
+        # 这里是 GUI 线程，能安全地显示窗口
+        self._ensure_visible()
         self._current = request
         try:
             self._navigate(request)
@@ -158,11 +262,19 @@ class SupjavBrowserSession(QObject):
 
     def _navigate(self, request):
         self._ensure_page()
+        _debug(f"[nav] load {request.url}")
         self._page.load(QUrl(request.url))
         self._timer.start()
 
     @Slot(bool)
     def _loaded(self, ok):
+        if not ok and not self._page.url().toString():
+            # URL 为空说明连导航都没起来：多半是 Chromium 沙箱在本机起不来
+            # （受限账户、安全软件）。给出可执行的下一步，而不是干等 45 秒。
+            self.status.setText(
+                '浏览器内核没有启动（页面未加载）。若反复出现，可尝试在启动脚本里设置 '
+                'JELLYFIN_TOOLKIT_WEBENGINE_NO_SANDBOX=1 后重启程序。')
+        _debug(f"[nav] loadFinished ok={ok} url={self._page.url().toString()!r}")
         if self._current is not None:
             self._poll()
         elif ok:
@@ -189,8 +301,7 @@ class SupjavBrowserSession(QObject):
             return
         if not metadata_url(effective):
             return
-        actual, wanted = article_url(effective), article_url(request.url)
-        if actual != wanted or (not wanted and parse_qs(urlsplit(effective).query).get('s') != parse_qs(urlsplit(request.url).query).get('s')):
+        if not _same_target(effective, request.url):
             return  # Ignore callbacks from the previous page while navigation is pending.
         if HttpTransport._looks_blocked(html.encode('utf-8')):
             self.status.setText('Supjav 仍要求验证，请在此窗口手动完成，然后检索会继续。')

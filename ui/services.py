@@ -7,6 +7,8 @@ import json
 import uuid
 from datetime import datetime
 
+from shiboken6 import isValid
+
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -29,6 +31,7 @@ class Events(QObject):
     censor_changed = Signal(list)
     replacement_ready = Signal(list, list)
     lada_ready = Signal(list)
+    media_upgrade_requested = Signal(list)
 
 
 events = Events()
@@ -460,8 +463,11 @@ class TaskManager(QObject):
                 except RuntimeError:
                     pass
             del self._active[task_id]
-            if isinstance(entry['worker'], QObject) and entry['worker'].property('taskAutoDelete'):
-                entry['worker'].deleteLater()
+            worker = entry['worker']
+            # A stopped parent-owned thread may already have been destroyed
+            # with its page; its Python stats above still describe the outcome.
+            if isinstance(worker, QObject) and isValid(worker) and worker.property('taskAutoDelete'):
+                worker.deleteLater()
             self._save_history()
             self.changed.emit()
 

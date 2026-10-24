@@ -129,6 +129,15 @@ class SupjavSource(ReleaseSource):
 
     def _direct(self, query, should_stop, limit):
         url = 'https://supjav.com/?s=' + quote(query.number or query.title_hint)
+        try:
+            return self._direct_inner(query, should_stop, limit, url)
+        except TransportError as exc:
+            # 把站内这一层的真实失败写进 status_detail —— 否则用户只看到"未查成"，
+            # 分不清是代理、Cloudflare 还是页面结构变了
+            self.status_detail['站内'] = f'未完成：{exc}'
+            raise
+
+    def _direct_inner(self, query, should_stop, limit, url):
         links, has_next = search_links(self._page(url), query.number or query.title_hint)
         found, failures = [], []
         for url in list(links)[:max(1, limit)]:

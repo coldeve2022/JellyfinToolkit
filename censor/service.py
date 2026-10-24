@@ -11,8 +11,10 @@ import hashlib
 import json
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any, Callable, Iterable, Iterator, Optional
 
 from censor.base import BaseDetector, ProbeContext
@@ -140,12 +142,16 @@ class CensorService:
             label = self.store.get_label(target, file_identity=identity)
             signature = self._analysis_signature(
                 target, opts, active, server_tags or [], label)
-            cached = self.store.get(
-                target, size, mtime, file_identity=identity, analysis_signature=signature)
+            cached = self._find_cached(target, size, mtime, identity, signature,
+                opts=opts, active=active, server_tags=server_tags or [], label=label)
         except Exception:  # noqa: BLE001 - 查询缓存失败就当没有缓存
             return None
         if cached is None:
             return None
+        return self._restore_cached(cached, label)
+
+    def _restore_cached(self, cached, label):
+        """Apply the current version's confirmation identically on both paths."""
         evidence = [ev for ev in cached.verdict.evidence
                     if ev.source is not EvidenceSource.MANUAL]
         if label is not None:
@@ -153,6 +159,21 @@ class CensorService:
         cached.verdict = fuse(evidence, self.policy)
         cached.elapsed = 0.0
         cached.cache_hit = True
+        return cached
+
+    def _find_cached(self, target, size, mtime, identity, signature, *,
+                     opts, active, server_tags, label):
+        cached = self.store.get(target, size, mtime, file_identity=identity,
+                                analysis_signature=signature)
+        if cached is None and label is not None:
+            # Confirming a completed automatic analysis changes the fusion,
+            # not its pixels. Retain that analysis and its exact evidence.
+            # A prior manual-only run has a different signature and cannot
+            # pass this fallback after a confirmation is withdrawn.
+            automatic_signature = self._analysis_signature(
+                target, opts, active, server_tags, label=None)
+            cached = self.store.get(target, size, mtime, file_identity=identity,
+                                    analysis_signature=automatic_signature)
         return cached
 
     # ── 单部 ──
@@ -186,29 +207,22 @@ class CensorService:
             result = VideoVerdict(path=target, status=ProcessingStatus.CANCELLED)
             result.verdict.needs_review = True
             return result
+        if not S_ISREG(stat.st_mode) or size == 0:
+            result = VideoVerdict(path=target, status=ProcessingStatus.FAILED,
+                error='空文件，无法分析视频' if size == 0 else '输入不是普通视频文件')
+            result.verdict.needs_review = True
+            return result
         try:
             identity = identify_file(target).serialize()
             active = self._active_detectors(opts)
             label = self.store.get_label(target, file_identity=identity)
             signature = self._analysis_signature(target, opts, active, server_tags or [], label)
             if not opts.force and opts.use_cache:
-                cached = self.store.get(
-                    target, size, mtime, file_identity=identity, analysis_signature=signature
-                )
+                cached = self._find_cached(target, size, mtime, identity, signature,
+                    opts=opts, active=active, server_tags=server_tags or [], label=label)
                 if cached is not None:
-                    # Re-fuse to reflect a changed/removed manual label without decoding.
-                    evidence = [
-                        ev
-                        for ev in cached.verdict.evidence
-                        if ev.source is not EvidenceSource.MANUAL
-                    ]
-                    if label is not None:
-                        evidence.append(Evidence(EvidenceSource.MANUAL, label[0], 1.0, label[1]))
-                    cached.verdict = fuse(evidence, self.policy)
-                    cached.elapsed = 0.0
-                    cached.cache_hit = True
                     notify('复用有效分析', 1, 1)
-                    return cached
+                    return self._restore_cached(cached, label)
         except Exception as exc:
             result = VideoVerdict(path=target, error=str(exc), status=ProcessingStatus.FAILED)
             result.verdict.needs_review = True
@@ -228,6 +242,7 @@ class CensorService:
             work_dir=self._thumb_dir(target) / uuid.uuid4().hex,
         )
         ctx.number = parse_from_path(target)
+        ctx.shared['explicit_visual'] = bool(opts.force or opts.recheck_manual or opts.frame_samples is not None)
         self._active_work_dirs.add(str(ctx.work_dir.resolve()))
         if opts.frame_samples is not None:
             ctx.shared['requested_samples'] = max(6, min(600, int(opts.frame_samples)))
@@ -245,6 +260,12 @@ class CensorService:
         runs = {}
         all_candidates = []
         maximum_score = 0.0
+        previous = None
+        if label is not None and not opts.recheck_manual:
+            previous = self.store.get(target, file_identity=identity)
+            if previous is not None and (previous.status is not ProcessingStatus.COMPLETED or previous.error):
+                previous = None
+        retained = False
         for detector in active:
             if should_stop():
                 status = ProcessingStatus.CANCELLED
@@ -256,11 +277,26 @@ class CensorService:
                     continue
                 # Only a matching manual confirmation can skip visual analysis.
                 if "visual" in detector.capabilities and label is not None and not opts.recheck_manual:
+                    if previous is not None:
+                        if not retained:
+                            evidence.extend(e for e in previous.verdict.evidence if e.source is EvidenceSource.VISUAL)
+                            all_candidates.extend(deepcopy(previous.candidates))
+                            maximum_score = previous.visual_score
+                            ctx.duration = previous.duration
+                            retained = True
+                        prior_run = deepcopy(previous.detector_runs.get(detector.name, {}))
+                        prior_run.update(status='retained_manual',
+                            retained_from=previous.analysis_signature,
+                            sampled_frames=int(prior_run.get('sampled_frames', 0)),
+                            analyzed_frames=int(prior_run.get('analyzed_frames', 0)))
+                        runs[detector.name] = prior_run
                     continue
                 if "visual" in detector.capabilities:
                     visual_started = True
+                    ctx.shared.pop('triage', None)
                     ctx.shared.update(
-                        sampled_frames=0, analyzed_frames=0, candidates=[], visual_score=0.0
+                        sampled_frames=0, analyzed_frames=0, reused_frames=0,
+                        candidates=[], visual_score=0.0
                     )
                 detector.require_available()
                 evidence.extend(detector.detect(ctx))
@@ -279,6 +315,8 @@ class CensorService:
                         "status": run_status,
                         "sampled_frames": int(ctx.shared.get("sampled_frames", 0)),
                         "analyzed_frames": int(ctx.shared.get("analyzed_frames", 0)),
+                        "reused_frames": int(ctx.shared.get("reused_frames", 0)),
+                        "triage": deepcopy(ctx.shared.get("triage", {})),
                     }
                     all_candidates.extend(ctx.shared.get("candidates") or [])
                     maximum_score = max(maximum_score, float(ctx.shared.get("visual_score") or 0.0))
@@ -381,7 +419,9 @@ class CensorService:
         return {
             key: value
             for key, value in raw.items()
-            if (key.startswith("censor_") and key not in {"censor_workers", "censor_memory_mb", "censor_verify_replacements"})
+            if (key.startswith("censor_") and not key.startswith('censor_sync_') and key not in {
+                "censor_workers", "censor_memory_mb", "censor_verify_replacements",
+                "censor_sampling_timeout"})
             or key in self._ANALYSIS_CONFIG_KEYS
         }
 
@@ -455,33 +495,65 @@ class CensorService:
         传进来就能保住原有证据，不会只剩一条"人工确认"。
         """
         target = str(path)
-        identity = identify_file(target).serialize()
+        file_info = identify_file(target)
+        identity = file_info.serialize()
+        if base is not None and str(base.path) != target:
+            raise ValueError("确认依据不属于当前文件")
         if base is not None and base.file_identity and base.file_identity != identity:
             raise ValueError("文件已替换，请重新扫描后确认")
         self.store.set_label(target, state, note, file_identity=identity)
-        cached = self.store.get(target) or base
+        if base is not None and base.status is ProcessingStatus.COMPLETED and not base.error:
+            cached = deepcopy(base)
+        else:
+            # Human confirmation is independent of whether a recheck finished.
+            # Never promote an incomplete run into a successful automatic cache.
+            cached = self.store.get(target, file_identity=identity)
+            if cached is not None and (cached.status is not ProcessingStatus.COMPLETED or cached.error):
+                cached = None
         if cached is None or cached.file_identity != identity:
             cached = VideoVerdict(path=target)
         cached.file_identity = identity
+        cached.size = file_info.size
+        cached.mtime = file_info.mtime_ns / 1e9
+        cached.cache_hit = False
+        cached.from_history = False
         cached.status = ProcessingStatus.COMPLETED
         others = [ev for ev in cached.verdict.evidence if ev.source is not EvidenceSource.MANUAL]
         evidence = [Evidence(EvidenceSource.MANUAL, state, 1.0, note or "人工确认")]
         cached.verdict = fuse(evidence + others, self.policy)
         self.store.put(cached)
+        self._queue_review_metadata(target, identity, state)
         return cached
+
+    def metadata_sync(self):
+        from censor.metadata_sync import MetadataSyncService
+        return MetadataSyncService(self.cfg or {}, self.store)
+
+    def _queue_review_metadata(self, path, identity, state):
+        self.last_metadata_sync_error = ''
+        if not (self._cfg_get('censor_sync_nfo', False) or self._cfg_get('censor_sync_jellyfin', False)):
+            return
+        try:
+            self.metadata_sync().enqueue(path, identity, state)
+        except Exception as exc:  # Confirmation remains valid even if queue storage failed.
+            self.last_metadata_sync_error = f'元数据同步未入队：{type(exc).__name__}: {exc}'
 
     def stats(self) -> StoreStats:
         return self.store.stats()
 
     def remove_label(self, path: str | Path) -> VideoVerdict | None:
         target = str(path)
-        self.store.remove_label(target, identify_file(target).serialize())
-        cached = self.store.get(target)
+        identity = identify_file(target).serialize()
+        had_label = self.store.get_label(target, file_identity=identity) is not None
+        self.store.remove_label(target, identity)
+        cached = self.store.get(target, file_identity=identity)
         if cached is not None:
             cached.verdict = fuse([e for e in cached.verdict.evidence
                                    if e.source is not EvidenceSource.MANUAL], self.policy)
             cached.analysis_signature = ""  # A prior manual result may have skipped visuals.
             self.store.put(cached)
+        if had_label:
+            self._queue_review_metadata(target, identity, None)
         return cached
 
     def review_queue(self, limit: int = 500) -> list[VideoVerdict]:

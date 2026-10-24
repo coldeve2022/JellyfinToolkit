@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
         ("🔎", "找无码版"),
         ("📝", "字幕缺失检测"),
         ("✍️", "批量生成字幕"),
-        ("🔄", "破解视频替换"),
+        ("🔄", "视频版本管理"),
         ("🔓", "马赛克破解"),
         ("🔧", "视频修复转码"),
         ("📋", "NFO 关联修复"),
@@ -122,6 +122,12 @@ class MainWindow(QMainWindow):
         self.ffmpeg_path = resolve_tool("ffmpeg")
 
         self._setup_ui()
+        self.data_profile_button = QPushButton('资料库')
+        self.data_profile_button.setObjectName('data-profile-button')
+        from config import BASE_DIR
+        self.data_profile_button.setToolTip('当前数据位置：' + str(BASE_DIR))
+        self.data_profile_button.clicked.connect(self._show_data_profile)
+        self.statusBar().addPermanentWidget(self.data_profile_button)
         self._last_config_values = asdict(self.cfg)
         self._last_config_context = state_context(self.cfg)
         self.apply_stylesheet()
@@ -150,6 +156,10 @@ class MainWindow(QMainWindow):
             )
 
     # ── 主题管理 ──
+    def _show_data_profile(self):
+        from ui.data_profiles import show_profile_manager
+        show_profile_manager(self)
+
     def apply_theme(self, theme_name: str | None = None) -> None:
         """切换主题并立即生效。
 

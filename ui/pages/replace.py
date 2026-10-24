@@ -1,10 +1,14 @@
-"""破解视频自动替换页面 — 匹配 restored 视频并覆盖媒体库原文件。"""
+"""Reviewed local video version management with preserved inheritance snapshots."""
 
 from __future__ import annotations
 
 from ui.services import busy, start_task, stop_page
 
 import os
+import json
+import hashlib
+import uuid
+from copy import deepcopy
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
@@ -27,7 +31,8 @@ from ui.widgets import DragDropListWidget, LogPanel, InfoCard, FileInputActions
 from utils.censor_tags import update_jellyfin_db_tags
 from utils.nfo import update_nfo_censor_tags
 from utils.nfo_source import find_nfo
-from ui.services import CallWorker
+from ui.services import CallWorker, events, after_stopped
+from utils.media_upgrade import MediaUpgradeService
 
 
 class ReplaceWorker(QThread):
@@ -123,142 +128,330 @@ class ReplaceWorker(QThread):
         return result
 
 
+def _configuration_key(cfg):
+    return hashlib.sha256(json.dumps(vars(cfg), sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _save_upgrade_reference(data_dir, prepared, context_key, state):
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    reference = {key: prepared[key] for key in ('snapshot_id', 'snapshot_path', 'snapshot_sha256')}
+    reference.update(context_key=context_key, state=state)
+    temporary = data_dir / ('latest-' + uuid.uuid4().hex + '.tmp')
+    try:
+        with temporary.open('x', encoding='utf-8') as fh:
+            json.dump(reference, fh, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, data_dir / 'latest.json')
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+class UpgradeWorker(QThread):
+    """Generic owned worker: never invokes ReplaceWorker or metadata tag updaters."""
+    result = Signal(object)
+    error = Signal(str)
+    log = Signal(str)
+
+    def __init__(self, cfg, data_dir, phase, payload):
+        super().__init__()
+        self.cfg = deepcopy(cfg)
+        self.data_dir = Path(data_dir)
+        self.phase = phase
+        self.payload = deepcopy(payload)
+        self._stopped = False
+
+    def stop(self):
+        self._stopped = True
+        self.requestInterruption()
+
+    def _save_reference(self, prepared, state):
+        try:
+            _save_upgrade_reference(self.data_dir, prepared, _configuration_key(self.cfg), state)
+        except (OSError, ValueError, KeyError):
+            self.log.emit('上次快照引用未能保存；已生成的独立快照及文件操作日志仍保留。')
+
+    def run(self):
+        def cancel():
+            return self._stopped
+        try:
+            service = MediaUpgradeService(self.cfg, data_dir=self.data_dir)
+            if self.phase == 'preview':
+                value = service.preview(*self.payload, cancel=cancel)
+            elif self.phase == 'prepare':
+                value = service.prepare(self.payload, cancel=cancel)
+                self._save_reference(value, 'prepared')
+            elif self.phase == 'execute':
+                value = service.execute(self.payload, cancel=cancel, log=self.log.emit)
+                self._save_reference(self.payload, 'executed')
+            elif self.phase == 'verify':
+                value = service.verify(self.payload, cancel=cancel)
+            elif self.phase == 'reload':
+                reference = json.loads((self.data_dir / 'latest.json').read_text(encoding='utf-8'))
+                if reference.get('context_key') != _configuration_key(self.cfg):
+                    raise ValueError('上次快照属于其他服务器/配置；请重新预览并保存快照')
+                snapshot_id = reference['snapshot_id']
+                if len(snapshot_id) != 32 or any(ch not in '0123456789abcdef' for ch in snapshot_id):
+                    raise ValueError('上次快照引用无效')
+                path = self.data_dir / 'snapshots' / (snapshot_id + '.json')
+                prepared = json.loads(path.read_text(encoding='utf-8'))
+                prepared.update(snapshot_path=str(path), snapshot_sha256=reference['snapshot_sha256'])
+                # The backend validates its fixed snapshot location, bytes, and contents.
+                service._load(prepared)
+                value = {'prepared': prepared, 'state': reference.get('state')}
+            else:
+                raise ValueError('未知版本管理阶段')
+            # Mutation results must be reported even when stop was requested,
+            # so the page can notify other views about changed/recovered files.
+            if not self._stopped or self.phase == 'execute':
+                self.result.emit(value)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 class ReplacePage(QWidget):
-    """破解视频自动替换页面。"""
+    """Table-first version upgrades; legacy restored pairing remains available."""
 
     def __init__(self, cfg: ToolkitConfig, parent=None):
         super().__init__(parent)
         self.cfg = cfg
-        self._worker: ReplaceWorker | None = None
+        self._worker = None
         self._plan = None
+        self._prepared = None
+        self._executed = False
+        self._revision = 0
+        self._prepared_context = None
         self._setup_ui()
         self.list_restored.paths_changed.connect(self._invalidate_plan)
         self.list_library.paths_changed.connect(self._invalidate_plan)
+        events.config_changed.connect(self._invalidate_plan)
 
-    def _setup_ui(self) -> None:
+    def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
-
-        title = QLabel("破解视频自动替换")
-        title.setProperty("cssClass", "page-title")
+        layout.setSpacing(10)
+        title = QLabel('视频版本管理')
+        title.setProperty('cssClass', 'page-title')
         layout.addWidget(title)
-
-        hint = InfoCard(
-            "工作原理：自动识别文件名中含 'restored' 的新视频，去除标记后匹配媒体库原文件并替换。\n"
-            "左侧拖入 Lada 等工具破解完成的新视频 | 右侧拖入原始媒体库文件/文件夹\n"
-            "替换前会自动备份原文件，失败时自动回滚，安全可靠。"
-        )
-        layout.addWidget(hint)
+        layout.addWidget(InfoCard(
+            '将已下载的更高画质或其他本地版本按完整标识配对，保留原文件路径、NFO、字幕及可恢复备份。\n'
+            '先预览配对，再保存元数据和每个可访问用户的状态快照；审阅确认后才替换。服务器刷新完成后单独验证继承。'))
         self.match_mode = QComboBox()
-        self.match_mode.addItem("Lada 产物：按 restored 文件名配对", "restored")
-        self.match_mode.addItem("检索后的本地候选：按作品番号配对", "release")
+        self.match_mode.addItem('通用本地版本：按完整标识配对并保留元数据', 'upgrade')
+        self.match_mode.addItem('兼容：按 restored 文件名配对', 'restored')
+        self.match_mode.addItem('兼容：按作品标识配对本地候选', 'release')
         self.match_mode.currentIndexChanged.connect(self._invalidate_plan)
         layout.addWidget(self.match_mode)
-
         splitter = QSplitter()
-        left_w = QWidget()
-        left_l = QVBoxLayout(left_w)
-        left_l.setContentsMargins(0, 0, 6, 0)
-        left_l.addWidget(QLabel("📦 破解完成的视频/文件夹:"))
-        left_l.addWidget(FileInputActions(self, self._add_to_restored, role="restored"))
-        self.list_restored = DragDropListWidget()
-        self.list_restored.files_dropped.connect(self._add_to_restored)
-        left_l.addWidget(self.list_restored)
-        splitter.addWidget(left_w)
-
-        right_w = QWidget()
-        right_l = QVBoxLayout(right_w)
-        right_l.setContentsMargins(6, 0, 0, 0)
-        right_l.addWidget(QLabel("📚 原始媒体库 视频/文件夹:"))
-        right_l.addWidget(FileInputActions(self, self._add_to_library, role="library"))
-        self.list_library = DragDropListWidget()
-        self.list_library.files_dropped.connect(self._add_to_library)
-        right_l.addWidget(self.list_library)
-        splitter.addWidget(right_w)
-        splitter.setSizes([400, 400])
+        splitter.setMaximumHeight(155)
+        for label, callback, role, attribute in (
+            ('本地新版本 / 文件夹', self._add_to_restored, 'restored', 'list_restored'),
+            ('媒体库原文件 / 文件夹', self._add_to_library, 'library', 'list_library')):
+            box = QWidget()
+            column = QVBoxLayout(box)
+            column.setContentsMargins(0, 0, 6, 0)
+            column.addWidget(QLabel(label))
+            column.addWidget(FileInputActions(self, callback, role=role))
+            paths = DragDropListWidget()
+            paths.files_dropped.connect(callback)
+            column.addWidget(paths)
+            setattr(self, attribute, paths)
+            splitter.addWidget(box)
         layout.addWidget(splitter)
-        self.pairs = QTableWidget(0, 3)
-        self.pairs.setHorizontalHeaderLabels(["新视频", "待替换原文件", "配对状态"])
+        self.pairs = QTableWidget(0, 5)
+        self.pairs.setHorizontalHeaderLabels(['本地新版本', '保留路径的原文件', '完整标识', '状态', '元数据 / 用户状态'])
         self.pairs.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.pairs.setSelectionBehavior(QTableWidget.SelectRows)
+        self.pairs.setWordWrap(False)
+        self.pairs.setProperty('taskInteractive', True)
         self.pairs.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.pairs.horizontalHeader().setStretchLastSection(True)
-        self.pairs.setMaximumHeight(200)
-        layout.addWidget(self.pairs)
-
-        layout.addWidget(QLabel("处理日志:"))
+        for col, width in enumerate((230, 230, 100, 110)):
+            self.pairs.setColumnWidth(col, width)
+        self.pairs.setMinimumHeight(180)
+        layout.addWidget(self.pairs, 1)
         self.log_panel = LogPanel()
-        self.log_panel.setMaximumHeight(200)
+        self.log_panel.setMaximumHeight(95)
         layout.addWidget(self.log_panel)
-
-        btn_row = QHBoxLayout()
-        self.btn_preview = QPushButton("生成配对计划")
-        self.btn_preview.clicked.connect(self._preview)
-        btn_row.addWidget(self.btn_preview)
-        self.btn_start = QPushButton("🚀 开始自动替换")
-        self.btn_start.setText("执行已审核替换计划…")
-        self.btn_start.setEnabled(False)
-        self.btn_start.setProperty("cssClass", "accent")
-        self.btn_start.clicked.connect(self._start)
-        btn_row.addWidget(self.btn_start)
-
-        self.btn_stop = QPushButton("停止")
-        self.btn_stop.setEnabled(False)
-        self.btn_stop.clicked.connect(self._stop)
-        btn_row.addWidget(self.btn_stop)
-
-        btn_row.addStretch()
-        clear_btn = QPushButton("清空队列")
-        clear_btn.clicked.connect(self._clear)
-        btn_row.addWidget(clear_btn)
-        layout.addLayout(btn_row)
-
-        self.stats = QLabel("")
-        self.stats.setProperty("cssClass", "muted-label")
+        buttons = QHBoxLayout()
+        for attribute, text, callback in (
+            ('btn_preview', '1. 预览配对', self._preview),
+            ('btn_prepare', '2. 保存继承快照', self._prepare_upgrade),
+            ('btn_start', '3. 审阅后替换…', self._start),
+            ('btn_verify', '4. 验证继承', self._verify_upgrade),
+            ('btn_reload', '载入上次快照', self._reload_upgrade),
+            ('btn_stop', '停止', self._stop)):
+            button = QPushButton(text)
+            button.clicked.connect(callback)
+            setattr(self, attribute, button)
+            buttons.addWidget(button)
+        self.btn_start.setProperty('cssClass', 'accent')
+        clear = QPushButton('清空队列')
+        clear.clicked.connect(self._clear)
+        buttons.addWidget(clear)
+        layout.addLayout(buttons)
+        self.stats = QLabel('只管理本地候选；没有经过确认的替换操作。')
+        self.stats.setWordWrap(True)
+        self.stats.setProperty('cssClass', 'muted-label')
         layout.addWidget(self.stats)
+        self._sync_buttons()
 
-    # ── 拖拽接收 ──
+    def _generic(self):
+        return self.match_mode.currentData() == 'upgrade'
+
+    def _context(self):
+        return self._revision, _configuration_key(self.cfg)
+
+    def _sync_buttons(self):
+        rows = self._plan.get('rows', []) if isinstance(self._plan, dict) else (self._plan or [])
+        ready = bool(rows) and all(row.get('status') == 'ready' for row in rows)
+        prepared_ready = bool(self._prepared) and all(row.get('status') == 'ready' for row in self._prepared.get('rows', []))
+        self.btn_prepare.setVisible(self._generic())
+        self.btn_verify.setVisible(self._generic())
+        self.btn_reload.setVisible(self._generic())
+        self.btn_prepare.setEnabled(self._generic() and ready and not self._executed)
+        self.btn_start.setEnabled(prepared_ready and not self._executed if self._generic() else ready)
+        self.btn_verify.setEnabled(self._generic() and bool(self._prepared) and self._executed)
+        self.btn_stop.setEnabled(busy(self))
+
     def _invalidate_plan(self, *args):
+        self._revision += 1
         self._plan = None
-        self.btn_start.setEnabled(False)
+        self._prepared = None
+        self._prepared_context = None
+        self._executed = False
+        if isinstance(self._worker, UpgradeWorker) and self._worker.isRunning():
+            self._worker.stop()
         self.pairs.setRowCount(0)
+        self._sync_buttons()
+        self.btn_start.setEnabled(False)
+        if busy(self):
+            after_stopped(self, self._sync_buttons)
+
+    def _run_upgrade(self, phase, payload):
+        from config import DATA_DIR
+        context = self._context()
+        worker = UpgradeWorker(deepcopy(self.cfg), Path(DATA_DIR) / 'media_upgrades', phase, payload)
+        self._worker = worker
+        worker.log.connect(self.log_panel.log)
+        worker.error.connect(self.log_panel.log_error)
+        worker.result.connect(lambda result: self._upgrade_result(phase, result, context))
+        worker.finished.connect(lambda: after_stopped(self, self._sync_buttons))
+        self.btn_stop.setEnabled(True)
+        start_task(self, worker, {'preview': '预览本地视频版本配对', 'prepare': '保存版本继承快照',
+            'execute': '按已审阅快照替换本地视频', 'verify': '验证版本元数据和用户状态继承',
+            'reload': '载入上次版本继承快照'}[phase], mutating=phase == 'execute')
 
     def _preview(self):
         if busy(self):
             return
-        from utils.replacement import preview_replacements
-        from utils.replacement import preview_release_replacements
-
-        restored = self.list_restored.get_all_paths()
-        library = self.list_library.get_all_paths()
+        restored, library = self.list_restored.get_all_paths(), self.list_library.get_all_paths()
+        if not restored or not library:
+            self.log_panel.log_warning('请加入本地新版本及媒体库原文件，再预览配对。')
+            return
+        self._invalidate_plan()
+        if self._generic():
+            self._run_upgrade('preview', (restored, library))
+            return
+        from utils.replacement import preview_replacements, preview_release_replacements
+        mode = self.match_mode.currentData()
         marker = self.cfg.restored_suffix_marker
-        release_mode = self.match_mode.currentData() == "release"
+        context = self._context()
         self._worker = CallWorker(lambda cancel: preview_release_replacements(restored, library, cancel)
-            if release_mode else preview_replacements(restored, library, marker, cancel))
-        self._worker.result.connect(self._show_plan)
+            if mode == 'release' else preview_replacements(restored, library, marker, cancel))
+        self._worker.result.connect(lambda plan: self._show_plan(plan) if context == self._context() else None)
         self._worker.error.connect(self.log_panel.log_error)
-        start_task(self, self._worker, "生成恢复视频配对计划")
+        self._worker.finished.connect(lambda: after_stopped(self, self._sync_buttons))
+        start_task(self, self._worker, '生成本地视频配对计划')
 
     def _show_plan(self, plan):
         self._plan = plan
+        rows = plan.get('rows', []) if isinstance(plan, dict) else plan
+        self._render_rows(rows)
+        self._sync_buttons()
+        self.stats.setText(f'配对计划 {len(rows)} 项；冲突、多候选或封装格式不同时请调整输入。保存快照不会替换视频。')
+
+    def _render_rows(self, rows):
         self.pairs.setRowCount(0)
-        for entry in plan:
+        for entry in rows:
             row = self.pairs.rowCount()
             self.pairs.insertRow(row)
-            for col, text in enumerate(
-                (
-                    entry["source"],
-                    entry["target"] or " / ".join(entry["candidates"]),
-                    entry["status"],
-                )
-            ):
-                cell = QTableWidgetItem(str(text))
-                cell.setToolTip(str(text))
+            summary = entry.get('inheritance_summary', '')
+            if entry.get('server'):
+                summary = f"元数据已快照；{len(entry['server'].get('users', {}))} 个用户状态；保留 NFO/字幕"
+            if entry.get('error'):
+                summary = entry['error']
+            for col, value in enumerate((entry.get('source', ''), entry.get('target') or ' / '.join(entry.get('candidates', [])),
+                    entry.get('identifier', ''), entry.get('status', ''), summary)):
+                cell = QTableWidgetItem(str(value))
+                cell.setToolTip(str(value))
                 self.pairs.setItem(row, col, cell)
-        self.btn_start.setEnabled(bool(plan) and all(entry["status"] == "ready" for entry in plan))
-        self.stats.setText(f"配对计划 {len(plan)} 项；有冲突/多候选时请调整输入再重新生成计划。")
 
-    def receive_outputs(self, restored, originals, *, mode="restored"):
+    def _prepare_upgrade(self):
+        if busy(self) or not self._generic() or not isinstance(self._plan, dict):
+            return
+        self._prepared = None
+        self._run_upgrade('prepare', self._plan)
+
+    def _verify_upgrade(self):
+        if busy(self) or not self._generic() or not self._prepared or not self._executed:
+            return
+        self.log_panel.log('验证当前服务器状态；请先确认服务器受控刷新已完成。状态变化将保留快照供人工审阅。')
+        self._run_upgrade('verify', self._prepared)
+
+    def _reload_upgrade(self):
+        if busy(self) or not self._generic():
+            return
+        self._invalidate_plan()
+        self._run_upgrade('reload', None)
+
+    def _upgrade_result(self, phase, result, context):
+        if phase == 'execute':
+            changed = [row['target'] for row in result.get('operations', []) if row.get('ok') or row.get('state') == 'partial']
+            if changed:
+                events.media_changed.emit(changed)
+        if context != self._context():
+            self.log_panel.log_warning('输入或配置已变化，旧任务结果未作为当前计划；可在任务中心审阅已执行的文件操作。')
+            return
+        if phase == 'preview':
+            self._show_plan(result)
+        elif phase == 'prepare':
+            self._prepared = result
+            self._prepared_context = context
+            self._render_rows(result.get('rows', []))
+            blocked = sum(row.get('status') != 'ready' for row in result.get('rows', []))
+            self.stats.setText(f"继承快照已保存：{result['snapshot_id']}；未替换视频。" + (f' {blocked} 项未就绪，详见表格。' if blocked else ' 请审阅配对和快照摘要后确认替换。'))
+        elif phase == 'execute':
+            self._executed = True
+            self._render_rows(result.get('rows', []))
+            self.stats.setText(f"本地替换成功 {result.get('ok', 0)}；失败 {result.get('fail', 0)}；待验证/人工处理 {result.get('needs_attention', 0)}。" + (' 已停止。' if result.get('cancelled') else '') + ' 服务器刷新排队不表示继承已完成。')
+            if result.get('error'):
+                self.log_panel.log_error(result['error'])
+        elif phase == 'verify':
+            self._render_rows(result.get('rows', []))
+            attention = sum(row.get('status') != 'verified' for row in result.get('rows', []))
+            self.stats.setText(f'继承验证：{attention} 项待人工审阅；快照保留。' if attention else '已验证原条目身份、元数据及已快照用户状态一致。')
+        elif phase == 'reload':
+            self._prepared = result['prepared']
+            self._prepared_context = context
+            self._executed = result.get('state') == 'executed'
+            self._render_rows(self._prepared.get('rows', []))
+            # Restarted snapshots are for verification only; execution requires a fresh review.
+            self._executed = True
+            self.stats.setText('上次继承快照已载入，仅用于验证；再次替换请重新预览并保存快照。')
+        self._sync_buttons()
+
+    def receive_originals(self, paths):
+        if busy(self):
+            self.log_panel.log_warning('当前任务仍在运行，原文件未加入；请停止或等待后重试。')
+            return
+        self._clear()
+        self.match_mode.setCurrentIndex(self.match_mode.findData('upgrade'))
+        self._add_to_library(paths)
+        self.log_panel.log('已将原视频加入版本管理队列；仅加入队列，尚未替换。请手动加入已下载的本地新版本。')
+
+    def receive_outputs(self, restored, originals, *, mode='restored'):
         if busy(self):
             return
         self._clear()
@@ -268,92 +461,70 @@ class ReplacePage(QWidget):
         self._preview()
 
     def receive_candidates(self, candidates, originals):
-        self.receive_outputs(candidates, originals, mode="release")
+        self.receive_outputs(candidates, originals, mode='release')
 
-    def _add_to_restored(self, paths: list[str]) -> None:
+    def _add_to_restored(self, paths):
         if busy(self):
             return
-        for p in paths:
-            self.list_restored.add_item(os.path.basename(p) or p, p)
+        for path in paths:
+            self.list_restored.add_item(os.path.basename(path) or path, path)
 
-    def _add_to_library(self, paths: list[str]) -> None:
+    def _add_to_library(self, paths):
         if busy(self):
             return
-        for p in paths:
-            self.list_library.add_item(os.path.basename(p) or p, p)
+        for path in paths:
+            self.list_library.add_item(os.path.basename(path) or path, path)
 
-    def _start(self) -> None:
+    def _start(self):
         if busy(self, mutating=True):
             return
-        if self.list_restored.count() == 0 or self.list_library.count() == 0:
-            QMessageBox.warning(self, "提示", "请确保两侧都拖入了文件或文件夹！")
+        if self._generic():
+            if not self._prepared or self._executed or self._prepared_context != self._context():
+                self.log_panel.log_warning('请先为当前配对保存继承快照并审阅。')
+                return
+            rows = self._prepared.get('rows', [])
+            if not rows or any(row.get('status') != 'ready' for row in rows):
+                self.log_panel.log_warning('快照包含未就绪项目，请先修正配置或配对。')
+                return
+            detail = '\n'.join(row['source'] + ' → ' + row['target'] for row in rows)
+            if QMessageBox.question(self, '确认本地版本替换', detail + '\n\n将按已保存的同一快照替换。原件保留可恢复备份，NFO/字幕保留原字节。服务器继承需刷新完成后单独验证。确认执行？', QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+                self._run_upgrade('execute', self._prepared)
             return
-        if not self._plan or any(entry["status"] != "ready" for entry in self._plan):
-            QMessageBox.information(self, "先审阅配对", "请先生成配对计划，排除多候选或冲突。")
+        if not self._plan or any(row['status'] != 'ready' for row in self._plan):
             return
-        detail = "\n".join(entry["source"] + " → " + entry["target"] for entry in self._plan)
-        if (
-            QMessageBox.question(
-                self,
-                "确认替换计划",
-                detail + "\n\n原文件会保留可恢复备份。确认执行以上同一计划？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            != QMessageBox.Yes
-        ):
+        detail = '\n'.join(row['source'] + ' → ' + row['target'] for row in self._plan)
+        if QMessageBox.question(self, '确认兼容替换计划', detail + '\n\n兼容模式会运行原有恢复视频元数据同步。原件保留备份。确认执行？', QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
-
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
-        self.log_panel.clear()
-
-        restored = self.list_restored.get_all_paths()
-        library = self.list_library.get_all_paths()
-
-        self._worker = ReplaceWorker(restored, library, self.cfg.restored_suffix_marker, self.cfg)
-        self._worker.plan = list(self._plan)
+        self._worker = ReplaceWorker(self.list_restored.get_all_paths(), self.list_library.get_all_paths(), self.cfg.restored_suffix_marker, deepcopy(self.cfg))
+        self._worker.plan = deepcopy(self._plan)
         self._worker.log.connect(self.log_panel.log)
         self._worker.finished.connect(self._on_finished)
         start_task(self, self._worker)
+        self.btn_stop.setEnabled(True)
 
-    def _stop(self) -> None:
+    def _stop(self):
         if self._worker and self._worker.isRunning():
             self._worker.stop()
-            self.log_panel.log_warning("任务已停止")
+            self.log_panel.log_warning('已请求停止；正在等待安全检查或回滚完成。')
             self.btn_start.setEnabled(False)
-            self.btn_stop.setEnabled(False)
 
-    def _on_finished(self, replaced: int, not_found: int) -> None:
-        self.btn_start.setEnabled(False)
+    def _on_finished(self, replaced, not_found):
+        stats = getattr(self._worker, 'stats', {})
         self._plan = None
-        self.btn_stop.setEnabled(False)
-        self.log_panel.log("─" * 50)
-        stats = getattr(self._worker, "stats", {})
-        if stats.get("cancelled") or getattr(self._worker, "_stopped", False):
-            self.log_panel.log_warning(f"已取消；已完成替换 {replaced} 项。")
-        elif not_found or stats.get("error") or stats.get("fail"):
-            self.log_panel.log_error(
-                f"替换失败或部分失败：成功 {replaced} / 失败 {not_found}。"
-                + str(stats.get("error") or stats.get("fails") or "")
-            )
-        else:
-            self.log_panel.log_success(f"替换完成：{replaced} 项。")
-        self.stats.setText(f"文件替换: 成功 {replaced} | 失败 {not_found}"
-                          f" · 元数据同步失败 {stats.get('metadata_failed', 0)}"
-                          '（详情见日志；API 模式需在服务器刷新媒体库）')
-        from ui.services import events
-        changed = [op["target"] for op in stats.get("operations", []) if op.get("ok")]
+        self.stats.setText(f"兼容模式文件替换：成功 {replaced} / 失败 {not_found}；元数据同步失败 {stats.get('metadata_failed', 0)}。")
+        changed = [row['target'] for row in stats.get('operations', []) if row.get('ok')]
         if changed:
             events.media_changed.emit(changed)
+        after_stopped(self, self._sync_buttons)
 
-    def _clear(self) -> None:
+    def _clear(self):
         if busy(self):
             return
+        self._invalidate_plan()
         self.list_restored.clear()
         self.list_library.clear()
         self.log_panel.clear()
-        self.stats.setText("")
+        self.stats.setText('')
 
-    def shutdown(self) -> None:
+    def shutdown(self):
         stop_page(self)

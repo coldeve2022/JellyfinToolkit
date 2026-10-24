@@ -81,6 +81,15 @@ def _goto(window, label: str) -> None:
         window._navigate(NAV_LABELS.index(label))
 
 
+def _wire_media_upgrades(window, replace_page):
+    from ui.services import events
+    def send_originals(paths):
+        replace_page.receive_originals(paths)
+        _goto(window, "视频版本管理")
+    events.media_upgrade_requested.connect(send_originals)
+    return send_originals
+
+
 def _force_utf8_when_piped() -> None:
     """输出被管道/重定向时改用 UTF-8（实现在 utils.console，供各入口脚本共用）。
 
@@ -137,6 +146,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _inject_webengine_proxy() -> str:
+    """把 HTTP 层解析到的代理解析结果同步给 QtWebEngine。
+
+    必须在 QApplication 构造前调用 —— Chromium 的代理是启动参数，
+    进程起来之后再改就无效了。
+    """
+    # 受限账户/安全软件下 Chromium 沙箱可能起不来，表现为"浏览器窗口开了但
+    # 页面一直空白"。允许用环境变量开启兼容模式（只影响 Supjav 只读会话）。
+    if str(os.environ.get("JELLYFIN_TOOLKIT_WEBENGINE_NO_SANDBOX", "")).strip().lower() in {
+            "1", "true", "yes", "on"}:
+        os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+    try:
+        from censor.releases.transport import detect_proxy
+        from config import ToolkitConfig
+
+        proxy = detect_proxy(str(getattr(ToolkitConfig.load(), "release_proxy", "") or ""))
+    except Exception:  # noqa: BLE001 - 代理注入失败不应该挡住启动
+        return ""
+    if not proxy:
+        return ""
+    flags = str(os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")).strip()
+    if "--proxy-server" in flags:
+        return proxy
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{flags} --proxy-server={proxy}".strip()
+    return proxy
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv if argv is not None else sys.argv[1:])
 
@@ -150,10 +186,21 @@ def main(argv: list[str] | None = None) -> int:
         _force_utf8_when_piped()
         return print_doctor()
 
-    _install_excepthook()
+    # QtWebEngine 只认进程级 `--proxy-server`，必须在 QApplication 之前注入。
+    # 不注入的话，Supjav 浏览器会话会按"系统网络设置"走；而 Clash 常见
+    # "只开端口、没开系统代理"，浏览器就会和普通 HTTP 一样直连超时 ——
+    # 表现为"浏览器会话开了也抓不到"。代理来源与 HTTP 层完全一致。
+    _inject_webengine_proxy()
 
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import Qt
+
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+    app = QApplication(sys.argv[:1])
+    from ui.data_profiles import prepare_startup_profile
+    if not prepare_startup_profile():
+        return 1
+    _install_excepthook()
 
     from config import ToolkitConfig
     from utils.fonts import ui_font
@@ -180,8 +227,6 @@ def main(argv: list[str] | None = None) -> int:
     from ui.pages.tasks import TaskCenterPage
     from ui.services import events
 
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
-    app = QApplication(sys.argv[:1])
     app.setStyle("Fusion")
     font = ui_font(10)
     if font is not None:
@@ -224,14 +269,15 @@ def main(argv: list[str] | None = None) -> int:
 
     def send_restored(paths, originals):
         replace_page.receive_outputs(paths, originals)
-        _goto(window, "破解视频替换")
+        _goto(window, "视频版本管理")
 
     events.subtitle_ready.connect(send_subtitles)
     events.restored_ready.connect(send_restored)
     def send_candidates(paths, originals):
         replace_page.receive_candidates(paths, originals)
-        _goto(window, "破解视频替换")
+        _goto(window, "视频版本管理")
     events.replacement_ready.connect(send_candidates)
+    _wire_media_upgrades(window, replace_page)
     # Lada 需要 ffprobe 校验产出时长，用与 ffmpeg 同一套解析逻辑取它的路径
     lada_page = LadaPage(cfg)
     def send_lada(paths):

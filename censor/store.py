@@ -8,12 +8,14 @@ confirm a new file. Schema upgrades preserve both automatic and manual records.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 
 from censor.models import (
     CensorState,
@@ -26,6 +28,16 @@ from censor.models import (
 )
 
 __all__ = ["VerdictStore"]
+
+_SCHEMA_COMPONENT = "censor_verdict"
+_SCHEMA_VERSION = 1
+
+# Keep the decoder's positional contract identical on all read paths.
+_RESULT_COLUMNS = (
+    "size,mtime,duration,number,provider,state,confidence,needs_review,reason,"
+    "evidence,candidates,visual_score,elapsed,error,file_identity,analysis_signature,"
+    "status,sampled_frames,analyzed_frames,detector_runs"
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS censor_probe (
@@ -135,10 +147,19 @@ def _load_candidates(raw: str) -> list[FrameCandidate]:
             continue
         try:
             box = item.get("box")
+            timestamp = float(item.get("timestamp", 0.0))
+            score = float(item.get("score", 0.0))
+            if not math.isfinite(timestamp) or not math.isfinite(score) or timestamp < 0 or score < 0:
+                continue
+            if box is not None:
+                if (not isinstance(box, (list, tuple)) or len(box) != 4
+                        or any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in box)
+                        or not (0 <= box[0] < box[2] and 0 <= box[1] < box[3])):
+                    continue
             out.append(
                 FrameCandidate(
-                    timestamp=float(item.get("timestamp", 0.0)),
-                    score=float(item.get("score", 0.0)),
+                    timestamp=timestamp,
+                    score=score,
                     block_size=int(item.get("block_size", 0) or 0),
                     box=tuple(box) if box else None,
                     skin_ratio=float(item.get("skin_ratio", 0.0) or 0.0),
@@ -182,48 +203,112 @@ class VerdictStore:
     @contextmanager
     def _connect(self):
         conn = sqlite3.connect(str(self.db_path), timeout=15)
-        conn.execute("PRAGMA busy_timeout=15000")
-        conn.execute("PRAGMA journal_mode=WAL")
         try:
+            self._schema_version(conn)
+            conn.execute("PRAGMA busy_timeout=15000")
+            conn.execute("PRAGMA journal_mode=WAL")
             with conn:
                 yield conn
         finally:
             conn.close()
 
+    @staticmethod
+    def _schema_version(conn) -> int:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='toolkit_schema_versions'").fetchone():
+            return 0
+        row = conn.execute("SELECT version FROM toolkit_schema_versions WHERE component=?",
+                           (_SCHEMA_COMPONENT,)).fetchone()
+        version = int(row[0]) if row else 0
+        if version > _SCHEMA_VERSION:
+            raise RuntimeError(
+                f"数据库组件 {_SCHEMA_COMPONENT} 版本 {version} 高于当前支持的 "
+                f"{_SCHEMA_VERSION}；请使用较新版本程序，已拒绝写入。")
+        return version
+
+    def _backup_before_migration(self) -> None:
+        backup_dir = self.db_path.parent / 'backups'
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        filename = (f'{self.db_path.name}.{_SCHEMA_COMPONENT}.pre-v{_SCHEMA_VERSION}.'
+                    f'{datetime.now():%Y%m%dT%H%M%S}.{uuid.uuid4().hex}.sqlite3')
+        target = backup_dir / filename
+        partial = target.with_suffix('.partial')
+        # Use a separate reader: backing up a connection holding a write
+        # transaction would wait for itself. BEGIN IMMEDIATE on the migrator
+        # prevents any writer from changing this snapshot until migration ends.
+        try:
+            with closing(sqlite3.connect(str(self.db_path), timeout=15)) as source:
+                with closing(sqlite3.connect(str(partial))) as destination:
+                    source.backup(destination)
+            partial.replace(target)
+        finally:
+            partial.unlink(missing_ok=True)
+
     def _ensure_schema(self) -> None:
-        with self._connect() as conn:
-            conn.executescript(_SCHEMA)
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(censor_probe)")}
-            for name, definition in {
-                "file_identity": "TEXT NOT NULL DEFAULT ''",
-                "analysis_signature": "TEXT NOT NULL DEFAULT ''",
-                "status": "TEXT NOT NULL DEFAULT 'partial'",
-                "sampled_frames": "INTEGER NOT NULL DEFAULT 0",
-                "analyzed_frames": "INTEGER NOT NULL DEFAULT 0",
-                "detector_runs": "TEXT NOT NULL DEFAULT '{}'",
-            }.items():
-                if name not in columns:
-                    conn.execute(f"ALTER TABLE censor_probe ADD COLUMN {name} {definition}")
-            had_history = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='censor_label_history'"
-            ).fetchone()
+        conn = sqlite3.connect(str(self.db_path), timeout=15)
+        try:
+            self._schema_version(conn)
+            conn.execute('BEGIN IMMEDIATE')
+            version = self._schema_version(conn)
+            if version == _SCHEMA_VERSION:
+                conn.commit()
+                return
+            existing = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                    "AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone()
+            if existing:
+                self._backup_before_migration()
+            conn.execute("CREATE TABLE IF NOT EXISTS toolkit_schema_versions ("
+                         "component TEXT PRIMARY KEY,version INTEGER NOT NULL,"
+                         "updated_at TEXT NOT NULL)")
+            self._migrate_v1(conn)
+            conn.execute("INSERT INTO toolkit_schema_versions(component,version,updated_at) "
+                         "VALUES(?,?,?) ON CONFLICT(component) DO UPDATE SET "
+                         "version=excluded.version,updated_at=excluded.updated_at",
+                         (_SCHEMA_COMPONENT, _SCHEMA_VERSION, _now()))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _migrate_v1(self, conn) -> None:
+        # executescript implicitly commits: individual statements keep DDL,
+        # legacy import and version registration in one rollback boundary.
+        for statement in _SCHEMA.split(';'):
+            if statement.strip():
+                conn.execute(statement)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(censor_probe)")}
+        for name, definition in {
+            "file_identity": "TEXT NOT NULL DEFAULT ''",
+            "analysis_signature": "TEXT NOT NULL DEFAULT ''",
+            "status": "TEXT NOT NULL DEFAULT 'partial'",
+            "sampled_frames": "INTEGER NOT NULL DEFAULT 0",
+            "analyzed_frames": "INTEGER NOT NULL DEFAULT 0",
+            "detector_runs": "TEXT NOT NULL DEFAULT '{}'",
+        }.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE censor_probe ADD COLUMN {name} {definition}")
+        had_history = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='censor_label_history'"
+        ).fetchone()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS censor_label_history ("
+            "path TEXT NOT NULL, file_identity TEXT NOT NULL, state TEXT NOT NULL,"
+            "note TEXT NOT NULL, labeled_at TEXT NOT NULL,"
+            "PRIMARY KEY(path, file_identity))"
+        )
+        if not had_history:
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS censor_label_history ("
-                "path TEXT NOT NULL, file_identity TEXT NOT NULL, state TEXT NOT NULL,"
-                "note TEXT NOT NULL, labeled_at TEXT NOT NULL,"
-                "PRIMARY KEY(path, file_identity))"
+                "INSERT OR IGNORE INTO censor_label_history "
+                "SELECT path, '', state, note, labeled_at FROM censor_label"
             )
-            if not had_history:
-                conn.execute(
-                    "INSERT OR IGNORE INTO censor_label_history "
-                    "SELECT path, '', state, note, labeled_at FROM censor_label"
-                )
-            conn.execute("CREATE TABLE IF NOT EXISTS censor_label_revocations ("
-                         "path TEXT NOT NULL,file_identity TEXT NOT NULL,revoked_at TEXT NOT NULL,"
-                         "PRIMARY KEY(path,file_identity))")
-            conn.execute("CREATE TABLE IF NOT EXISTS censor_label_events ("
-                         "id INTEGER PRIMARY KEY,path TEXT NOT NULL,file_identity TEXT NOT NULL,"
-                         "state TEXT,note TEXT NOT NULL,created_at TEXT NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS censor_label_revocations ("
+                     "path TEXT NOT NULL,file_identity TEXT NOT NULL,revoked_at TEXT NOT NULL,"
+                     "PRIMARY KEY(path,file_identity))")
+        conn.execute("CREATE TABLE IF NOT EXISTS censor_label_events ("
+                     "id INTEGER PRIMARY KEY,path TEXT NOT NULL,file_identity TEXT NOT NULL,"
+                     "state TEXT,note TEXT NOT NULL,created_at TEXT NOT NULL)")
 
     # ── 读写 ──
     def get(
@@ -239,10 +324,7 @@ class VerdictStore:
         key = str(path)
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT size, mtime, duration, number, provider, state, confidence,"
-                " needs_review, reason, evidence, candidates, visual_score, elapsed, error,"
-                " file_identity, analysis_signature, status, sampled_frames, analyzed_frames, detector_runs"
-                " FROM censor_probe WHERE path = ?",
+                f"SELECT {_RESULT_COLUMNS} FROM censor_probe WHERE path = ?",
                 (key,),
             ).fetchone()
         return self._decode_row(key, row, size=size, mtime=mtime,
@@ -250,6 +332,16 @@ class VerdictStore:
 
     @staticmethod
     def _decode_row(key, row, *, size=-1, mtime=-1., analysis_signature=None, file_identity=None):
+        # A damaged record must be a miss on every read path, including a
+        # direct rescan. Keep the row for diagnosis; a completed scan repairs it.
+        try:
+            return VerdictStore._decode_valid_row(key, row, size=size, mtime=mtime,
+                analysis_signature=analysis_signature, file_identity=file_identity)
+        except (ValueError, TypeError, KeyError, OverflowError):
+            return None
+
+    @staticmethod
+    def _decode_valid_row(key, row, *, size=-1, mtime=-1., analysis_signature=None, file_identity=None):
         if not row:
             return None
         (
@@ -281,7 +373,7 @@ class VerdictStore:
         except (TypeError, ValueError):
             runs = {}
         if analysis_signature is not None and (
-            signature != analysis_signature or status != "completed"
+            signature != analysis_signature or status != "completed" or error
         ):
             return None
         if file_identity is not None and identity != file_identity:
@@ -412,7 +504,11 @@ class VerdictStore:
                 ).fetchone()
         if not row:
             return None
-        return CensorState(row[0]), row[1] or ""
+        try:
+            state = CensorState(row[0])
+        except (TypeError, ValueError):
+            return None
+        return state, row[1] or ""
 
     def label_history(self, path: str) -> list[tuple]:
         with self._connect() as conn:
@@ -443,19 +539,18 @@ class VerdictStore:
                          "VALUES (?,?,NULL,?,?)", (str(path), file_identity, "撤回人工确认", _now()))
 
     def get_many(self, paths: Iterable[str]) -> dict[str, VideoVerdict]:
-        columns = ("size,mtime,duration,number,provider,state,confidence,needs_review,reason,"
-                   "evidence,candidates,visual_score,elapsed,error,file_identity,analysis_signature,"
-                   "status,sampled_frames,analyzed_frames,detector_runs")
         keys = list(dict.fromkeys(str(p) for p in paths))
         out = {}
         with self._connect() as conn:
             for offset in range(0, len(keys), 800):
                 batch = keys[offset:offset + 800]
-                rows = conn.execute(f"SELECT path,{columns} FROM censor_probe WHERE path IN "
+                rows = conn.execute(f"SELECT path,{_RESULT_COLUMNS} FROM censor_probe WHERE path IN "
                                     f"({','.join('?' for _ in batch)})", batch).fetchall()
                 for row in rows:
                     try:
-                        out[row[0]] = self._decode_row(row[0], row[1:])
+                        result = self._decode_row(row[0], row[1:])
+                        if result is not None:
+                            out[row[0]] = result
                     except (ValueError, TypeError, KeyError):
                         continue
         return out
@@ -486,19 +581,21 @@ class VerdictStore:
         """按"分数从高到低"给出待复核列表 —— 最可疑的排前面。"""
         if int(limit) <= 0:
             return []
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT path FROM censor_probe WHERE needs_review = 1 OR state = 'censored'"
-                " ORDER BY visual_score DESC, updated_at DESC",
-            ).fetchall()
         out = []
         from censor.review_route import needs_review
-        for (path,) in rows:
-            item = self.get(path)
-            if item is not None and needs_review(item):
-                out.append(item)
-                if len(out) >= int(limit):
-                    break
+        # Stream rows from one snapshot instead of opening a connection per
+        # video or materializing the entire history just to display one page.
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT path,{_RESULT_COLUMNS} "
+                "FROM censor_probe WHERE needs_review = 1 OR state = 'censored' "
+                "ORDER BY visual_score DESC, updated_at DESC,path")
+            for row in rows:
+                item = self._decode_row(row[0], row[1:])
+                if item is not None and needs_review(item):
+                    out.append(item)
+                    if len(out) >= int(limit):
+                        break
         return out
 
     def confirmed_censored(self, verify_identity=True) -> list[VideoVerdict]:
@@ -533,11 +630,48 @@ class VerdictStore:
         return out
 
     def history(self, limit: int = 500, offset: int = 0) -> list[VideoVerdict]:
+        """Compatibility list API; use history_page for a durable paging cursor."""
+        return self.history_page(limit, offset)['records']
+
+    def history_page(self, limit: int = 500, offset: int = 0) -> dict:
+        limit, offset = max(0, int(limit)), max(0, int(offset))
+        if not limit:
+            return dict(records=[], next_offset=offset, has_more=False)
         with self._connect() as conn:
-            rows = conn.execute('SELECT path FROM censor_probe ORDER BY updated_at DESC,path '
-                                'LIMIT ? OFFSET ?', (int(limit), int(offset))).fetchall()
-        records = self.get_many(path for (path,) in rows)
-        return [records[path] for (path,) in rows if path in records]
+            rows = conn.execute(f'SELECT path,{_RESULT_COLUMNS} FROM censor_probe '
+                                'ORDER BY updated_at DESC,path LIMIT ? OFFSET ?',
+                                (limit + 1, offset)).fetchall()
+        records = []
+        for row in rows[:limit]:
+            result = self._decode_row(row[0], row[1:])
+            if result is not None:
+                records.append(result)
+        return dict(records=records, next_offset=offset + min(len(rows), limit),
+                    has_more=len(rows) > limit)
+
+    def iter_history_pages(self, page_size: int = 500):
+        """Stream one consistent history snapshot without loading every row at once."""
+        page_size = max(1, int(page_size))
+        with self._connect() as conn:
+            conn.execute('BEGIN')
+            total = conn.execute('SELECT count(*) FROM censor_probe').fetchone()[0]
+            cursor = conn.execute(f'SELECT path,{_RESULT_COLUMNS} FROM censor_probe '
+                                  'ORDER BY updated_at DESC,path')
+            offset = 0
+            while True:
+                rows = cursor.fetchmany(page_size)
+                if not rows and offset:
+                    break
+                records = []
+                for row in rows:
+                    result = self._decode_row(row[0], row[1:])
+                    if result is not None:
+                        records.append(result)
+                offset += len(rows)
+                yield dict(records=records, next_offset=offset,
+                           has_more=offset < total, total=total)
+                if offset >= total:
+                    break
 
     def referenced_thumbnails(self):
         with self._connect() as conn:

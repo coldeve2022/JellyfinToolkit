@@ -157,7 +157,8 @@ def get_clean_tags_genres(item: dict) -> tuple[list[str], list[str], list[str]]:
 def update_tags_genres(server: str, api_key: str, item_id: str,
                        tags: list[str], genres: list[str], *, mode="replace",
                        removed_tags=None, removed_genres=None, before_write=None,
-                       should_stop=None) -> bool:
+                       should_stop=None, tag_transform=None, validate_item=None,
+                       before_post=None) -> bool:
     """更新条目 Tags/Genres（POST /Items/{id}，剔除复杂只读字段）。"""
     if should_stop and should_stop():
         return False
@@ -168,13 +169,19 @@ def update_tags_genres(server: str, api_key: str, item_id: str,
                       api_key, timeout=20)
     if code != 200 or not isinstance(item, dict):
         return False
+    if validate_item and not validate_item(item):
+        return False
     name = item.get("Name")
     if not name:
         path = item.get("Path") or ""
         name = path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] or "Item"
     item["Name"] = name
     old_tags, old_genres = list(item.get("Tags") or []), list(item.get("Genres") or [])
-    if mode == "clean":
+    if tag_transform is not None:
+        # Compute a delta from this fresh GET, preserving unrelated concurrent edits.
+        item["Tags"] = list(tag_transform(list(old_tags)))
+        item["Genres"] = old_genres
+    elif mode == "clean":
         item["Tags"] = [v for v in old_tags if str(v).strip() not in set(removed_tags or [])]
         item["Genres"] = [v for v in old_genres if str(v).strip() not in set(removed_genres or [])]
     elif mode == "restore":
@@ -185,10 +192,14 @@ def update_tags_genres(server: str, api_key: str, item_id: str,
         item["Genres"] = list(genres)
     if before_write:
         before_write(old_tags, old_genres, item["Tags"], item["Genres"])
+    if tag_transform is not None and old_tags == item["Tags"] and old_genres == item["Genres"]:
+        return True
     for k in DROP_FIELDS:
         item.pop(k, None)
     if should_stop and should_stop():
         return False
+    if before_post:
+        before_post()
     code2, _ = _req("POST", f"{_base(server)}/Items/{item_id}", api_key,
                     body=item, timeout=25)
     return code2 in (200, 204)

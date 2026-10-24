@@ -1,0 +1,1399 @@
+{
+  "scope": "Python/pyw syntax and exact function-body duplicates; excludes runtime data and dependencies",
+  "modules": 271,
+  "lines": 63686,
+  "syntax_errors": [],
+  "inventory": [
+    {
+      "path": "auto_orchestrator.py",
+      "lines": 101,
+      "functions": 2
+    },
+    {
+      "path": "auto_pipeline.py",
+      "lines": 70,
+      "functions": 2
+    },
+    {
+      "path": "config.py",
+      "lines": 641,
+      "functions": 13
+    },
+    {
+      "path": "main.py",
+      "lines": 265,
+      "functions": 11
+    },
+    {
+      "path": "main.pyw",
+      "lines": 83,
+      "functions": 3
+    },
+    {
+      "path": "version.py",
+      "lines": 46,
+      "functions": 1
+    },
+    {
+      "path": "automation/__init__.py",
+      "lines": 2,
+      "functions": 0
+    },
+    {
+      "path": "automation/orchestrator.py",
+      "lines": 492,
+      "functions": 15
+    },
+    {
+      "path": "automation/pipeline.py",
+      "lines": 181,
+      "functions": 7
+    },
+    {
+      "path": "automation/plans.py",
+      "lines": 120,
+      "functions": 7
+    },
+    {
+      "path": "censor/__init__.py",
+      "lines": 82,
+      "functions": 1
+    },
+    {
+      "path": "censor/base.py",
+      "lines": 117,
+      "functions": 11
+    },
+    {
+      "path": "censor/candidates.py",
+      "lines": 27,
+      "functions": 1
+    },
+    {
+      "path": "censor/evaluation.py",
+      "lines": 181,
+      "functions": 4
+    },
+    {
+      "path": "censor/file_signals.py",
+      "lines": 152,
+      "functions": 6
+    },
+    {
+      "path": "censor/fusion.py",
+      "lines": 132,
+      "functions": 3
+    },
+    {
+      "path": "censor/identity.py",
+      "lines": 39,
+      "functions": 2
+    },
+    {
+      "path": "censor/jobs.py",
+      "lines": 187,
+      "functions": 19
+    },
+    {
+      "path": "censor/models.py",
+      "lines": 157,
+      "functions": 11
+    },
+    {
+      "path": "censor/mosaic_cv.py",
+      "lines": 487,
+      "functions": 17
+    },
+    {
+      "path": "censor/numbering.py",
+      "lines": 227,
+      "functions": 11
+    },
+    {
+      "path": "censor/registry.py",
+      "lines": 131,
+      "functions": 14
+    },
+    {
+      "path": "censor/review_route.py",
+      "lines": 188,
+      "functions": 10
+    },
+    {
+      "path": "censor/sampling.py",
+      "lines": 645,
+      "functions": 21
+    },
+    {
+      "path": "censor/service.py",
+      "lines": 552,
+      "functions": 23
+    },
+    {
+      "path": "censor/store.py",
+      "lines": 593,
+      "functions": 28
+    },
+    {
+      "path": "censor/tag_signals.py",
+      "lines": 33,
+      "functions": 1
+    },
+    {
+      "path": "censor/workflow.py",
+      "lines": 71,
+      "functions": 3
+    },
+    {
+      "path": "censor/releases/__init__.py",
+      "lines": 67,
+      "functions": 1
+    },
+    {
+      "path": "censor/releases/base.py",
+      "lines": 92,
+      "functions": 7
+    },
+    {
+      "path": "censor/releases/html.py",
+      "lines": 52,
+      "functions": 5
+    },
+    {
+      "path": "censor/releases/index_search.py",
+      "lines": 219,
+      "functions": 12
+    },
+    {
+      "path": "censor/releases/javbus.py",
+      "lines": 171,
+      "functions": 8
+    },
+    {
+      "path": "censor/releases/javdb.py",
+      "lines": 243,
+      "functions": 10
+    },
+    {
+      "path": "censor/releases/models.py",
+      "lines": 213,
+      "functions": 15
+    },
+    {
+      "path": "censor/releases/service.py",
+      "lines": 361,
+      "functions": 19
+    },
+    {
+      "path": "censor/releases/store.py",
+      "lines": 374,
+      "functions": 27
+    },
+    {
+      "path": "censor/releases/supjav.py",
+      "lines": 224,
+      "functions": 9
+    },
+    {
+      "path": "censor/releases/supjav_pages.py",
+      "lines": 114,
+      "functions": 11
+    },
+    {
+      "path": "censor/releases/transport.py",
+      "lines": 584,
+      "functions": 35
+    },
+    {
+      "path": "scripts/build_release.py",
+      "lines": 281,
+      "functions": 6
+    },
+    {
+      "path": "scripts/patch_whisper_encoding.py",
+      "lines": 76,
+      "functions": 2
+    },
+    {
+      "path": "scripts/release_flow.py",
+      "lines": 795,
+      "functions": 19
+    },
+    {
+      "path": "scripts/release_notes.py",
+      "lines": 148,
+      "functions": 4
+    },
+    {
+      "path": "scripts/verify_release.py",
+      "lines": 134,
+      "functions": 7
+    },
+    {
+      "path": "scripts/version_manage.py",
+      "lines": 325,
+      "functions": 13
+    },
+    {
+      "path": "tests/__init__.py",
+      "lines": 1,
+      "functions": 0
+    },
+    {
+      "path": "tests/conftest.py",
+      "lines": 143,
+      "functions": 5
+    },
+    {
+      "path": "tests/test_actor_clean.py",
+      "lines": 33,
+      "functions": 5
+    },
+    {
+      "path": "tests/test_ai_profile.py",
+      "lines": 62,
+      "functions": 5
+    },
+    {
+      "path": "tests/test_ai_scoring.py",
+      "lines": 51,
+      "functions": 5
+    },
+    {
+      "path": "tests/test_analysis_round2.py",
+      "lines": 61,
+      "functions": 7
+    },
+    {
+      "path": "tests/test_architecture.py",
+      "lines": 100,
+      "functions": 7
+    },
+    {
+      "path": "tests/test_automation.py",
+      "lines": 58,
+      "functions": 5
+    },
+    {
+      "path": "tests/test_censor_accuracy_revision.py",
+      "lines": 81,
+      "functions": 7
+    },
+    {
+      "path": "tests/test_censor_architecture.py",
+      "lines": 76,
+      "functions": 6
+    },
+    {
+      "path": "tests/test_censor_deferred.py",
+      "lines": 117,
+      "functions": 6
+    },
+    {
+      "path": "tests/test_censor_evaluation.py",
+      "lines": 55,
+      "functions": 3
+    },
+    {
+      "path": "tests/test_censor_fusion.py",
+      "lines": 113,
+      "functions": 13
+    },
+    {
+      "path": "tests/test_censor_jobs.py",
+      "lines": 161,
+      "functions": 13
+    },
+    {
+      "path": "tests/test_censor_label_button.py",
+      "lines": 139,
+      "functions": 12
+    },
+    {
+      "path": "tests/test_censor_mosaic.py",
+      "lines": 106,
+      "functions": 10
+    },
+    {
+      "path": "tests/test_censor_numbering.py",
+      "lines": 72,
+      "functions": 8
+    },
+    {
+      "path": "tests/test_censor_pipeline.py",
+      "lines": 229,
+      "functions": 23
+    },
+    {
+      "path": "tests/test_censor_replace_page.py",
+      "lines": 187,
+      "functions": 18
+    },
+    {
+      "path": "tests/test_censor_review_workflow.py",
+      "lines": 97,
+      "functions": 8
+    },
+    {
+      "path": "tests/test_censor_sampling.py",
+      "lines": 127,
+      "functions": 11
+    },
+    {
+      "path": "tests/test_censor_service_reliability.py",
+      "lines": 224,
+      "functions": 23
+    },
+    {
+      "path": "tests/test_censor_store_identity.py",
+      "lines": 71,
+      "functions": 5
+    },
+    {
+      "path": "tests/test_censor_tags.py",
+      "lines": 68,
+      "functions": 5
+    },
+    {
+      "path": "tests/test_censor_task_experience.py",
+      "lines": 226,
+      "functions": 16
+    },
+    {
+      "path": "tests/test_censor_ui_status.py",
+      "lines": 24,
+      "functions": 1
+    },
+    {
+      "path": "tests/test_censor_visual_evidence.py",
+      "lines": 93,
+      "functions": 10
+    },
+    {
+      "path": "tests/test_censor_workflow_model.py",
+      "lines": 331,
+      "functions": 34
+    },
+    {
+      "path": "tests/test_context_facets.py",
+      "lines": 214,
+      "functions": 12
+    },
+    {
+      "path": "tests/test_core_remediation_ai.py",
+      "lines": 51,
+      "functions": 4
+    },
+    {
+      "path": "tests/test_core_remediation_data.py",
+      "lines": 192,
+      "functions": 24
+    },
+    {
+      "path": "tests/test_core_remediation_service.py",
+      "lines": 142,
+      "functions": 11
+    },
+    {
+      "path": "tests/test_core_remediation_state.py",
+      "lines": 136,
+      "functions": 10
+    },
+    {
+      "path": "tests/test_core_remediation_sync.py",
+      "lines": 130,
+      "functions": 16
+    },
+    {
+      "path": "tests/test_count_explanation_followup.py",
+      "lines": 58,
+      "functions": 3
+    },
+    {
+      "path": "tests/test_cover.py",
+      "lines": 190,
+      "functions": 16
+    },
+    {
+      "path": "tests/test_cpu_affinity.py",
+      "lines": 147,
+      "functions": 17
+    },
+    {
+      "path": "tests/test_database.py",
+      "lines": 151,
+      "functions": 9
+    },
+    {
+      "path": "tests/test_deck_state.py",
+      "lines": 55,
+      "functions": 7
+    },
+    {
+      "path": "tests/test_dedup.py",
+      "lines": 56,
+      "functions": 4
+    },
+    {
+      "path": "tests/test_dedup_checkbox.py",
+      "lines": 130,
+      "functions": 11
+    },
+    {
+      "path": "tests/test_emby.py",
+      "lines": 792,
+      "functions": 54
+    },
+    {
+      "path": "tests/test_ffmpeg.py",
+      "lines": 114,
+      "functions": 13
+    },
+    {
+      "path": "tests/test_gui_smoke.py",
+      "lines": 493,
+      "functions": 19
+    },
+    {
+      "path": "tests/test_history_round2.py",
+      "lines": 180,
+      "functions": 16
+    },
+    {
+      "path": "tests/test_input_merged_originals_followup.py",
+      "lines": 23,
+      "functions": 1
+    },
+    {
+      "path": "tests/test_input_workflows_followup.py",
+      "lines": 558,
+      "functions": 28
+    },
+    {
+      "path": "tests/test_integrations.py",
+      "lines": 340,
+      "functions": 25
+    },
+    {
+      "path": "tests/test_jellyfin_api.py",
+      "lines": 52,
+      "functions": 4
+    },
+    {
+      "path": "tests/test_junk_attachment.py",
+      "lines": 45,
+      "functions": 6
+    },
+    {
+      "path": "tests/test_labels.py",
+      "lines": 42,
+      "functions": 3
+    },
+    {
+      "path": "tests/test_launchers.py",
+      "lines": 72,
+      "functions": 5
+    },
+    {
+      "path": "tests/test_library.py",
+      "lines": 79,
+      "functions": 7
+    },
+    {
+      "path": "tests/test_library_count_followup.py",
+      "lines": 298,
+      "functions": 29
+    },
+    {
+      "path": "tests/test_library_scope.py",
+      "lines": 163,
+      "functions": 20
+    },
+    {
+      "path": "tests/test_local_ai_followup.py",
+      "lines": 457,
+      "functions": 36
+    },
+    {
+      "path": "tests/test_media_filter_and_search.py",
+      "lines": 428,
+      "functions": 23
+    },
+    {
+      "path": "tests/test_media_remediation_execution.py",
+      "lines": 461,
+      "functions": 33
+    },
+    {
+      "path": "tests/test_media_remediation_transactions.py",
+      "lines": 523,
+      "functions": 41
+    },
+    {
+      "path": "tests/test_merge.py",
+      "lines": 483,
+      "functions": 45
+    },
+    {
+      "path": "tests/test_merge_archive.py",
+      "lines": 155,
+      "functions": 8
+    },
+    {
+      "path": "tests/test_merge_repair.py",
+      "lines": 52,
+      "functions": 3
+    },
+    {
+      "path": "tests/test_merge_ui.py",
+      "lines": 104,
+      "functions": 6
+    },
+    {
+      "path": "tests/test_metadata_labels.py",
+      "lines": 86,
+      "functions": 9
+    },
+    {
+      "path": "tests/test_naming.py",
+      "lines": 74,
+      "functions": 8
+    },
+    {
+      "path": "tests/test_nfo.py",
+      "lines": 94,
+      "functions": 12
+    },
+    {
+      "path": "tests/test_orchestration_remediation.py",
+      "lines": 307,
+      "functions": 22
+    },
+    {
+      "path": "tests/test_orchestrator.py",
+      "lines": 49,
+      "functions": 3
+    },
+    {
+      "path": "tests/test_portability.py",
+      "lines": 710,
+      "functions": 53
+    },
+    {
+      "path": "tests/test_process_lifecycle_remediation.py",
+      "lines": 50,
+      "functions": 4
+    },
+    {
+      "path": "tests/test_profile.py",
+      "lines": 81,
+      "functions": 6
+    },
+    {
+      "path": "tests/test_release_architecture.py",
+      "lines": 83,
+      "functions": 7
+    },
+    {
+      "path": "tests/test_release_flow.py",
+      "lines": 219,
+      "functions": 16
+    },
+    {
+      "path": "tests/test_release_index.py",
+      "lines": 165,
+      "functions": 18
+    },
+    {
+      "path": "tests/test_release_notes.py",
+      "lines": 150,
+      "functions": 11
+    },
+    {
+      "path": "tests/test_release_remediation.py",
+      "lines": 210,
+      "functions": 19
+    },
+    {
+      "path": "tests/test_release_service.py",
+      "lines": 387,
+      "functions": 43
+    },
+    {
+      "path": "tests/test_release_sources.py",
+      "lines": 192,
+      "functions": 17
+    },
+    {
+      "path": "tests/test_repair_summary.py",
+      "lines": 247,
+      "functions": 18
+    },
+    {
+      "path": "tests/test_repair_worker.py",
+      "lines": 161,
+      "functions": 10
+    },
+    {
+      "path": "tests/test_review_deck.py",
+      "lines": 130,
+      "functions": 10
+    },
+    {
+      "path": "tests/test_review_filters.py",
+      "lines": 126,
+      "functions": 9
+    },
+    {
+      "path": "tests/test_review_workspace.py",
+      "lines": 84,
+      "functions": 2
+    },
+    {
+      "path": "tests/test_sampling_round2.py",
+      "lines": 132,
+      "functions": 13
+    },
+    {
+      "path": "tests/test_scope_feedback_migration.py",
+      "lines": 78,
+      "functions": 5
+    },
+    {
+      "path": "tests/test_scope_grouping.py",
+      "lines": 66,
+      "functions": 7
+    },
+    {
+      "path": "tests/test_scope_integration.py",
+      "lines": 136,
+      "functions": 12
+    },
+    {
+      "path": "tests/test_scope_related_pages.py",
+      "lines": 94,
+      "functions": 6
+    },
+    {
+      "path": "tests/test_scoring.py",
+      "lines": 100,
+      "functions": 8
+    },
+    {
+      "path": "tests/test_scoring_v2.py",
+      "lines": 106,
+      "functions": 8
+    },
+    {
+      "path": "tests/test_subtitle_performance.py",
+      "lines": 190,
+      "functions": 14
+    },
+    {
+      "path": "tests/test_supjav_browser.py",
+      "lines": 120,
+      "functions": 11
+    },
+    {
+      "path": "tests/test_supjav_direct.py",
+      "lines": 111,
+      "functions": 15
+    },
+    {
+      "path": "tests/test_system_foundations.py",
+      "lines": 105,
+      "functions": 12
+    },
+    {
+      "path": "tests/test_system_http_integration.py",
+      "lines": 93,
+      "functions": 5
+    },
+    {
+      "path": "tests/test_system_optimization_automation.py",
+      "lines": 50,
+      "functions": 3
+    },
+    {
+      "path": "tests/test_system_optimization_config.py",
+      "lines": 51,
+      "functions": 4
+    },
+    {
+      "path": "tests/test_system_optimization_final.py",
+      "lines": 234,
+      "functions": 24
+    },
+    {
+      "path": "tests/test_system_optimization_performance.py",
+      "lines": 128,
+      "functions": 13
+    },
+    {
+      "path": "tests/test_system_optimization_preferences.py",
+      "lines": 68,
+      "functions": 4
+    },
+    {
+      "path": "tests/test_system_optimization_release.py",
+      "lines": 180,
+      "functions": 21
+    },
+    {
+      "path": "tests/test_system_optimization_remaining.py",
+      "lines": 136,
+      "functions": 13
+    },
+    {
+      "path": "tests/test_system_optimization_replacement.py",
+      "lines": 56,
+      "functions": 3
+    },
+    {
+      "path": "tests/test_system_optimization_state.py",
+      "lines": 70,
+      "functions": 6
+    },
+    {
+      "path": "tests/test_system_optimization_ui.py",
+      "lines": 62,
+      "functions": 4
+    },
+    {
+      "path": "tests/test_system_optimization_workflow.py",
+      "lines": 54,
+      "functions": 3
+    },
+    {
+      "path": "tests/test_tag_norm.py",
+      "lines": 65,
+      "functions": 7
+    },
+    {
+      "path": "tests/test_task_header_restore.py",
+      "lines": 150,
+      "functions": 7
+    },
+    {
+      "path": "tests/test_tool_search_performance.py",
+      "lines": 27,
+      "functions": 3
+    },
+    {
+      "path": "tests/test_trash.py",
+      "lines": 47,
+      "functions": 4
+    },
+    {
+      "path": "tests/test_ui_remediation.py",
+      "lines": 875,
+      "functions": 58
+    },
+    {
+      "path": "tests/test_ui_wiring.py",
+      "lines": 210,
+      "functions": 10
+    },
+    {
+      "path": "tests/test_version_manage.py",
+      "lines": 165,
+      "functions": 18
+    },
+    {
+      "path": "tests/test_workflow_round2.py",
+      "lines": 65,
+      "functions": 7
+    },
+    {
+      "path": "tests/test_workspace_round2.py",
+      "lines": 185,
+      "functions": 11
+    },
+    {
+      "path": "tools/make_icon.py",
+      "lines": 185,
+      "functions": 4
+    },
+    {
+      "path": "tools/make_version_info.py",
+      "lines": 105,
+      "functions": 2
+    },
+    {
+      "path": "tools/dev/audit_general_round2.py",
+      "lines": 61,
+      "functions": 1
+    },
+    {
+      "path": "tools/dev/audit_system_20261023.py",
+      "lines": 381,
+      "functions": 14
+    },
+    {
+      "path": "tools/dev/benchmark_general_round2.py",
+      "lines": 102,
+      "functions": 7
+    },
+    {
+      "path": "tools/dev/benchmark_optimization_20261023.py",
+      "lines": 62,
+      "functions": 2
+    },
+    {
+      "path": "tools/dev/e2e_check.py",
+      "lines": 191,
+      "functions": 4
+    },
+    {
+      "path": "tools/dev/evaluate_pixelation.py",
+      "lines": 39,
+      "functions": 1
+    },
+    {
+      "path": "tools/dev/make_screenshots.py",
+      "lines": 155,
+      "functions": 4
+    },
+    {
+      "path": "tools/dev/seed_demo.py",
+      "lines": 230,
+      "functions": 5
+    },
+    {
+      "path": "tools/dev/smoke_exe.py",
+      "lines": 144,
+      "functions": 5
+    },
+    {
+      "path": "ui/__init__.py",
+      "lines": 1,
+      "functions": 0
+    },
+    {
+      "path": "ui/censor_gallery.py",
+      "lines": 265,
+      "functions": 22
+    },
+    {
+      "path": "ui/censor_release.py",
+      "lines": 364,
+      "functions": 20
+    },
+    {
+      "path": "ui/censor_scan.py",
+      "lines": 197,
+      "functions": 9
+    },
+    {
+      "path": "ui/layout.py",
+      "lines": 136,
+      "functions": 5
+    },
+    {
+      "path": "ui/main_window.py",
+      "lines": 381,
+      "functions": 14
+    },
+    {
+      "path": "ui/release_settings.py",
+      "lines": 183,
+      "functions": 9
+    },
+    {
+      "path": "ui/review_workspace.py",
+      "lines": 321,
+      "functions": 13
+    },
+    {
+      "path": "ui/scope_selector.py",
+      "lines": 216,
+      "functions": 13
+    },
+    {
+      "path": "ui/services.py",
+      "lines": 664,
+      "functions": 33
+    },
+    {
+      "path": "ui/styles.py",
+      "lines": 364,
+      "functions": 3
+    },
+    {
+      "path": "ui/supjav_browser.py",
+      "lines": 258,
+      "functions": 18
+    },
+    {
+      "path": "ui/table_tools.py",
+      "lines": 63,
+      "functions": 5
+    },
+    {
+      "path": "ui/theme.py",
+      "lines": 100,
+      "functions": 5
+    },
+    {
+      "path": "ui/widgets.py",
+      "lines": 802,
+      "functions": 58
+    },
+    {
+      "path": "ui/workspace_preferences.py",
+      "lines": 240,
+      "functions": 14
+    },
+    {
+      "path": "ui/pages/__init__.py",
+      "lines": 1,
+      "functions": 0
+    },
+    {
+      "path": "ui/pages/automation.py",
+      "lines": 311,
+      "functions": 12
+    },
+    {
+      "path": "ui/pages/censor_replace.py",
+      "lines": 648,
+      "functions": 43
+    },
+    {
+      "path": "ui/pages/censorship.py",
+      "lines": 1199,
+      "functions": 71
+    },
+    {
+      "path": "ui/pages/db_tools.py",
+      "lines": 304,
+      "functions": 13
+    },
+    {
+      "path": "ui/pages/dedup.py",
+      "lines": 589,
+      "functions": 25
+    },
+    {
+      "path": "ui/pages/delete.py",
+      "lines": 562,
+      "functions": 23
+    },
+    {
+      "path": "ui/pages/insight.py",
+      "lines": 386,
+      "functions": 14
+    },
+    {
+      "path": "ui/pages/lada.py",
+      "lines": 768,
+      "functions": 45
+    },
+    {
+      "path": "ui/pages/merge.py",
+      "lines": 1726,
+      "functions": 85
+    },
+    {
+      "path": "ui/pages/nfo_fix.py",
+      "lines": 304,
+      "functions": 18
+    },
+    {
+      "path": "ui/pages/onboarding.py",
+      "lines": 215,
+      "functions": 9
+    },
+    {
+      "path": "ui/pages/profile.py",
+      "lines": 624,
+      "functions": 27
+    },
+    {
+      "path": "ui/pages/repair.py",
+      "lines": 575,
+      "functions": 19
+    },
+    {
+      "path": "ui/pages/replace.py",
+      "lines": 359,
+      "functions": 18
+    },
+    {
+      "path": "ui/pages/review.py",
+      "lines": 1491,
+      "functions": 66
+    },
+    {
+      "path": "ui/pages/settings.py",
+      "lines": 1353,
+      "functions": 49
+    },
+    {
+      "path": "ui/pages/subtitle.py",
+      "lines": 324,
+      "functions": 22
+    },
+    {
+      "path": "ui/pages/subtitle_gen.py",
+      "lines": 726,
+      "functions": 40
+    },
+    {
+      "path": "ui/pages/tasks.py",
+      "lines": 329,
+      "functions": 16
+    },
+    {
+      "path": "utils/__init__.py",
+      "lines": 1,
+      "functions": 0
+    },
+    {
+      "path": "utils/actor_clean.py",
+      "lines": 184,
+      "functions": 8
+    },
+    {
+      "path": "utils/ai_profile.py",
+      "lines": 199,
+      "functions": 10
+    },
+    {
+      "path": "utils/ai_results.py",
+      "lines": 61,
+      "functions": 3
+    },
+    {
+      "path": "utils/ai_scoring.py",
+      "lines": 194,
+      "functions": 12
+    },
+    {
+      "path": "utils/censor_tags.py",
+      "lines": 151,
+      "functions": 6
+    },
+    {
+      "path": "utils/console.py",
+      "lines": 49,
+      "functions": 2
+    },
+    {
+      "path": "utils/cpu_affinity.py",
+      "lines": 230,
+      "functions": 8
+    },
+    {
+      "path": "utils/deck_state.py",
+      "lines": 111,
+      "functions": 11
+    },
+    {
+      "path": "utils/file_ops.py",
+      "lines": 439,
+      "functions": 16
+    },
+    {
+      "path": "utils/file_scan.py",
+      "lines": 98,
+      "functions": 4
+    },
+    {
+      "path": "utils/fonts.py",
+      "lines": 92,
+      "functions": 5
+    },
+    {
+      "path": "utils/gpu.py",
+      "lines": 145,
+      "functions": 8
+    },
+    {
+      "path": "utils/jellyfin_api.py",
+      "lines": 392,
+      "functions": 20
+    },
+    {
+      "path": "utils/labels.py",
+      "lines": 161,
+      "functions": 15
+    },
+    {
+      "path": "utils/lada_tool.py",
+      "lines": 537,
+      "functions": 20
+    },
+    {
+      "path": "utils/library.py",
+      "lines": 1102,
+      "functions": 32
+    },
+    {
+      "path": "utils/library_api.py",
+      "lines": 334,
+      "functions": 12
+    },
+    {
+      "path": "utils/library_scope.py",
+      "lines": 181,
+      "functions": 9
+    },
+    {
+      "path": "utils/library_source.py",
+      "lines": 309,
+      "functions": 10
+    },
+    {
+      "path": "utils/local_ai.py",
+      "lines": 374,
+      "functions": 14
+    },
+    {
+      "path": "utils/media_filter.py",
+      "lines": 224,
+      "functions": 15
+    },
+    {
+      "path": "utils/media_server.py",
+      "lines": 311,
+      "functions": 13
+    },
+    {
+      "path": "utils/media_types.py",
+      "lines": 104,
+      "functions": 7
+    },
+    {
+      "path": "utils/merge.py",
+      "lines": 1317,
+      "functions": 49
+    },
+    {
+      "path": "utils/merge_archive.py",
+      "lines": 525,
+      "functions": 20
+    },
+    {
+      "path": "utils/merge_executor.py",
+      "lines": 343,
+      "functions": 6
+    },
+    {
+      "path": "utils/merge_repair.py",
+      "lines": 355,
+      "functions": 8
+    },
+    {
+      "path": "utils/metadata_labels.py",
+      "lines": 28,
+      "functions": 1
+    },
+    {
+      "path": "utils/naming.py",
+      "lines": 74,
+      "functions": 2
+    },
+    {
+      "path": "utils/nfo.py",
+      "lines": 244,
+      "functions": 8
+    },
+    {
+      "path": "utils/nfo_source.py",
+      "lines": 80,
+      "functions": 4
+    },
+    {
+      "path": "utils/proc.py",
+      "lines": 364,
+      "functions": 9
+    },
+    {
+      "path": "utils/profile.py",
+      "lines": 265,
+      "functions": 9
+    },
+    {
+      "path": "utils/replacement.py",
+      "lines": 151,
+      "functions": 5
+    },
+    {
+      "path": "utils/review_facets.py",
+      "lines": 78,
+      "functions": 4
+    },
+    {
+      "path": "utils/scoring.py",
+      "lines": 610,
+      "functions": 29
+    },
+    {
+      "path": "utils/scoring_service.py",
+      "lines": 64,
+      "functions": 2
+    },
+    {
+      "path": "utils/scoring_v2.py",
+      "lines": 404,
+      "functions": 12
+    },
+    {
+      "path": "utils/state_context.py",
+      "lines": 184,
+      "functions": 19
+    },
+    {
+      "path": "utils/subtitle_clean.py",
+      "lines": 548,
+      "functions": 23
+    },
+    {
+      "path": "utils/tag_norm.py",
+      "lines": 145,
+      "functions": 5
+    },
+    {
+      "path": "utils/tool_search.py",
+      "lines": 218,
+      "functions": 9
+    },
+    {
+      "path": "utils/tools.py",
+      "lines": 462,
+      "functions": 29
+    },
+    {
+      "path": "utils/trash.py",
+      "lines": 96,
+      "functions": 10
+    },
+    {
+      "path": "utils/video_health.py",
+      "lines": 203,
+      "functions": 3
+    },
+    {
+      "path": "utils/whisper_tool.py",
+      "lines": 553,
+      "functions": 21
+    },
+    {
+      "path": "workers/__init__.py",
+      "lines": 1,
+      "functions": 0
+    },
+    {
+      "path": "workers/ai.py",
+      "lines": 166,
+      "functions": 12
+    },
+    {
+      "path": "workers/ai_score.py",
+      "lines": 88,
+      "functions": 3
+    },
+    {
+      "path": "workers/automation.py",
+      "lines": 45,
+      "functions": 3
+    },
+    {
+      "path": "workers/database.py",
+      "lines": 266,
+      "functions": 9
+    },
+    {
+      "path": "workers/ffmpeg.py",
+      "lines": 436,
+      "functions": 26
+    },
+    {
+      "path": "workers/ingest.py",
+      "lines": 54,
+      "functions": 3
+    },
+    {
+      "path": "workers/jellyfin_sync.py",
+      "lines": 77,
+      "functions": 8
+    },
+    {
+      "path": "workers/lada_restore.py",
+      "lines": 289,
+      "functions": 12
+    },
+    {
+      "path": "workers/merge.py",
+      "lines": 165,
+      "functions": 9
+    },
+    {
+      "path": "workers/merge_archive.py",
+      "lines": 132,
+      "functions": 9
+    },
+    {
+      "path": "workers/merge_repair.py",
+      "lines": 230,
+      "functions": 8
+    },
+    {
+      "path": "workers/scanner.py",
+      "lines": 115,
+      "functions": 8
+    },
+    {
+      "path": "workers/scorer.py",
+      "lines": 80,
+      "functions": 7
+    },
+    {
+      "path": "workers/trash.py",
+      "lines": 53,
+      "functions": 3
+    },
+    {
+      "path": "workers/whisper_gen.py",
+      "lines": 230,
+      "functions": 7
+    }
+  ],
+  "exact_duplicate_groups": [
+    [
+      {
+        "path": "scripts/patch_whisper_encoding.py",
+        "line": 26,
+        "name": "force_utf8_stdout"
+      },
+      {
+        "path": "scripts/release_flow.py",
+        "line": 64,
+        "name": "force_utf8_stdout"
+      },
+      {
+        "path": "scripts/release_notes.py",
+        "line": 35,
+        "name": "_force_utf8_stdout"
+      },
+      {
+        "path": "scripts/version_manage.py",
+        "line": 46,
+        "name": "_force_utf8_stdout"
+      }
+    ],
+    [
+      {
+        "path": "utils/lada_tool.py",
+        "line": 129,
+        "name": "search_lada_cli"
+      },
+      {
+        "path": "utils/whisper_tool.py",
+        "line": 151,
+        "name": "search_infer_exe"
+      }
+    ]
+  ]
+}

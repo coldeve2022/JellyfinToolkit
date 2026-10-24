@@ -31,12 +31,119 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import threading
 from copy import copy, deepcopy
+from pathlib import Path
 
 __all__ = [
     "TransportError", "TransportBlocked", "TransportNotFound", "HttpTransport",
     "FlareSolverrTransport", "FallbackTransport", "detect_proxy", "build_transport",
     "offline", "OFFLINE_ENV", "probe_bypass", "raise_for_status",
+    "normalize_proxy", "probe_local_proxy", "LOCAL_PROXY_PORTS",
 ]
+
+
+#: 常见本地代理端口（各家客户端的默认值）。**只用来探测"本机有没有代理在听"**，
+#: 探不到就照旧直连 —— 这不是"写死代理地址"。
+LOCAL_PROXY_PORTS = (7890, 7897, 7891, 7899, 10808, 10809, 1080, 8889, 2080, 8080, 6152)
+
+#: 探测结果缓存多久（秒）。避免每次检索都重新扫端口。
+PROBE_TTL = 1800.0
+
+#: 探测开关：设成 0/false 可关闭（测试和 CI 用），避免环境差异拖慢用例。
+PROBE_ENV = "RELEASE_PROXY_PROBE"
+
+_probe_state: dict = {"at": 0.0, "value": None, "loaded": False}
+_probe_lock = threading.Lock()
+
+
+def normalize_proxy(text: str) -> str:
+    """把各种写法的代理地址收敛成 ``http://host:port``。
+
+    这一步看着琐碎，但它决定"配了代理却等于没配"这种事故会不会发生：
+    ``127.0.0.1:7897`` 这种最自然的填法如果不补 scheme，
+    ``urllib`` 会当成无效 handler 而**静默直连**，表现就是"所有站点都超时"。
+    """
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    if "://" not in value:
+        # 支持 "http=127.0.0.1:7897;https=127.0.0.1:7897" 这类系统代理写法
+        if "=" in value:
+            parts = dict(
+                item.split("=", 1) for item in value.split(";") if "=" in item
+            )
+            value = (parts.get("https") or parts.get("http") or "").strip()
+            if not value:
+                return ""
+            if "://" not in value:
+                value = "http://" + value
+        else:
+            value = "http://" + value
+    return value.rstrip("/")
+
+
+def _probe_cache_path() -> Path:
+    try:
+        from config import DATA_DIR
+
+        return Path(DATA_DIR) / "proxy-probe.json"
+    except Exception:  # noqa: BLE001 - 拿不到数据目录就退回临时目录
+        import tempfile
+
+        return Path(tempfile.gettempdir()) / "jellyfin-proxy-probe.json"
+
+
+def _read_probe_cache() -> str | None:
+    try:
+        raw = json.loads(_probe_cache_path().read_text(encoding="utf-8"))
+        if time.monotonic() - float(raw.get("stamp", 0)) > PROBE_TTL:
+            return None
+        return str(raw.get("proxy", ""))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _write_probe_cache(value: str) -> None:
+    try:
+        path = _probe_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"proxy": value, "stamp": time.monotonic()}),
+                        encoding="utf-8")
+    except OSError:
+        pass
+
+
+def probe_local_proxy(*, ttl: float = PROBE_TTL, force: bool = False) -> str:
+    """没有声明任何代理时，探测本机常见端口上有没有代理在听。
+
+    为什么要它：很多用户开着 Clash 但**没开系统代理**（TUN 模式或只开了端口），
+    程序按"配置→环境变量→系统代理"全部落空后就去直连，
+    结果所有外网站点都是"连接超时"，看起来像软件坏了。
+    """
+    if str(os.environ.get(PROBE_ENV, "")).strip().lower() in {"0", "false", "off", "no"}:
+        return ""
+    with _probe_lock:
+        if not force and _probe_state["loaded"] and time.monotonic() - _probe_state["at"] < ttl:
+            return str(_probe_state["value"] or "")
+        if not force:
+            cached = _read_probe_cache()
+            if cached is not None:
+                _probe_state.update(at=time.monotonic(), value=cached, loaded=True)
+                return cached
+        found = ""
+        for port in LOCAL_PROXY_PORTS:
+            sock = socket.socket()
+            try:
+                sock.settimeout(0.18)
+                if sock.connect_ex(("127.0.0.1", port)) == 0:
+                    found = f"http://127.0.0.1:{port}"
+                    break
+            except OSError:
+                continue
+            finally:
+                sock.close()
+        _probe_state.update(at=time.monotonic(), value=found, loaded=True)
+        _write_probe_cache(found)
+        return found
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -125,15 +232,15 @@ def detect_proxy(explicit: str = "") -> str:
     读系统代理想解决的是"用户开了 Clash 但没配环境变量"这个最常见的场景，
     同时避免在代码里写死任何一个本地端口。
     """
-    text = str(explicit or "").strip()
+    text = normalize_proxy(explicit)
     if text:
         return text
     for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
-        value = os.environ.get(name, "").strip()
+        value = normalize_proxy(os.environ.get(name, ""))
         if value:
             return value
     if os.name != "nt":
-        return ""
+        return probe_local_proxy()
     try:
         import winreg
 
@@ -144,7 +251,8 @@ def detect_proxy(explicit: str = "") -> str:
         with key:
             enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
             if not enabled:
-                return ""
+                # 没开系统代理 ≠ 没代理，Clash 常见"只开端口不开系统代理"
+                return probe_local_proxy()
             server, _ = winreg.QueryValueEx(key, "ProxyServer")
     except (OSError, ImportError, ValueError):
         return ""
@@ -159,9 +267,8 @@ def detect_proxy(explicit: str = "") -> str:
         server = parts.get("https") or parts.get("http") or ""
     if not server:
         return ""
-    if "://" not in server:
-        server = "http://" + server
-    return server
+    # 系统代理没写 scheme 时同样要补；全都落空再探测本机端口
+    return normalize_proxy(server) or probe_local_proxy()
 
 
 @dataclass
@@ -213,10 +320,13 @@ def _fallback_routes(explicit: str) -> list[str]:
         if value and value not in routes:
             routes.append(value)
 
-    push(explicit)
+    push(normalize_proxy(explicit))
     for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
-        push(os.environ.get(name, ""))
+        push(normalize_proxy(os.environ.get(name, "")))
     push(detect_proxy(""))
+    # 环境变量里的代理未必能转发所有站点（实测有 502 的情况），
+    # 所以把"本机在听的端口"也排进候选，最后才是直连。
+    push(probe_local_proxy())
     routes.append("")   # 直连兜底
     return routes
 

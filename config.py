@@ -167,6 +167,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "censor_workers": 4,
     "censor_memory_mb": 512,
     "censor_verify_replacements": False,
+    "censor_triage_enabled": True,
+    "censor_triage_prefixes": ["FC2"],
+    "censor_triage_samples": 30,
+    "censor_sync_nfo": True,
+    "censor_sync_jellyfin": True,
+    "censor_sync_create_nfo": True,
+    "censor_sync_tag_censored": "有码",
+    "censor_sync_tag_uncensored": "无码",
     # 分析分辨率：960x540 是实测的性价比拐点（1280 的管道开销翻倍、精度提升有限）。
     # 再往下调会让马赛克块缩到 8px 以下，直接漏检
     "censor_sample_width": 960,
@@ -264,6 +272,15 @@ def _resolve_base_dir() -> Path:
         return Path(override).expanduser().resolve()
     if portable_mode():
         return program_dir() / "AppData"
+    # All normal releases share a stable library registration. Import only reads
+    # it; startup validates missing/corrupt profiles before creating any stores.
+    from utils.data_profile import PROFILE_FILENAME, ProfileError, registered_root
+    try:
+        registered = registered_root(user_data_root() / PROFILE_FILENAME)
+    except (ProfileError, OSError):
+        registered = None
+    if registered is not None:
+        return registered
     if getattr(sys, "frozen", False):
         return user_data_root()
     # 源码模式：写项目目录，方便开发与随手查看
@@ -347,6 +364,9 @@ def _coerce_config(data: dict) -> dict:
                 and isinstance(entry.get("remote"), str) and entry["remote"].strip()
                 and isinstance(entry.get("local"), str) and entry["local"].strip()
             ] if isinstance(value, list) else []
+        elif key == 'censor_triage_prefixes':
+            out[key] = list(dict.fromkeys(x.strip().upper() for x in value
+                if isinstance(x, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,31}', x.strip())))[:20] if isinstance(value, list) else list(default)
         elif key == 'censor_windows':
             out[key] = sorted(set(x for x in value if isinstance(x, int)
                                   and not isinstance(x, bool) and 16 <= x <= 512)) if isinstance(value, list) else list(default)
@@ -382,6 +402,7 @@ def _coerce_config(data: dict) -> dict:
         "lada_vram_low": (0.0, 1024.0),
         "censor_frame_samples": (6, 600), "censor_candidates": (1, 20),
         "censor_workers": (1, 16),
+        "censor_triage_samples": (24, 120),
         "censor_memory_mb": (64, 8192),
         "censor_sample_width": (320, 3840), "censor_sample_height": (180, 2160),
         "censor_window": (48, 512), "censor_stride": (16, 512),
@@ -401,6 +422,16 @@ def _coerce_config(data: dict) -> dict:
     }
     for key, (low, high) in bounds.items():
         out[key] = max(low, min(high, out[key]))
+    for key in ('censor_sync_tag_censored', 'censor_sync_tag_uncensored'):
+        value = out[key].strip()
+        out[key] = value if value and len(value) <= 64 and not any(ord(c) < 32 for c in value) else DEFAULT_CONFIG[key]
+    # Upgrade only the former default pair; mixed/custom mappings remain user-owned.
+    if (out['censor_sync_tag_censored'], out['censor_sync_tag_uncensored']) == ('像素化:有', '像素化:未见'):
+        for key in ('censor_sync_tag_censored', 'censor_sync_tag_uncensored'):
+            out[key] = DEFAULT_CONFIG[key]
+    if out['censor_sync_tag_censored'].casefold() == out['censor_sync_tag_uncensored'].casefold():
+        for key in ('censor_sync_tag_censored', 'censor_sync_tag_uncensored'):
+            out[key] = DEFAULT_CONFIG[key]
     out["score_th_delete"] = min(out["score_th_delete"], out["score_th_keep"] - 1)
     out["lada_vram_low"] = min(out["lada_vram_low"], max(0.0, out["lada_vram_high"] - 0.1))
     for key, choices in {"library_source": {"auto", "db", "api"},
@@ -534,6 +565,14 @@ class ToolkitConfig:
     censor_workers: int = DEFAULT_CONFIG["censor_workers"]
     censor_memory_mb: int = DEFAULT_CONFIG["censor_memory_mb"]
     censor_verify_replacements: bool = DEFAULT_CONFIG["censor_verify_replacements"]
+    censor_triage_enabled: bool = DEFAULT_CONFIG["censor_triage_enabled"]
+    censor_triage_prefixes: List[str] = field(default_factory=lambda: list(DEFAULT_CONFIG['censor_triage_prefixes']))
+    censor_triage_samples: int = DEFAULT_CONFIG["censor_triage_samples"]
+    censor_sync_nfo: bool = DEFAULT_CONFIG["censor_sync_nfo"]
+    censor_sync_jellyfin: bool = DEFAULT_CONFIG["censor_sync_jellyfin"]
+    censor_sync_create_nfo: bool = DEFAULT_CONFIG["censor_sync_create_nfo"]
+    censor_sync_tag_censored: str = DEFAULT_CONFIG["censor_sync_tag_censored"]
+    censor_sync_tag_uncensored: str = DEFAULT_CONFIG["censor_sync_tag_uncensored"]
     censor_sample_width: int = DEFAULT_CONFIG["censor_sample_width"]
     censor_sample_height: int = DEFAULT_CONFIG["censor_sample_height"]
     censor_window: int = DEFAULT_CONFIG["censor_window"]

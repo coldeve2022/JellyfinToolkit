@@ -1,0 +1,49 @@
+{
+  "baseline": "58f512d",
+  "media": "60 synthetic 320x180 grayscale frames",
+  "caveat": "Single local run; CV stage only, excludes video decode and NAS I/O.",
+  "repeated": {
+    "before": {
+      "seconds": 0.3826,
+      "cv_calls": 60,
+      "score": 0.0,
+      "state": "unknown",
+      "review_required": false
+    },
+    "after": {
+      "seconds": 0.027,
+      "cv_calls": 4,
+      "score": 0.0,
+      "state": "unknown",
+      "review_required": false
+    }
+  },
+  "unique": {
+    "before": {
+      "seconds": 0.3612,
+      "cv_calls": 60,
+      "score": 0.0,
+      "state": "unknown",
+      "review_required": false
+    },
+    "after": {
+      "seconds": 0.3897,
+      "cv_calls": 60,
+      "score": 0.0,
+      "state": "unknown",
+      "review_required": false
+    }
+  },
+  "history_100_of_300": {
+    "before": {
+      "seconds": 1.3044,
+      "connections": 101,
+      "returned": 100
+    },
+    "after": {
+      "seconds": 0.0201,
+      "connections": 1,
+      "returned": 100
+    }
+  }
+}

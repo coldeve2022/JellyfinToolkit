@@ -452,10 +452,34 @@ class CensorReplacePage(QWidget):
         return [row.number for row in self._rows.values()
                 if row.searchable and (force or self._release.fresh(row.number) is None)]
 
+    def _ensure_supjav_channel(self) -> str:
+        """Supjav 站内必须先注册浏览器 reader，否则只会拿到 403。
+
+        这里**静默**准备会话（不弹窗、不抢焦点）：实测有头 Chromium 能自动过
+        Cloudflare 的 JS 挑战；真需要人机验证时窗口已经在那儿，用户点一下即可。
+        以前要用户自己跑到设置页点"连接 Supjav 浏览器会话"，忘了点就等于
+        整个 Supjav 源永远拿不到东西。
+        """
+        sources = getattr(self.cfg, "release_sources", None) or []
+        if "supjav" not in sources:
+            return ""
+        if str(getattr(self.cfg, "release_supjav_mode", "auto")) == "index":
+            return ""
+        try:
+            from ui.supjav_browser import prepare_supjav_session
+
+            prepare_supjav_session()
+            return "Supjav 站内：浏览器会话就绪"
+        except Exception as exc:  # noqa: BLE001 - 会话不可用要如实说，但不挡检索
+            return f"Supjav 站内：浏览器会话不可用（{exc}）"
+
     def _lookup(self, *, force: bool, numbers: Optional[list[str]] = None) -> None:
         if self._worker is not None and self._worker.isRunning():
             self.lbl_summary.setText("检索进行中，先等它结束或点「停止」")
             return
+        channel = self._ensure_supjav_channel()
+        if channel:
+            self.lbl_summary.setText(channel)
         targets = numbers
         if targets is None:
             self._prepare_lookup(force)

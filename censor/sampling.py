@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import queue
+import re
 import subprocess
 import threading
 import tempfile
@@ -18,7 +19,7 @@ import struct
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 __all__ = ["SampledFrame", "FrameSampler", "SamplingError"]
 
@@ -37,6 +38,24 @@ class SamplingTimeout(SamplingError):
 
 def _never_stop() -> bool:
     return False
+
+
+_FRAME_TIME_BASE = re.compile(
+    rb'\[showinfo@sampling[^\]]*\]\s+config in time_base:\s*(\d+)/(\d+)'
+)
+_FRAME_PTS = re.compile(
+    rb'\[showinfo@sampling[^\]]*\]\s+n:\s*0\s+pts:\s*(-?\d+)\s'
+)
+
+
+def _finite_time(value, label: str, *, positive: bool = False) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise SamplingError(f"{label}必须为有限数值") from exc
+    if not math.isfinite(number) or (positive and number <= 0):
+        raise SamplingError(f"{label}必须为有限{'正数' if positive else '数值'}")
+    return number
 
 
 @dataclass(frozen=True)
@@ -92,7 +111,8 @@ class FrameSampler:
         return self.width * self.height * self.channels
 
     # ── 元信息 ──
-    def _run_command(self, cmd, *, timeout, should_stop=_never_stop, input_data=None):
+    def _run_command(self, cmd, *, timeout, should_stop=_never_stop, input_data=None,
+                     stderr_patterns=()):
         """Poll process lifecycle without blocking on stdin/stdout pipe buffers."""
         with (
             tempfile.TemporaryFile() as source,
@@ -120,10 +140,21 @@ class FrameSampler:
                         raise SamplingTimeout(f"视频处理超时（{timeout:g}s）")
                     time.sleep(0.02)
                 output.seek(0)
+                # Keep small, explicitly requested metadata records even if
+                # large SEI or container metadata displaces them from the tail.
+                records = {}
+                if stderr_patterns:
+                    errors.seek(0)
+                    for line in iter(lambda: errors.readline(65536), b''):
+                        for pattern in stderr_patterns:
+                            if pattern not in records:
+                                match = pattern.search(line)
+                                if match:
+                                    records[pattern] = match[0] + b'\n'
                 errors.seek(0, 2)
                 errors.seek(max(0, errors.tell() - 8192))
                 return subprocess.CompletedProcess(
-                    cmd, proc.returncode, output.read(), errors.read()
+                    cmd, proc.returncode, output.read(), b''.join(records.values()) + errors.read()
                 )
             finally:
                 if proc.poll() is None:
@@ -169,17 +200,24 @@ class FrameSampler:
         should_stop: Callable[[], bool] = _never_stop,
         log: Optional[Callable[[str], None]] = None,
         progress: Optional[Callable[[int, int], None]] = None,
+        sample_indices: Optional[Sequence[int]] = None,
+        deadline: Optional[float] = None,
     ):
         """Stratified accurate seeks; source keyframes are decoded, never duplicated by fps."""
         if count < 1:
             raise SamplingError('抽帧数量必须为正数')
+        indices = list(range(count)) if sample_indices is None else list(sample_indices)
+        if (not indices or any(not isinstance(index, int) or isinstance(index, bool)
+                               or not 0 <= index < count for index in indices)
+                or len(indices) != len(set(indices))):
+            raise SamplingError('抽帧索引必须为计划范围内不重复的整数')
         dur = duration or self.duration(path, should_stop=should_stop)
         if not math.isfinite(dur) or dur <= 0:
             raise SamplingError('读不到有效视频时长')
         self.last_duration = dur
         self.last_sampled_count = 0
-        deadline = time.monotonic() + self.timeout
-        for index in range(count):
+        deadline = min(time.monotonic() + self.timeout, deadline) if deadline is not None else time.monotonic() + self.timeout
+        for completed, index in enumerate(indices, 1):
             if should_stop():
                 raise SamplingCancelled('抽帧已取消')
             remaining = deadline - time.monotonic()
@@ -203,10 +241,10 @@ class FrameSampler:
             if frame is not None:
                 self.last_sampled_count += 1
                 yield frame
-            if log and (index % 10 == 0 or index == count - 1):
-                log(f'精确取样 {index + 1}/{count}，有效 {self.last_sampled_count} 帧')
+            if log and (completed % 10 == 1 or completed == len(indices)):
+                log(f'精确取样 {completed}/{len(indices)}，有效 {self.last_sampled_count} 帧')
             if progress:
-                progress(index + 1, count)
+                progress(completed, len(indices))
         if not self.last_sampled_count:
             raise SamplingError('抽帧未输出任何完整帧')
 
@@ -492,21 +530,28 @@ class FrameSampler:
 
     def frame_at(self, path: str | Path, timestamp: float, *,
                   should_stop=_never_stop, timeout=60.) -> Optional[SampledFrame]:
-        """精确跳到某一秒取一帧（给复核界面做缩略图用）。"""
+        """Accurate seek, returning the decoded frame's presentation time from playback start."""
+        timestamp = max(0., _finite_time(timestamp, '取样时间'))
+        timeout = min(self.timeout, _finite_time(timeout, '单帧超时', positive=True))
         cmd = [
             self.ffmpeg,
-            "-v",
-            "error",
+            "-hide_banner", "-nostats", "-v", "info",
             "-nostdin",
+            # Keep the frame's PTS, normalized by the input start_time rather
+            # than the seek point. No extra ffprobe process is needed.
+            "-copyts", "-start_at_zero",
             "-ss",
-            f"{max(timestamp, 0):.6f}",
+            f"{timestamp:.9f}",
+            "-accurate_seek",
             "-threads", "1",
             "-i",
             str(path),
+            "-map", "0:v:0",
             "-frames:v",
             "1",
             "-vf",
-            self._scale_filter(),
+            self._scale_filter() + ",trim=end_frame=1,showinfo@sampling=checksum=0",
+            "-fps_mode", "passthrough",
             "-f",
             "rawvideo",
             "-pix_fmt",
@@ -514,7 +559,8 @@ class FrameSampler:
             "pipe:1",
         ]
         try:
-            done = self._run_command(cmd, timeout=timeout, should_stop=should_stop)
+            done = self._run_command(cmd, timeout=timeout, should_stop=should_stop,
+                                     stderr_patterns=(_FRAME_TIME_BASE, _FRAME_PTS))
         except (OSError, subprocess.SubprocessError):
             return None
         data = done.stdout
@@ -522,10 +568,21 @@ class FrameSampler:
             raise SamplingError(f'单帧解码失败（退出码 {done.returncode}）：'
                                 + done.stderr.decode('utf-8', 'replace')[-1000:])
         frame_bytes = self.frame_bytes
-        if len(data) < frame_bytes:
+        if not data:
             return None
+        if len(data) != frame_bytes:
+            raise SamplingError('单帧解码输出包含不完整或多余的像素')
+        # pts_time is printed with limited significant digits. Integer PTS
+        # and the input time base preserve precision even for long videos.
+        time_base = _FRAME_TIME_BASE.search(done.stderr)
+        pts = _FRAME_PTS.search(done.stderr)
+        if not time_base or not pts or not all(int(v) > 0 for v in time_base.groups()):
+            raise SamplingError('单帧解码未提供有效显示时间戳')
+        actual_timestamp = int(pts[1]) * int(time_base[1]) / int(time_base[2])
+        if not math.isfinite(actual_timestamp) or actual_timestamp < 0:
+            raise SamplingError('单帧解码显示时间戳无效')
         return SampledFrame(
-            timestamp=timestamp,
+            timestamp=actual_timestamp,
             width=self.width,
             height=self.height,
             data=data[:frame_bytes],
@@ -540,33 +597,56 @@ class FrameSampler:
         *,
         width: int = 480,
         quality: int = 4,
+        should_stop: Callable[[], bool] = _never_stop,
+        timeout: Optional[float] = None,
     ) -> bool:
-        """直接让 ffmpeg 写 jpg 缩略图 —— 不经过 Python 图像库。"""
+        """Write a fresh thumbnail with the common cancellation/timeout lifecycle."""
+        timestamp = max(0., _finite_time(timestamp, '缩略图时间'))
+        budget = min(90., self.timeout) if timeout is None else min(
+            self.timeout, _finite_time(timeout, '缩略图超时', positive=True))
+        try:
+            valid_width, valid_quality = int(width), int(quality)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise SamplingError('缩略图宽度或质量必须为有效整数') from exc
+        if (valid_width != width or valid_width < 2
+                or valid_quality != quality or not 1 <= valid_quality <= 31):
+            raise SamplingError('缩略图宽度必须至少为2，质量必须为1到31的整数')
         out = Path(out_path)
+        temporary = None
         try:
             out.parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return False
-        cmd = [
-            self.ffmpeg,
-            "-v",
-            "error",
-            "-nostdin",
-            "-y",
-            "-ss",
-            f"{max(timestamp, 0):.2f}",
-            "-i",
-            str(path),
-            "-frames:v",
-            "1",
-            "-vf",
-            f"scale={width}:-2",
-            "-q:v",
-            str(quality),
-            str(out),
-        ]
-        try:
-            subprocess.run(cmd, capture_output=True, timeout=90, check=False)
+            # FFmpeg can exit successfully without a frame (e.g. seek past
+            # EOF). A separate empty output cannot be mistaken for an old file.
+            with tempfile.NamedTemporaryFile(prefix=f'.{out.stem}-', suffix=out.suffix,
+                                             dir=out.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+            cmd = [
+                self.ffmpeg,
+                "-v",
+                "error",
+                "-nostdin",
+                "-y",
+                "-ss",
+                f"{timestamp:.9f}",
+                "-accurate_seek",
+                "-i",
+                str(path),
+                "-map", "0:v:0",
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={valid_width}:-2",
+                "-q:v",
+                str(valid_quality),
+                str(temporary),
+            ]
+            done = self._run_command(cmd, timeout=budget, should_stop=should_stop)
+            if done.returncode != 0 or not temporary.exists() or not temporary.stat().st_size:
+                return False
+            temporary.replace(out)
+            return True
         except (OSError, subprocess.SubprocessError):
             return False
-        return out.exists() and out.stat().st_size > 0
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
