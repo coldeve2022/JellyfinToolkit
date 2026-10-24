@@ -41,7 +41,7 @@ from utils.media_upgrade import MediaUpgradeService
 _UPGRADE_STATUS = {
     'ready': '就绪',
     'ambiguous': '要选版本',
-    'container_mismatch': '封装不同',
+    'container_convert': '要转封装',
     'not_found': '没找到新版本',
     'conflict': '冲突',
 }
@@ -68,8 +68,8 @@ def apply_candidate_choice(rows, index, path) -> bool:
 def drop_plan_row(rows, index) -> bool:
     """从配对计划里移除一行（踢出无法解决的文件，让其余继续）。
 
-    ``container_mismatch`` 这类问题不是"选一个就好"——封装不同程序不转封装，
-    用户只能换文件。没有移除入口的话，一行就能卡住整批。
+    ``not_found``（没有新版本）、``conflict``（多行抢同一个原文件）这类问题
+    没法靠"选一个"解决；没有移除入口的话，一行就能卡住整批。
     """
     if not isinstance(rows, list) or not (0 <= index < len(rows)):
         return False
@@ -354,8 +354,11 @@ class ReplacePage(QWidget):
 
     def _sync_buttons(self):
         rows = self._plan.get('rows', []) if isinstance(self._plan, dict) else (self._plan or [])
-        ready = bool(rows) and all(row.get('status') == 'ready' for row in rows)
-        prepared_ready = bool(self._prepared) and all(row.get('status') == 'ready' for row in self._prepared.get('rows', []))
+        # "要转封装"和"就绪"一样能执行：转换是程序自己做的，不需要用户干预
+        runnable = ('ready', 'container_convert')
+        ready = bool(rows) and all(row.get('status') in runnable for row in rows)
+        prepared_ready = bool(self._prepared) and all(
+            row.get('status') in runnable for row in self._prepared.get('rows', []))
         self.btn_prepare.setVisible(self._generic())
         self.btn_verify.setVisible(self._generic())
         self.btn_reload.setVisible(self._generic())
@@ -440,8 +443,8 @@ class ReplacePage(QWidget):
                 tip = str(value)
                 if status == 'ambiguous':
                     tip += '\n双击这一行，选择要用的新版本'
-                elif status == 'container_mismatch':
-                    tip += '\n封装格式与原文件不同；程序不做转封装，请换同封装文件'
+                elif status == 'container_convert':
+                    tip += '\n封装与原文件不同（如 mkv / mp4）；双击选择后会自动无损转封装'
                 cell.setToolTip(tip)
                 self.pairs.setItem(row, col, cell)
 
@@ -479,11 +482,6 @@ class ReplacePage(QWidget):
         status = entry.get('status', '')
         if status == 'ready':
             return
-        if status == 'container_mismatch':
-            self.log_panel.log_warning(
-                '这一行的候选与原文件封装格式不同。程序不做转封装，'
-                '请换一个同封装的文件，或先自己转封装再重新添加。')
-            return
         candidates = entry.get('candidates') or []
         if not candidates:
             self.log_panel.log_warning('这一行没有可选的本地新版本；先在左上「添加文件…」加入')
@@ -500,7 +498,12 @@ class ReplacePage(QWidget):
             return
         self._render_rows(rows)
         self._sync_buttons()
-        self.log_panel.log(f'已选定：{os.path.basename(entry["target"])}；可继续保存进度快照')
+        if entry.get('convert_container'):
+            suffix = Path(entry['source']).suffix
+            self.log_panel.log(f'已选定：{os.path.basename(entry["target"])}'
+                               f'（封装不同，替换前会用 ffmpeg 无损转换成 {suffix}）')
+        else:
+            self.log_panel.log(f'已选定：{os.path.basename(entry["target"])}；可继续保存进度快照')
 
     def _prepare_upgrade(self):
         if busy(self) or not self._generic() or not isinstance(self._plan, dict):
@@ -603,10 +606,15 @@ class ReplacePage(QWidget):
                 self.log_panel.log_warning('请先为当前配对保存继承快照并审阅。')
                 return
             rows = self._prepared.get('rows', [])
-            if not rows or any(row.get('status') != 'ready' for row in rows):
-                self.log_panel.log_warning('快照包含未就绪项目，请先修正配置或配对。')
+            if not rows or any(row.get('status') not in ('ready', 'container_convert')
+                               for row in rows):
+                self.log_panel.log_warning('快照里有还没处理的项目，请先修正配对。')
                 return
             detail = '\n'.join(row['source'] + ' → ' + row['target'] for row in rows)
+            converts = sum(1 for row in rows if row.get('convert_container'))
+            if converts:
+                detail += (f'\n\n其中 {converts} 条封装不同，会先用 ffmpeg 无损转封装'
+                           f'（-c copy，不重新编码）再替换')
             if QMessageBox.question(self, '确认本地版本替换', detail + '\n\n将按已保存的同一快照替换。原件保留可恢复备份，NFO/字幕保留原字节。服务器继承需刷新完成后单独验证。确认执行？', QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
                 self._run_upgrade('execute', self._prepared)
             return

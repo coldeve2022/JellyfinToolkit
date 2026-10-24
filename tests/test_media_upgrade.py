@@ -32,13 +32,13 @@ def test_preview_identifier_pair_and_snapshot_never_write_media(tmp_path):
     assert 'api_key' not in Path(prepared['snapshot_path']).read_text(encoding='utf-8')
 
 
-def test_refuses_ambiguity_and_container_change(tmp_path):
+def test_ambiguity_needs_choice_and_container_change_needs_convert(tmp_path):
     old, new = pair(tmp_path)
     another = old.with_name('ABC-123 alternate.mp4'); another.write_bytes(b'other')
     svc = service(tmp_path)
     assert svc.preview([new], [old, another])['rows'][0]['status'] == 'ambiguous'
     mkv = new.with_suffix('.mkv'); new.rename(mkv)
-    assert svc.preview([mkv], [old])['rows'][0]['status'] == 'container_mismatch'
+    assert svc.preview([mkv], [old])['rows'][0]['status'] == 'container_convert'
 
 
 def test_execute_checks_race_before_replacing_and_preserves_sidecars(tmp_path):

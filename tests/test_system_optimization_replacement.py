@@ -20,7 +20,7 @@ def test_candidate_pairing_requires_a_unique_work_and_compatible_container(tmp_p
     assert preview_release_replacements([str(candidate)], [str(original), str(other)])[0]["status"] == "ambiguous"
     mkv = original.with_suffix(".mkv")
     mkv.write_bytes(b"different container")
-    assert preview_release_replacements([str(candidate)], [str(mkv)])[0]["status"] == "container_mismatch"
+    assert preview_release_replacements([str(candidate)], [str(mkv)])[0]["status"] == "container_convert"
 
 
 def test_candidate_plan_uses_recoverable_executor_and_invalidates_old_confirmation(tmp_path):
