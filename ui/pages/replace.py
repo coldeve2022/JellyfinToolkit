@@ -11,7 +11,8 @@ import uuid
 from copy import deepcopy
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -24,15 +25,56 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
     QComboBox,
+    QMenu,
 )
 
 from config import ToolkitConfig
+
 from ui.widgets import DragDropListWidget, LogPanel, InfoCard, FileInputActions
 from utils.censor_tags import update_jellyfin_db_tags
 from utils.nfo import update_nfo_censor_tags
 from utils.nfo_source import find_nfo
 from ui.services import CallWorker, events, after_stopped
 from utils.media_upgrade import MediaUpgradeService
+
+#: 配对状态的中文名（原来直接把 ready / ambiguous 抛给用户看）
+_UPGRADE_STATUS = {
+    'ready': '就绪',
+    'ambiguous': '要选版本',
+    'container_mismatch': '封装不同',
+    'not_found': '没找到新版本',
+    'conflict': '冲突',
+}
+
+
+def apply_candidate_choice(rows, index, path) -> bool:
+    """把第 ``index`` 行要用的新版本定成 ``path``。
+
+    纯函数：只改传入的行数据，不碰界面。UI 负责弹菜单，这里负责改状态 ——
+    这样"能不能选、选完变什么"可以直接测。
+    """
+    if not isinstance(rows, list) or not (0 <= index < len(rows)):
+        return False
+    entry = rows[index]
+    candidates = entry.get('candidates') or []
+    if path not in candidates:
+        return False
+    entry['target'] = path
+    entry['status'] = 'ready'
+    entry['error'] = ''
+    return True
+
+
+def drop_plan_row(rows, index) -> bool:
+    """从配对计划里移除一行（踢出无法解决的文件，让其余继续）。
+
+    ``container_mismatch`` 这类问题不是"选一个就好"——封装不同程序不转封装，
+    用户只能换文件。没有移除入口的话，一行就能卡住整批。
+    """
+    if not isinstance(rows, list) or not (0 <= index < len(rows)):
+        return False
+    del rows[index]
+    return True
 
 
 class ReplaceWorker(QThread):
@@ -188,7 +230,11 @@ class UpgradeWorker(QThread):
             elif self.phase == 'verify':
                 value = service.verify(self.payload, cancel=cancel)
             elif self.phase == 'reload':
-                reference = json.loads((self.data_dir / 'latest.json').read_text(encoding='utf-8'))
+                latest = self.data_dir / 'latest.json'
+                if not latest.exists():
+                    raise ValueError('还没有保存过快照。先点「2. 保存进度快照」，'
+                                     '存好之后「载入上次记录」才有东西可读')
+                reference = json.loads(latest.read_text(encoding='utf-8'))
                 if reference.get('context_key') != _configuration_key(self.cfg):
                     raise ValueError('上次快照属于其他服务器/配置；请重新预览并保存快照')
                 snapshot_id = reference['snapshot_id']
@@ -264,6 +310,9 @@ class ReplacePage(QWidget):
         self.pairs.setEditTriggers(QTableWidget.NoEditTriggers)
         self.pairs.setSelectionBehavior(QTableWidget.SelectRows)
         self.pairs.setWordWrap(False)
+        self.pairs.cellDoubleClicked.connect(self._choose_candidate)
+        self.pairs.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.pairs.customContextMenuRequested.connect(self._pair_menu)
         self.pairs.setProperty('taskInteractive', True)
         self.pairs.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.pairs.horizontalHeader().setStretchLastSection(True)
@@ -382,11 +431,76 @@ class ReplacePage(QWidget):
                 summary = f"元数据已快照；{len(entry['server'].get('users', {}))} 个用户状态；保留 NFO/字幕"
             if entry.get('error'):
                 summary = entry['error']
-            for col, value in enumerate((entry.get('source', ''), entry.get('target') or ' / '.join(entry.get('candidates', [])),
-                    entry.get('identifier', ''), entry.get('status', ''), summary)):
+            status = entry.get('status', '')
+            candidates = entry.get('candidates', [])
+            pair_text = entry.get('target') or ' / '.join(candidates)
+            for col, value in enumerate((entry.get('source', ''), pair_text,
+                    entry.get('identifier', ''), _UPGRADE_STATUS.get(status, status), summary)):
                 cell = QTableWidgetItem(str(value))
-                cell.setToolTip(str(value))
+                tip = str(value)
+                if status == 'ambiguous':
+                    tip += '\n双击这一行，选择要用的新版本'
+                elif status == 'container_mismatch':
+                    tip += '\n封装格式与原文件不同；程序不做转封装，请换同封装文件'
+                cell.setToolTip(tip)
                 self.pairs.setItem(row, col, cell)
+
+    def _pair_menu(self, pos) -> None:
+        row = self.pairs.rowAt(pos.y())
+        rows = self._plan.get('rows', []) if isinstance(self._plan, dict) else []
+        if not (0 <= row < len(rows)):
+            return
+        entry = rows[row]
+        menu = QMenu(self)
+        if entry.get('status') == 'ambiguous':
+            menu.addAction('选择版本…', lambda: self._choose_candidate(row))
+        menu.addAction('从配对里移除', lambda: self._drop_row(row))
+        menu.exec(self.pairs.viewport().mapToGlobal(pos))
+
+    def _drop_row(self, row: int) -> None:
+        rows = self._plan.get('rows', []) if isinstance(self._plan, dict) else []
+        if not drop_plan_row(rows, row):
+            return
+        self._render_rows(rows)
+        self._sync_buttons()
+        self.log_panel.log('已从本次配对里移除该文件；原文件不会被改动')
+
+    def _choose_candidate(self, row: int, _column: int = 0) -> None:
+        """给"匹配到多个新版本"的行一个选择入口。
+
+        以前这类行只有一句"需要选择唯一版本并匹配封装格式"，界面上却没有
+        任何可选的地方 —— 而且只要有一行没定，整批的「保存进度快照」就是
+        灰的，等于卡死。
+        """
+        rows = self._plan.get('rows', []) if isinstance(self._plan, dict) else []
+        if not (0 <= row < len(rows)):
+            return
+        entry = rows[row]
+        status = entry.get('status', '')
+        if status == 'ready':
+            return
+        if status == 'container_mismatch':
+            self.log_panel.log_warning(
+                '这一行的候选与原文件封装格式不同。程序不做转封装，'
+                '请换一个同封装的文件，或先自己转封装再重新添加。')
+            return
+        candidates = entry.get('candidates') or []
+        if not candidates:
+            self.log_panel.log_warning('这一行没有可选的本地新版本；先在左上「添加文件…」加入')
+            return
+        menu = QMenu(self)
+        for path in candidates:
+            action = menu.addAction(os.path.basename(path))
+            action.setToolTip(path)
+            action.setData(path)
+        chosen = menu.exec(QCursor.pos())
+        if chosen is None:
+            return
+        if not apply_candidate_choice(rows, row, chosen.data()):
+            return
+        self._render_rows(rows)
+        self._sync_buttons()
+        self.log_panel.log(f'已选定：{os.path.basename(entry["target"])}；可继续保存进度快照')
 
     def _prepare_upgrade(self):
         if busy(self) or not self._generic() or not isinstance(self._plan, dict):
@@ -402,6 +516,12 @@ class ReplacePage(QWidget):
 
     def _reload_upgrade(self):
         if busy(self) or not self._generic():
+            return
+        from config import DATA_DIR
+
+        if not (Path(DATA_DIR) / 'media_upgrades' / 'latest.json').exists():
+            self.log_panel.log_warning(
+                '还没有保存过快照，没有可载入的记录。先「1. 预览配对」→「2. 保存进度快照」')
             return
         self._invalidate_plan()
         self._run_upgrade('reload', None)
