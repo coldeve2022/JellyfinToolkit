@@ -125,11 +125,20 @@ def test_censorship_page_classifies(qapp, cfg, tmp_path, qtbot):
     (tmp_path / "FC2-PPV-123456.mp4").write_bytes(b"\x00" * 100)
     (tmp_path / "ABC-123.mp4").write_bytes(b"\x00" * 100)
 
+    # 等全局任务队列清空再启动：TaskManager 同时只允许一个任务，
+    # 前面用例残留的任务会让 submit 直接拒绝 —— 扫描根本不启动，
+    # 而 _worker 还留着旧对象，断言就变成"0 行"这种看不懂的失败。
+    from ui.services import TaskManager
+    drain = time.monotonic() + 20
+    while TaskManager.instance().running() and time.monotonic() < drain:
+        qapp.processEvents()
+        time.sleep(0.05)
+    page._worker = None
     page._start_scan([str(tmp_path)])
-    qtbot.waitUntil(lambda: page._worker is not None, timeout=3000)
-    # 20s 而不是 10s：这条断言验的是"扫描能把行填出来"，不是"10 秒内跑完"。
-    # 全量测试时 CPU 被其它用例占满，10 秒会偶发超时（单独跑 ~2 秒就出结果）。
-    qtbot.waitUntil(lambda: page.table.rowCount() == 2, timeout=20000)
+    qtbot.waitUntil(lambda: page._worker is not None, timeout=5000)
+    # 必须用 waitUntil（内部会 processEvents）等行数：表格是被信号填的，
+    # 用 worker.wait() 阻塞 GUI 线程会让队列信号送不到，行永远是 0。
+    qtbot.waitUntil(lambda: page.table.rowCount() == 2, timeout=30000)
     assert _wait_worker(page._worker)
     qapp.processEvents()
 
