@@ -395,8 +395,11 @@ class CensorshipPage(QWidget):
         next_button.clicked.connect(lambda:self._advance_review(self._current.path if self._current else ''))
         row.addWidget(next_button)
         right_lay.addLayout(row)
-        self.btn_send_versions = QPushButton('将选中视频加入版本管理')
-        self.btn_send_versions.clicked.connect(self._send_to_versions)
+        # 顺序是"先确认有没有无码版，再替换"：所以这里只负责把选中项送去核查，
+        # 替换入口在「找无码版」页。之前直接跳到版本管理，等于跳过了核查这一步。
+        self.btn_send_versions = QPushButton('送去查无码版')
+        self.btn_send_versions.setToolTip('把选中的作品送到「找无码版」页核查，只查这些')
+        self.btn_send_versions.clicked.connect(self._send_to_lookup)
         right_lay.addWidget(self.btn_send_versions)
         splitter.addWidget(right)
         splitter.setSizes([580,460])
@@ -1192,16 +1195,16 @@ class CensorshipPage(QWidget):
         selected = self._selected_visible_paths()
         QApplication.clipboard().setText('\n'.join(selected if paths else [os.path.basename(p) for p in selected]))
 
-    def _send_to_versions(self):
+    def _send_to_lookup(self):
         paths = self._selected_visible_paths()
         if not paths and self._current and self._matches_filter(self._current):
             paths = [self._current.path]
         if not paths:
-            self._flash('先在当前筛选范围选中需要管理版本的视频')
+            self._flash('先选中要核查的视频（可以先按「喜欢 / 结论」筛一遍，再全选）')
             return
         from ui.services import events
-        events.media_upgrade_requested.emit(list(dict.fromkeys(paths)))
-        self._flash(f'已将 {len(paths)} 个选中视频交给版本管理；尚未替换文件')
+        events.release_lookup_requested.emit(list(dict.fromkeys(paths)))
+        self._flash(f'已把 {len(paths)} 个作品送去「找无码版」核查；还没查、也没动文件')
 
     def set_review_shortcut(self, name, sequence):
         button = getattr(self, {'censored': 'btn_censored', 'uncensored': 'btn_uncensored', 'next': 'btn_next'}[name])

@@ -90,6 +90,22 @@ def _wire_media_upgrades(window, replace_page):
     return send_originals
 
 
+def _wire_release_lookup(window, censor_replace_page):
+    """检查页 →「找无码版」：只查用户在检查页挑出来的那些。
+
+    业务流程是"先确认有没有无码版，再决定替不替代"，所以从检查页出去的
+    第一步是核查，不是替换。这里只做转发，范围判定在目标页里。
+    """
+    from ui.services import events
+
+    def send_for_lookup(paths):
+        censor_replace_page.receive_requests(paths)
+        _goto(window, "找无码版")
+
+    events.release_lookup_requested.connect(send_for_lookup)
+    return send_for_lookup
+
+
 def _force_utf8_when_piped() -> None:
     """输出被管道/重定向时改用 UTF-8（实现在 utils.console，供各入口脚本共用）。
 
@@ -278,6 +294,8 @@ def main(argv: list[str] | None = None) -> int:
         _goto(window, "视频版本管理")
     events.replacement_ready.connect(send_candidates)
     _wire_media_upgrades(window, replace_page)
+    # 复用第 273 行已注册的那个实例 —— 新建一个会导致"信号连到 A、界面显示 B"
+    _wire_release_lookup(window, censor_replace_page)
     # Lada 需要 ffprobe 校验产出时长，用与 ffmpeg 同一套解析逻辑取它的路径
     lada_page = LadaPage(cfg)
     def send_lada(paths):

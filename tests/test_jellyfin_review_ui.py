@@ -55,7 +55,11 @@ def test_stale_user_context_result_is_not_accepted(qapp, qtbot):
     page.shutdown()
 
 
-def test_selected_visible_rows_manually_handoff_to_generic_upgrade(qapp, qtbot):
+def test_selected_visible_rows_handoff_to_release_lookup(qapp, qtbot):
+    """检查页只把选中项送去「找无码版」核查，不再直接跳替换。
+
+    流程是"先确认有没有无码版，再决定替不替代"；替换入口在找无码页。
+    """
     from ui.services import events
     page = make_page(qtbot)
     page.show()
@@ -63,12 +67,12 @@ def test_selected_visible_rows_manually_handoff_to_generic_upgrade(qapp, qtbot):
     page.search.setText('one')
     page.table.selectAll()
     received = []
-    events.media_upgrade_requested.connect(received.append)
+    events.release_lookup_requested.connect(received.append)
     try:
-        page._send_to_versions()
+        page._send_to_lookup()
         assert received == [['C:/library/one.mp4']]
     finally:
-        events.media_upgrade_requested.disconnect(received.append)
+        events.release_lookup_requested.disconnect(received.append)
     page.shutdown()
 
 

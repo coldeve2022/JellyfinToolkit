@@ -19,9 +19,11 @@ import re
 import unicodedata
 from typing import Any, Callable
 
+from censor.numbering import parse_number
 from censor.releases.models import ReleaseCandidate, ReleaseQuery, normalize_number
 
-__all__ = ["ReleaseSource", "same_number"]
+__all__ = ["ReleaseSource", "same_number", "contains_number", "search_keyword",
+           "match_token", "fc2_digits", "FC2_DIGITS_SITES"]
 
 _STOP = {"should_stop": lambda: False}
 
@@ -38,9 +40,61 @@ def same_number(left: str, right: str) -> bool:
     return False
 
 
+def fc2_digits(number: str) -> str:
+    """FC2 的数字后缀（``FC2-PPV-1631136`` → ``1631136``），非 FC2 返回空串。
+
+    为什么单独拎出来：FC2 在各站的写法根本不统一 ——
+    ``FC2-PPV-1631136`` / ``FC2PPV-1631136`` / ``FC2PPV 1631136`` / 只写 ``1631136``。
+    把整串丢给站内搜索经常直接 0 结果（Supjav 实测如此），而只搜数字反而能命中。
+    """
+    try:
+        parsed = parse_number(number)
+    except Exception:  # noqa: BLE001 - 解析失败就按普通番号处理
+        return ""
+    if parsed.provider != "fc2" or not parsed.number:
+        return ""
+    return parsed.number.rsplit("-", 1)[-1]
+
+
+#: 实测"FC2 用整串搜会 0 命中、只搜数字才有结果"的站点。
+#: 注意这不是所有站都如此（JavDB 用整串能命中，用纯数字反而会偏），
+#: 所以按站点声明，不要一刀切。
+FC2_DIGITS_SITES = frozenset({"supjav"})
+
+
+def search_keyword(number: str, *, site: str = "", fallback: str = "") -> str:
+    """**发给站点的搜索词**。与复核用的番号分开，因为"怎么搜"和"怎么认"不是一回事。
+
+    - 在 :data:`FC2_DIGITS_SITES` 里的站点：FC2 只发数字后缀
+      （Supjav 实测：搜 ``FC2-PPV-1631136`` 返回 0 条，搜 ``1631136`` 有结果）
+    - 其它情况：规范化番号
+    """
+    if site in FC2_DIGITS_SITES:
+        digits = fc2_digits(number)
+        if digits:
+            return digits
+    # **保留横线**：normalize_number 会去掉分隔符（IPX-123 → IPX123），
+    # 而站点搜索框认的是带横线的写法；拿掉横线经常搜不到。
+    try:
+        parsed = parse_number(number)
+    except Exception:  # noqa: BLE001
+        parsed = None
+    canonical = (parsed.number if parsed is not None else "") or ""
+    return canonical or normalize_number(number) or str(fallback or "").strip()
+
+
+def match_token(number: str) -> str:
+    """**复核用的关键串**。FC2 用数字，其它用完整番号。
+
+    复核仍然带边界（见 :func:`contains_number`），所以 ``1631136`` 不会命中
+    ``FC2-PPV-16311360``，也不会命中标题里的其它长数字。
+    """
+    return fc2_digits(number) or normalize_number(number)
+
+
 def contains_number(text: str, number: str) -> bool:
     """Match a complete identifier without erasing its surrounding boundaries."""
-    key = normalize_number(number)
+    key = match_token(number)
     if not key:
         return False
     pattern = r"(?<![A-Z0-9])" + r"[\s_.-]*".join(re.escape(c) for c in key) + r"(?![A-Z0-9])"

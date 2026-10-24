@@ -32,6 +32,8 @@ class Events(QObject):
     replacement_ready = Signal(list, list)
     lada_ready = Signal(list)
     media_upgrade_requested = Signal(list)
+    #: 检查页 →「找无码版」：只处理这些文件对应的作品，而不是全部已确认有码
+    release_lookup_requested = Signal(list)
 
 
 events = Events()

@@ -27,7 +27,8 @@ from __future__ import annotations
 from urllib.parse import quote
 
 from censor.numbering import parse_number
-from censor.releases.base import ReleaseSource, contains_number
+from censor.releases.base import (ReleaseSource, contains_number,
+                                  search_keyword)
 from censor.releases.index_search import lookup_site
 from censor.releases.models import ReleaseCandidate, ReleaseQuery, normalize_number
 from censor.tag_signals import classify_tag
@@ -128,7 +129,7 @@ class SupjavSource(ReleaseSource):
             uncensored_confidence=confidence, uncensored_reason=reason)
 
     def _direct(self, query, should_stop, limit):
-        url = 'https://supjav.com/?s=' + quote(query.number or query.title_hint)
+        url = 'https://supjav.com/?s=' + quote(search_keyword(query.number, site='supjav', fallback=query.title_hint))
         try:
             return self._direct_inner(query, should_stop, limit, url)
         except TransportError as exc:
@@ -155,7 +156,7 @@ class SupjavSource(ReleaseSource):
         return found
 
     def _index(self, query, *, should_stop, log, limit):
-        keyword = query.number or query.title_hint
+        keyword = search_keyword(query.number, site='supjav', fallback=query.title_hint)
         hits, statuses = lookup_site(
             self.transport, self.site, keyword,
             engines=self._engines(), limit=max(limit, 6) * 2,

@@ -105,6 +105,9 @@ class CensorReplacePage(QWidget):
         self._refresh_version = 0
         self._refresh_dirty = False
         self._auto_paths = []
+        #: 检查页送来的作品（规范化番号）。非空时只查这些，清单本身仍显示全部。
+        self._focus_numbers: set[str] = set()
+        self._pending_focus_lookup = False
         self._refresh_owner = QWidget(self)
         self._refresh_owner.hide()
         self._current_key: str = ""
@@ -151,6 +154,16 @@ class CensorReplacePage(QWidget):
         self.btn_lookup_new.setProperty("cssClass", "accent")
         self.btn_lookup_new.clicked.connect(lambda: self._lookup(force=False))
         toolbar.addWidget(self.btn_lookup_new)
+        self.btn_send_replace = QPushButton("送去替换")
+        self.btn_send_replace.setToolTip(
+            "把选中作品的原始文件交给「视频版本管理」；只传数据，替换在那边做")
+        self.btn_send_replace.clicked.connect(self._send_selected_to_versions)
+        toolbar.addWidget(self.btn_send_replace)
+        self.btn_focus_clear = QPushButton("显示全部")
+        self.btn_focus_clear.setToolTip("清除「只处理检查页送来的这些」限定")
+        self.btn_focus_clear.clicked.connect(self._clear_focus)
+        self.btn_focus_clear.setVisible(False)
+        toolbar.addWidget(self.btn_focus_clear)
         self.btn_lookup_all = QPushButton("全部重查")
         self.btn_lookup_all.setToolTip("忽略缓存，把所有番号重新查一遍")
         self.btn_lookup_all.clicked.connect(lambda: self._lookup(force=True))
@@ -251,6 +264,68 @@ class CensorReplacePage(QWidget):
         menu.addMenu(self.workspace.menu(more)).setText('工作区布局与偏好')
 
     # ── 数据 ──
+    def receive_requests(self, paths) -> None:
+        """接收检查页送来的作品，**只查这些**。
+
+        为什么不在本页重做"喜欢/结论"筛选：检查页已经有这些筛选，而且带
+        Jellyfin 账号状态快照。在这里再实现一遍就是两套逻辑、两个口径 ——
+        用户要的是"把我挑出来的这些拿去查"，不是"再给我一个筛选器"。
+        """
+        paths = [p for p in dict.fromkeys(str(x) for x in (paths or [])) if p]
+        if not paths:
+            return
+        numbers: set[str] = set()
+        try:
+            records = self._censor.store.get_many(paths)
+            for item in records.values():
+                key = normalize_number(getattr(item, 'number', '') or '')
+                if key:
+                    numbers.add(key)
+        except Exception:  # noqa: BLE001 - 读库失败就退回全量，不挡流程
+            numbers = set()
+        self._focus_numbers = numbers
+        self.btn_focus_clear.setVisible(bool(numbers))
+        self._pending_focus_lookup = bool(numbers)
+        self.lbl_summary.setText(
+            f'已从检查页收到 {len(paths)} 个文件、{len(numbers)} 个可检索番号；'
+            '本次只查这些，清单里其它作品不动')
+        self.refresh()
+
+    def _clear_focus(self) -> None:
+        self._focus_numbers = set()
+        self._pending_focus_lookup = False
+        self.btn_focus_clear.setVisible(False)
+        self.refresh()
+
+    def _in_focus(self, row: 'NumberRow') -> bool:
+        if not self._focus_numbers:
+            return True
+        return normalize_number(row.number) in self._focus_numbers
+
+    def _send_selected_to_versions(self) -> None:
+        """把选中作品的**原始文件路径**交给版本管理。
+
+        这里只传数据，配对/快照/替换/回滚全部由版本管理模块负责 ——
+        两个页面之间不应该互相知道对方的实现细节。
+        """
+        rows = sorted({i.row() for i in self.table.selectionModel().selectedIndexes()})
+        paths: list[str] = []
+        for index in rows:
+            if self.table.isRowHidden(index):
+                continue
+            key = self.table.item(index, 0).data(Qt.UserRole)
+            row = self._rows.get(key)
+            if row is not None:
+                paths.extend(row.paths)
+        if not paths:
+            self.lbl_summary.setText('先在清单里选中要替换的作品（可多选）')
+            return
+        from ui.services import events
+        events.media_upgrade_requested.emit(list(dict.fromkeys(paths)))
+        self.lbl_summary.setText(
+            f'已把 {len(paths)} 个原始文件交给「视频版本管理」；'
+            '在那边加入新版本、预览配对后再执行替换')
+
     def refresh(self) -> None:
         """从库里重建清单：已确认有码 → 按番号聚合。"""
         self._refresh_version += 1
@@ -320,6 +395,12 @@ class CensorReplacePage(QWidget):
         if numbers:
             self._release.queue(numbers, note='人工确认有码')
         from censor.releases.transport import offline
+        if self._pending_focus_lookup:
+            self._pending_focus_lookup = False
+            if self._focus_numbers:
+                # 用户在检查页挑好后才送过来，意思很明确：现在就查这些
+                self._lookup(force=False)
+                return
         if numbers and self.cfg.release_enabled and self.cfg.release_auto_lookup and not offline():
             self._auto_numbers = list(dict.fromkeys(getattr(self, '_auto_numbers', []) + numbers))
             self._run_auto()
@@ -391,7 +472,9 @@ class CensorReplacePage(QWidget):
             f" · 可检索 {len(searchable)} · 待查 {counts['todo']}"
             f" · 确有 {counts['confirmed']} · 疑似 {counts['likely']}"
             f" · 未见 {counts['none']} · 未查 {counts['unknown']}"
-            + ("（没有番号的片子无法检索）" if len(rows) > len(searchable) else ""))
+            + ("（没有番号的片子无法检索）" if len(rows) > len(searchable) else "")
+            + (f" · 本次只处理检查页送来的 {len(self._focus_numbers)} 个"
+               if self._focus_numbers else ""))
 
     # ── 选择 ──
     def _on_row_selected(self) -> None:
@@ -450,7 +533,8 @@ class CensorReplacePage(QWidget):
 
     def lookup_targets(self, force=False) -> list[str]:
         return [row.number for row in self._rows.values()
-                if row.searchable and (force or self._release.fresh(row.number) is None)]
+                if row.searchable and self._in_focus(row)
+                and (force or self._release.fresh(row.number) is None)]
 
     def _ensure_supjav_channel(self) -> str:
         """Supjav 站内必须先注册浏览器 reader，否则只会拿到 403。

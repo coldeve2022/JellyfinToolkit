@@ -23,7 +23,7 @@ from __future__ import annotations
 import urllib.parse
 
 from censor.numbering import parse_number
-from censor.releases.base import ReleaseSource, same_number
+from censor.releases.base import ReleaseSource, search_keyword, same_number
 from censor.releases.html import attr, clean
 from censor.releases.models import MagnetLink, ReleaseCandidate, ReleaseQuery
 from censor.tag_signals import classify_tag
@@ -64,7 +64,7 @@ class JavDbSource(ReleaseSource):
         if not query.usable:
             return []
 
-        keyword = query.number or query.title_hint
+        keyword = search_keyword(query.number, site='javdb', fallback=query.title_hint)
         search_url = f"{BASE}/search?q={urllib.parse.quote(keyword)}&f=all"
         page = self.transport.get(search_url)
         if not page.strip():
