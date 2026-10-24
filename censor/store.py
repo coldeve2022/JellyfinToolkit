@@ -219,9 +219,19 @@ def open_sqlite(db_path, *, timeout: float = 15.0, attempts: int = 3,
                 except sqlite3.OperationalError:
                     pass
             if probe:
-                # 只在初始化时探一次写权限：每次连接都做会明显拖慢批量扫描
-                conn.execute("BEGIN IMMEDIATE")
-                conn.rollback()
+                # 只在初始化时探一次写权限。**必须零等待**：BEGIN IMMEDIATE 会抢
+                # 写锁，若此时别的连接持锁，默认 busy_timeout=15s 会把这里卡死
+                # （全量测试里表现为"扫描 20 秒都填不出行"）。
+                conn.execute("PRAGMA busy_timeout=0")
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.rollback()
+                except sqlite3.OperationalError as exc:
+                    if "readonly" in str(exc).lower():
+                        raise            # 真只读：交给外层重试
+                    # 只是被别人锁着，不是只读 —— 放行，让正常流程按 busy_timeout 等
+                finally:
+                    conn.execute("PRAGMA busy_timeout=15000")
             return conn
         except sqlite3.OperationalError as exc:
             last = exc
