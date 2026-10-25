@@ -806,18 +806,26 @@ class CensorshipPage(QWidget):
             self._start_scan([self._current.path], manual_deferred=True, force=True, deep=True)
 
     def _advance_review(self, after_path):
-        rows = [self.table.item(r, 0).data(Qt.UserRole) for r in range(self.table.rowCount())]
+        """跳到**表格里实际可见的**下一个待复核项。
+
+        以前这里还会再套一层 `_matches_filter`（按视图/喜欢/播放状态二次过滤）。
+        表格本身已经按这些条件筛过了，再筛一遍会得出"当前视图没有待复核视频"——
+        而用户眼前的列表里明明还有几百条。视图被记成"暂不处理"时尤其明显：
+        标记完就不动了，只能回左边列表重新点。
+        """
+        rows = [self.table.item(r, 0).data(Qt.UserRole) for r in range(self.table.rowCount())
+                if not self.table.isRowHidden(r)]
         start = rows.index(after_path) + 1 if after_path in rows else 0
         for path in rows[start:] + rows[:start]:
-            if (path != after_path and needs_review(self._results[path])
-                    and self._matches_filter(self._results[path])):
+            result = self._results.get(path)
+            if path != after_path and result is not None and needs_review(result):
                 row = next(r for r in range(self.table.rowCount())
                            if self.table.item(r, 0).data(Qt.UserRole) == path)
                 self.table.selectRow(row)
                 self._on_row_selected()
                 self.table.scrollToItem(self.table.item(row, 0))
                 return
-        self._clear_current_review('当前筛选范围没有其他待复核视频；可调整筛选或加载全部历史')
+        self._clear_current_review('当前列表里没有其他待复核的视频；可切换筛选或加载全部历史')
 
     def _clear_current_review(self, message='请选择当前筛选范围内的视频'):
         self._current = None

@@ -89,6 +89,9 @@ class SupjavBrowserSession(QObject):
             return
         self.window = QDialog()
         self.window.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        # 显式给出最小化/关闭按钮：默认对话框只有关闭，用户想让它"缩起来别挡着"做不到
+        self.window.setWindowFlags(
+            Qt.Window | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint)
         self.window.setWindowTitle('Supjav 文字元数据会话')
         self.window.resize(900, 650)
         self._layout = QVBoxLayout(self.window)

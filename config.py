@@ -226,7 +226,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "release_cache_days": 7,          # 检索结果缓存天数
     # 你**确认「有码」**之后自动去查无码版（算法猜的"疑似有码"不会触发）；
     # 关掉则只能在「② 找替换」里手动点
-    "release_auto_lookup": True,
+    # 标记「有码」后**不自动联网检索**：只入队，等用户到「找无码版」手动开始。
+    # 自动查询会突然弹出浏览器窗口、还可能一口气打出几百个请求，用户以为是卡死。
+    "release_auto_lookup": False,
 }
 
 PORTABLE_MARKER = "portable.txt"

@@ -110,7 +110,10 @@ class WorkspacePreferences(QObject):
             filters = self.state.get('filters')
             if isinstance(filters, dict):
                 for name, control in self.filters.items():
-                    if name not in filters:
+                    if name not in filters or name == 'view':
+                        # 视图（待我处理/全部/暂不处理）不恢复：上次停在"暂不处理"时
+                        # 恢复回来会让人以为自己在看全部，实际只剩十几条。
+                        # 每次启动都从"待我处理"开始，其它筛选（结论/搜索/喜欢）照常恢复。
                         continue
                     if hasattr(control, 'findData'):
                         control.setCurrentIndex(max(0, control.findData(filters[name])))
