@@ -186,3 +186,27 @@ def in_view(view: WorkflowView, value: ReviewBucket) -> bool:
     if view is WorkflowView.PARKED:
         return value in (ReviewBucket.LOW_RISK, ReviewBucket.DEFERRED)
     return True
+
+
+def next_review_target(positions, visible, after_path, is_candidate) -> str:
+    """按表格顺序找「当前条目的下一条」，到末尾绕回开头。找不到返回空串。
+
+    为什么单独抽成纯函数：这个逻辑踩过两次坑。最要命的一次是**用可见行定位当前位置**
+    —— 标记完当前条目就不再是"待复核"，会被筛掉、从可见行里消失，
+    于是"我在哪"查不到，只能从头开始，表现就是"下一条永远是第一条"。
+
+    Args:
+        positions: 表格里**全部**行的路径（按显示顺序，含被筛掉的）
+        visible:   当前可见的路径集合
+        after_path: 当前位置的路径（就是刚标记/刚看完的那条）
+        is_candidate: 该路径是否还算"待复核"（调用方决定，避免这里依赖 verdict）
+    """
+    if after_path in positions:
+        index = positions.index(after_path)
+        ordered = list(positions[index + 1:]) + list(positions[:index])
+    else:
+        ordered = list(positions)
+    for path in ordered:
+        if path != after_path and path in visible and is_candidate(path):
+            return path
+    return ""

@@ -29,6 +29,7 @@ from censor.releases.models import normalize_number
 from censor.review_route import (
     ReviewBucket, WorkflowView, awaits_replacement, bucket as review_bucket,
     bucket_label, conclusion_label, in_view, needs_review, category,
+    next_review_target,
 )
 from ui.censor_gallery import EvidenceGallery
 from config import ToolkitConfig
@@ -813,18 +814,23 @@ class CensorshipPage(QWidget):
         而用户眼前的列表里明明还有几百条。视图被记成"暂不处理"时尤其明显：
         标记完就不动了，只能回左边列表重新点。
         """
-        rows = [self.table.item(r, 0).data(Qt.UserRole) for r in range(self.table.rowCount())
-                if not self.table.isRowHidden(r)]
-        start = rows.index(after_path) + 1 if after_path in rows else 0
-        for path in rows[start:] + rows[:start]:
+        positions = [self.table.item(r, 0).data(Qt.UserRole)
+                     for r in range(self.table.rowCount())]
+        visible = {self.table.item(r, 0).data(Qt.UserRole)
+                   for r in range(self.table.rowCount()) if not self.table.isRowHidden(r)}
+
+        def is_candidate(path):
             result = self._results.get(path)
-            if path != after_path and result is not None and needs_review(result):
-                row = next(r for r in range(self.table.rowCount())
-                           if self.table.item(r, 0).data(Qt.UserRole) == path)
-                self.table.selectRow(row)
-                self._on_row_selected()
-                self.table.scrollToItem(self.table.item(row, 0))
-                return
+            return result is not None and needs_review(result)
+
+        target = next_review_target(positions, visible, after_path, is_candidate)
+        if target:
+            row = next(r for r in range(self.table.rowCount())
+                       if self.table.item(r, 0).data(Qt.UserRole) == target)
+            self.table.selectRow(row)
+            self._on_row_selected()
+            self.table.scrollToItem(self.table.item(row, 0))
+            return
         self._clear_current_review('当前列表里没有其他待复核的视频；可切换筛选或加载全部历史')
 
     def _clear_current_review(self, message='请选择当前筛选范围内的视频'):
