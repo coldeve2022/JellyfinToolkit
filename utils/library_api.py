@@ -41,7 +41,9 @@ class LibraryApiError(Exception):
 
 def _req(method: str, url: str, api_key: str, timeout: int = 30):
     """发请求并解析 JSON；网络/HTTP 错误统一抛 ``LibraryApiError``。"""
-    headers = {"X-Emby-Token": api_key, "Accept": "application/json"}
+    from utils.media_server import auth_headers
+
+    headers = auth_headers(api_key)
     req = urllib.request.Request(url, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

@@ -41,7 +41,9 @@ class JellyfinError(Exception):
 
 def _req(method: str, url: str, api_key: str, body=None,
          timeout: int = 20) -> tuple[int, dict | list | None]:
-    headers = {"X-Emby-Token": api_key, "Accept": "application/json"}
+    from utils.media_server import auth_headers
+
+    headers = auth_headers(api_key)
     data = None
     if body is not None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")

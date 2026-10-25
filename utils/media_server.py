@@ -122,6 +122,15 @@ def normalize_server_url(server: str) -> str:
     return s
 
 
+def _swap_scheme(base: str) -> str:
+    """http ↔ https 互换；换不出新地址时返回空串。"""
+    parts = urllib.parse.urlsplit(base)
+    if not parts.scheme or not parts.netloc:
+        return ""
+    other = "https" if parts.scheme.lower() == "http" else "http"
+    return urllib.parse.urlunsplit((other, parts.netloc, parts.path, parts.query, ""))
+
+
 def server_identity(server: str) -> str:
     """Canonical scheme/host with a case-sensitive service path; omit user credentials."""
     base = normalize_server_url(server)
@@ -135,11 +144,23 @@ def server_identity(server: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme.lower(), host, parts.path, parts.query, ""))
 
 
-def _request(url: str, api_key: str = "", timeout: int = 6) -> tuple[int, object]:
-    """发一个 GET，返回 (状态码, 解析后的 JSON 或 None)。不抛异常。"""
+def auth_headers(api_key: str) -> dict:
+    """服务器认证头。
+
+    **Jellyfin 12 起不再接受 ``X-Emby-Token``**（实测返回 401），必须用
+    ``Authorization: MediaBrowser Token="..."``；而 Emby 只认前者。
+    两个一起发 —— 服务端忽略不认识的那个，这样 Jellyfin 各版本与 Emby 都能用。
+    """
     headers = {"Accept": "application/json"}
     if api_key:
         headers["X-Emby-Token"] = api_key
+        headers["Authorization"] = f'MediaBrowser Token="{api_key}"'
+    return headers
+
+
+def _request(url: str, api_key: str = "", timeout: int = 6) -> tuple[int, object]:
+    """发一个 GET，返回 (状态码, 解析后的 JSON 或 None)。不抛异常。"""
+    headers = auth_headers(api_key)
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -177,6 +198,14 @@ def detect(server: str, api_key: str = "", timeout: int = 6,
                            kind=normalize_kind(declared) if declared != KIND_AUTO else KIND_UNKNOWN)
 
     code, data = _request(f"{base}/System/Info/Public", api_key="", timeout=timeout)
+    if code != 200:
+        # 协议填错是最常见的错误（8920 常是 HTTPS、8096 常是 HTTP）。
+        # 直接换一种再试一次，比让用户自己猜强。
+        alt = _swap_scheme(base)
+        if alt:
+            code_alt, data_alt = _request(f"{alt}/System/Info/Public", timeout=timeout)
+            if code_alt == 200:
+                base, code, data = alt, code_alt, data_alt
     payload = data if isinstance(data, dict) else {}
 
     if code != 200:
@@ -196,17 +225,37 @@ def detect(server: str, api_key: str = "", timeout: int = 6,
                     authenticated=True,
                 )
         manual = _declared_kind(declared)
-        err = (f"HTTP {code}" if code else "无法连接（地址/端口是否正确？）")
+        if code:
+            err = f"服务器返回 HTTP {code}（地址 {base}）"
+        else:
+            err = (f"连不上 {base}。请确认：① 地址和端口（Jellyfin 默认 8096，"
+                   f"开了 HTTPS 的常用 8920）；② 服务器是否只开 HTTPS —— 那就在地址里写 https://；"
+                   f"③ 本机代理是否把局域网地址也转发了")
         return ServerProbe(ok=False, kind=manual, error=err)
 
     kind = kind_from_product(payload.get("ProductName", ""))
     if kind == KIND_UNKNOWN:
         kind = _declared_kind(declared)
+    authenticated = False
+    if api_key:
+        # 公开接口不需要 Key，所以"能连上"不等于"Key 有效"。这里真验一次，
+        # 否则用户要等到扫描/清洗时才撞 401。
+        auth_code, _ = _request(f"{base}/Users", api_key=api_key, timeout=timeout)
+        if auth_code == 401:
+            return ServerProbe(
+                ok=False, kind=kind,
+                name=str(payload.get("ServerName") or ""),
+                version=str(payload.get("Version") or ""),
+                product=str(payload.get("ProductName") or ""),
+                error="API Key 无效（HTTP 401）。请在服务器控制台 → API 密钥 里重新生成，"
+                      "并确认复制完整（32 位十六进制）")
+        authenticated = auth_code == 200
     return ServerProbe(
         ok=True, kind=kind,
         name=str(payload.get("ServerName") or ""),
         version=str(payload.get("Version") or ""),
         product=str(payload.get("ProductName") or ""),
+        authenticated=authenticated,
     )
 
 
