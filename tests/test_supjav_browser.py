@@ -68,6 +68,10 @@ def test_browser_worker_handoff_runs_navigation_on_gui(qapp, qtbot, monkeypatch)
         seen.append(threading.get_ident())
         session._complete(request, '<main>synthetic metadata</main>')
     monkeypatch.setattr(session, '_navigate', navigate)
+    # This test verifies Qt thread delivery, not native Chromium startup.
+    # _begin() shows the backend before calling the fake navigation; leaving
+    # it real made a two-second unit request depend on WebEngine cold start.
+    monkeypatch.setattr(session, '_ensure_visible', lambda: None)
     worker = Thread(target=lambda: result.append(session.read('https://supjav.com/123.html', timeout=2)))
     worker.start()
     qtbot.waitUntil(lambda: bool(result))

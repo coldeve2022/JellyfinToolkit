@@ -21,7 +21,7 @@ class WorkspacePreferences(QObject):
         self._menus = []
         self._default_header = bytes(table.horizontalHeader().saveState())
         self._defaults = dict(font_size=owner.font().pointSize() or 10, row_height=28,
-            auto_next=True, tile_width=186, columns=0,
+            auto_next=True, remember_view=False, tile_width=186, columns=0,
             vertical=bool(splitter and splitter.orientation() == Qt.Vertical),
             filters={name: control.currentData() if hasattr(control, 'currentData') else control.text()
                      for name, control in self.filters.items()},
@@ -110,10 +110,9 @@ class WorkspacePreferences(QObject):
             filters = self.state.get('filters')
             if isinstance(filters, dict):
                 for name, control in self.filters.items():
-                    if name not in filters or name == 'view':
-                        # 视图（待我处理/全部/暂不处理）不恢复：上次停在"暂不处理"时
-                        # 恢复回来会让人以为自己在看全部，实际只剩十几条。
-                        # 每次启动都从"待我处理"开始，其它筛选（结论/搜索/喜欢）照常恢复。
+                    if name not in filters or (name == 'view' and self.state.get('remember_view') is not True):
+                        # View memory is explicit. Without it, retain this
+                        # page's default view; other saved filters still apply.
                         continue
                     if hasattr(control, 'findData'):
                         control.setCurrentIndex(max(0, control.findData(filters[name])))
@@ -242,6 +241,11 @@ class WorkspacePreferences(QObject):
         dialog.deleteLater()
 
     def eventFilter(self, watched, event):
-        if watched is self.owner and event.type() in (QEvent.Close, QEvent.Hide):
+        # Qt can deliver a late owner event while cyclic Python wrappers are
+        # being cleared. There is no preference state to save at that point.
+        owner = getattr(self, 'owner', None)
+        if owner is None:
+            return False
+        if watched is owner and event.type() in (QEvent.Close, QEvent.Hide):
             self.save()
         return super().eventFilter(watched, event)

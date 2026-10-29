@@ -137,6 +137,7 @@ class ReviewMetadataController(QObject):
                                        log=self.logged.emit)
         # Log delivery must be a queued Qt signal, never a QWidget call from the worker.
         worker = CallWorker(run)
+        worker.setProperty('taskPreserveReview', True)
         worker.result.connect(self._result)
         worker.error.connect(self._error)
         worker.finished.connect(self._finished)

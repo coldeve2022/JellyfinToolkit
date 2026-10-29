@@ -208,6 +208,7 @@ def test_review_limit_counts_actionable_items_not_manual_prefix(tmp_path):
     store = VerdictStore(tmp_path / 'state.db')
     store.put(VideoVerdict(path='manual.mp4',visual_score=40,
         verdict=Verdict(state=CensorState.CENSORED,evidence=[Evidence(EvidenceSource.MANUAL,CensorState.CENSORED,1.)])))
+    store.set_label('manual.mp4', CensorState.CENSORED)
     store.put(VideoVerdict(path='automatic.mp4',visual_score=35,
         verdict=Verdict(state=CensorState.CENSORED,needs_review=False,
         evidence=[Evidence(EvidenceSource.VISUAL,CensorState.CENSORED,.85)])))

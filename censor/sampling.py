@@ -202,10 +202,13 @@ class FrameSampler:
         progress: Optional[Callable[[int, int], None]] = None,
         sample_indices: Optional[Sequence[int]] = None,
         deadline: Optional[float] = None,
+        sample_phase: float = 0.,
     ):
         """Stratified accurate seeks; source keyframes are decoded, never duplicated by fps."""
         if count < 1:
             raise SamplingError('抽帧数量必须为正数')
+        if not math.isfinite(sample_phase):
+            raise SamplingError('取样相位必须是有限数值')
         indices = list(range(count)) if sample_indices is None else list(sample_indices)
         if (not indices or any(not isinstance(index, int) or isinstance(index, bool)
                                or not 0 <= index < count for index in indices)
@@ -225,7 +228,7 @@ class FrameSampler:
                 raise SamplingTimeout('抽帧总时间超时')
             # Deterministic within-stratum jitter avoids repeating an exact
             # period while preserving coverage of the whole duration.
-            offset = .35 + .3 * ((index * .61803398875) % 1.)
+            offset = .35 + .3 * ((index * .61803398875 + sample_phase) % 1.)
             timestamp = min(dur - .001, (index + offset) * dur / count)
             frame = self.frame_at(path, max(0., timestamp), should_stop=should_stop,
                                   timeout=min(60., remaining))
@@ -448,12 +451,13 @@ class FrameSampler:
         crop: bool = False,
     ) -> bool:
         """Encode the exact analyzed pixels, avoiding a second approximate seek."""
+        if (not isinstance(frame.width, int) or not isinstance(frame.height, int)
+                or frame.width <= 0 or frame.height <= 0 or frame.channels not in (1, 3)
+                or len(frame.data) != frame.width * frame.height * frame.channels):
+            raise SamplingError('证据图像素尺寸、长度或通道无效')
+        if should_stop():
+            raise SamplingCancelled('证据图生成已取消')
         out = Path(out_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        if out.suffix.lower() == '.png':
-            if should_stop():
-                raise SamplingCancelled('证据图生成已取消')
-            return self._write_png(frame, out, box=box, crop=crop)
         fmt = "gray" if frame.channels == 1 else "rgb24"
         filters = []
         if box:
@@ -463,34 +467,42 @@ class FrameSampler:
             filters.append(f'crop={x1-x0}:{y1-y0}:{x0}:{y0}' if crop else
                            f'drawbox=x={x0}:y={y0}:w={x1-x0}:h={y1-y0}:color=red:t=3')
         filters.append(f'scale={width}:-2')
-        done = self._run_command(
-            [
-                self.ffmpeg,
-                "-v",
-                "error",
-                "-nostdin",
-                "-y",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                fmt,
-                "-s",
-                f"{frame.width}x{frame.height}",
-                "-i",
-                "pipe:0",
-                "-frames:v",
-                "1",
-                "-vf",
-                ','.join(filters),
-                "-q:v",
-                "4",
-                str(out),
-            ],
-            timeout=min(90, self.timeout),
-            should_stop=should_stop,
-            input_data=frame.data,
-        )
-        return done.returncode == 0 and out.exists() and out.stat().st_size > 0
+        temporary = None
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            # Keep prior evidence intact until a fresh, nonempty encoding has
+            # completed. The empty temporary file cannot pass an EOF as success.
+            with tempfile.NamedTemporaryFile(prefix=f'.{out.stem}-', suffix=out.suffix,
+                                             dir=out.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+            if out.suffix.lower() == '.png':
+                success = self._write_png(frame, temporary, box=box, crop=crop)
+            else:
+                done = self._run_command(
+                    [
+                        self.ffmpeg,
+                        "-v", "error", "-nostdin", "-y",
+                        "-f", "rawvideo", "-pix_fmt", fmt,
+                        "-s", f"{frame.width}x{frame.height}",
+                        "-i", "pipe:0", "-frames:v", "1",
+                        "-vf", ','.join(filters), "-q:v", "4", str(temporary),
+                    ],
+                    timeout=min(90, self.timeout),
+                    should_stop=should_stop,
+                    input_data=frame.data,
+                )
+                success = done.returncode == 0
+            if should_stop():
+                raise SamplingCancelled('证据图生成已取消')
+            if not success or not temporary.exists() or not temporary.stat().st_size:
+                return False
+            temporary.replace(out)
+            return True
+        except (OSError, subprocess.SubprocessError):
+            return False
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _write_png(frame, out, *, box=None, crop=False):

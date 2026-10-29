@@ -109,7 +109,8 @@ def bucket(result) -> ReviewBucket:
     """一个检测结果落在哪个处理桶。**唯一判定入口。**"""
     if result is None:
         return ReviewBucket.PENDING
-    if result.verdict.of(EvidenceSource.MANUAL) is not None:
+    manual = result.verdict.of(EvidenceSource.MANUAL)
+    if manual is not None and manual.state is not CensorState.UNKNOWN:
         return ReviewBucket.CONFIRMED
     if result.status is not ProcessingStatus.COMPLETED:
         return ReviewBucket.FAILED

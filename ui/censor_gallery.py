@@ -94,7 +94,8 @@ class EvidenceGallery(QScrollArea):
         self._clear()
         self._candidates = list(candidates or [])
         if not self._candidates:
-            hint = QLabel("没有保留证据图，可从「此视频 → 深入检查」补充取样。")
+            hint = QLabel('没有可用证据图。可多选视频点“补抓选中证据图”，'
+                          '或从“更多”补抓当前筛选中的缺图项；需要更多分析画面时点“深入检查选中项”。')
             hint.setWordWrap(True)
             self.grid.addWidget(hint, 0, 0, 1, self.COLUMNS)
             return

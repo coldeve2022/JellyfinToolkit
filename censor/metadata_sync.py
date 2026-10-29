@@ -170,6 +170,48 @@ class MetadataSyncService:
                 count += bool(self.enqueue(path, identity, label[0]))
         return count
 
+    def _requeue_changed_unfinished(self, should_stop):
+        """Explicit recovery adopts current settings only for unfinished targets.
+
+        Keep completed historical endpoints untouched. A file/label check and a
+        revision CAS prevent configuration recovery from reviving old media or
+        overwriting a confirmation that arrived during that check.
+        """
+        for job in self.records():
+            changed = [ep for ep in ('nfo', 'jellyfin')
+                       if job[ep] in ('pending', 'waiting', 'failed', 'stale')
+                       and job[ep + '_fingerprint'] != self._fingerprint(ep)]
+            if not changed:
+                continue
+            try:
+                self._check(job, should_stop)
+            except _Stale:
+                continue
+            except _Stopped:
+                return
+            with self._connect() as db:
+                # Endpoint acknowledgements do not advance the confirmation
+                # revision. Re-read under a database write lock so another
+                # process completing a target cannot be undone by recovery.
+                db.execute('BEGIN IMMEDIATE')
+                current = db.execute('SELECT * FROM censor_metadata_sync '
+                                     'WHERE path=? AND file_identity=? AND revision=?',
+                                     (job['path'], job['file_identity'], job['revision'])).fetchone()
+                if not current:
+                    continue
+                changed = [ep for ep in changed if current[ep] == job[ep]
+                           and current[ep + '_fingerprint'] == job[ep + '_fingerprint']]
+                if not changed:
+                    continue
+                assignments, values = [], []
+                for ep in changed:
+                    assignments.extend((ep + '=?', ep + '_error=?', ep + '_fingerprint=?'))
+                    values.extend(('pending' if _get(self.cfg, 'censor_sync_' + ep, True) else 'skipped',
+                                   '', self._fingerprint(ep)))
+                db.execute('UPDATE censor_metadata_sync SET revision=revision+1,' + ','.join(assignments)
+                           + ' WHERE path=? AND file_identity=? AND revision=?',
+                           (*values, job['path'], job['file_identity'], job['revision']))
+
     def _check(self, job, should_stop):
         if should_stop and should_stop():
             raise _Stopped()
@@ -243,14 +285,18 @@ class MetadataSyncService:
                 str(_get(self.cfg, "censor_sync_tag_uncensored", "无码")).strip()]
         if not all(pair) or pair[0] == pair[1]:
             raise _SyncError("同步标签配置无效")
+        if receipt and receipt["attempted"]:
+            unknown = set(receipt["added"]) - set(receipt["confirmed_added"])
+            if unknown.intersection(tags):
+                # A matching GET is not an acknowledgement: after a rejected or
+                # interrupted write this tag may have been added by the user.
+                # Apply this guard to retries as well as withdrawals so a no-op
+                # retry cannot silently turn an uncertain delta into ownership.
+                raise _SyncError("上次元数据写入结果不明，现存标签归属需人工核验；已保留标签，核验移除后可重试")
         if job["desired"] is None:
             if not receipt:
                 return list(tags)
-            if receipt["attempted"]:
-                unknown = set(receipt["added"]) - set(receipt["confirmed_added"])
-                if unknown.intersection(tags):
-                    raise _SyncError("上次元数据写入结果不明，现存标签归属需人工核验；已保留标签，核验移除后可重试撤回")
-            elif not receipt["applied"]:
+            if not receipt["attempted"] and not receipt["applied"]:
                 return list(tags)
             result = [v for v in tags if v not in receipt["confirmed_added"]]
             result += [v for v in receipt["removed"] if v not in result]
@@ -338,6 +384,10 @@ class MetadataSyncService:
         options = dict(journal=file_ops.OperationJournal(self.db_path.with_name("censor_metadata_operations.db")),
                        should_stop=lambda: self._obsolete(job, should_stop))
         content = ET.tostring(root, encoding="unicode")
+        # Commit the uncertain-write boundary before touching the NFO. The
+        # operation journal keeps originals/backups; until _finish acknowledges
+        # success a process exit must retain this intent for safe recovery.
+        self._mark_attempted(job, "nfo", should_stop)
         if existed:
             result = file_ops.safe_write_text(target, content,
                 expected_target_hash=hashlib.sha256(raw).hexdigest(), **options)
@@ -380,6 +430,7 @@ class MetadataSyncService:
     def _index(self, should_stop):
         """One fresh API index per batch; optional scope checked in server namespace."""
         from utils import jellyfin_api as api
+        from utils.library_api import VIDEO_ITEM_TYPES
         from utils.library_scope import path_in_scope, scope_id
         from utils.media_server import server_identity
         server, key = _get(self.cfg, "jellyfin_server", ""), _get(self.cfg, "jellyfin_api_key", "")
@@ -397,7 +448,7 @@ class MetadataSyncService:
             if found != set(selected):
                 raise _SyncError("媒体库范围与当前 API 不匹配，请重新选择")
         result = []
-        for page in api._iter_items(server, key, should_stop=should_stop):
+        for page in api._iter_items(server, key, should_stop=should_stop, item_types=VIDEO_ITEM_TYPES):
             for item in page:
                 if (not roots or any(path_in_scope(item.get("Path", ""), root) for root in roots)) and item.get("Id"):
                     result.append(item)
@@ -435,6 +486,8 @@ class MetadataSyncService:
     def run_pending(self, should_stop=None, log=None, retry_failed=False):
         errors, cancelled = [], False
         with self._run_lock:
+            if retry_failed:
+                self._requeue_changed_unfinished(should_stop)
             jobs = self.records()
             index, index_error = None, None
             for job in jobs:

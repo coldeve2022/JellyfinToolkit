@@ -108,15 +108,15 @@ def ping(server: str, api_key: str) -> tuple[bool, str]:
 
 
 def _iter_items(server: str, api_key: str, log: Optional[Callable[[str], None]] = None,
-                should_stop=None):
-    """分页遍历全部 Movie/Video 条目，产出 item dict（带 Path/Tags/Genres）。"""
+                should_stop=None, *, item_types: str = "Movie,Video"):
+    """分页遍历指定视频类型；原调用默认保留 Movie/Video 范围。"""
     start = 0
     step = 500
     while True:
         if should_stop and should_stop():
             return
         params = urllib.parse.urlencode({
-            "recursive": "true", "includeItemTypes": "Movie,Video",
+            "recursive": "true", "includeItemTypes": item_types,
             "startIndex": str(start), "limit": str(step),
             "fields": "Path,Tags,Genres",
         })

@@ -125,17 +125,8 @@ def test_censorship_page_classifies(qapp, cfg, tmp_path, qtbot):
     (tmp_path / "FC2-PPV-123456.mp4").write_bytes(b"\x00" * 100)
     (tmp_path / "ABC-123.mp4").write_bytes(b"\x00" * 100)
 
-    # 等全局任务队列清空再启动：TaskManager 同时只允许一个任务，
-    # 前面用例残留的任务会让 submit 直接拒绝 —— 扫描根本不启动，
-    # 而 _worker 还留着旧对象，断言就变成"0 行"这种看不懂的失败。
-    from ui.services import TaskManager
-    drain = time.monotonic() + 20
-    while TaskManager.instance().running() and time.monotonic() < drain:
-        qapp.processEvents()
-        time.sleep(0.05)
-    if TaskManager.instance().running():
-        pytest.skip('全局任务队列被前一个用例占用（TaskManager 同时只跑一个任务），'
-                    '这条扫描回填断言依赖空队列；产品功能已由真实环境另行验证')
+    # Read-only scans are owned by this page, not a single global queue.
+    # Unrelated pages must not cause this functional assertion to be skipped.
     page._worker = None
     page._start_scan([str(tmp_path)])
     qtbot.waitUntil(lambda: page._worker is not None, timeout=5000)

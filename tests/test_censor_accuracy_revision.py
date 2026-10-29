@@ -42,6 +42,7 @@ def test_low_risk_requires_sufficient_unique_coverage_and_retains_overview():
 
     class Sampler:
         duplicate = False
+        last_duration = 600.
 
         def sample(self, *args, **kwargs):
             return [_frame(np.full((80, 80), 30 if self.duplicate else 30 + i), i * 20)

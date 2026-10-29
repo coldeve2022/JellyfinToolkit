@@ -232,7 +232,8 @@ def test_import_skips_files_with_valid_cache(page, monkeypatch, tmp_path, qtbot)
 
     page._start_scan([str(tmp_path / "done.mp4"), fresh])
     qtbot.waitUntil(lambda: bool(started))
-    assert page._results, "有缓存的那条应当立刻铺进列表"
+    qtbot.waitUntil(lambda: cached.path in page._results)
+    assert page._results, "有缓存的那条应通过有界队列呈现，不重算"
     assert started and started[0] == [fresh], "只该把没缓存的送进扫描队列"
 
 

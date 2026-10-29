@@ -10,6 +10,7 @@ from PySide6.QtCore import QThread, Signal
 from censor.jobs import ScanJobs, scan_priority
 from censor.models import VideoVerdict, ProcessingStatus
 from censor.review_route import category
+from censor.scan_plan import reusable_result, should_defer
 
 
 class CensorScanWorker(QThread):
@@ -21,15 +22,19 @@ class CensorScanWorker(QThread):
     all_done = Signal(int)
     task_status = Signal(object)
 
-    def __init__(self, service, paths, options, workers=4, parent=None, *, manual_deferred=False):
+    def __init__(self, service, paths, options, workers=4, parent=None, *, manual_deferred=False,
+                 evidence_bases=None):
         super().__init__(parent)
         self._service, self._paths, self._options = copy(service), list(paths), deepcopy(options)
+        self._evidence_bases = deepcopy(evidence_bases or {})
+        self._capture_only = bool(getattr(options, 'evidence_only', False))
         if hasattr(service, 'cfg'):
             self._service.cfg = deepcopy(service.cfg)
         self._workers = max(1, min(int(workers or 1), 16, max(1, (os.cpu_count() or 2) // 2)))
         if options.detect_visual:
             pixels = int(service._cfg_get('censor_sample_width', 960)) * int(service._cfg_get('censor_sample_height', 540))
-            retained = min(20, int(service._cfg_get('censor_candidates', 18))) + 26
+            retained = min(60, int(getattr(options, 'evidence_frames', None)
+                or service._cfg_get('censor_candidates', 18))) + 26
             per_file = max(1, pixels * retained)
             budget = int(service._cfg_get('censor_memory_mb', 512)) * 1024 * 1024
             self._workers = min(self._workers, max(1, budget // per_file))
@@ -42,7 +47,7 @@ class CensorScanWorker(QThread):
         self._active_files = {}
         self._completed = 0
         self._counts = dict(discovered=0,total=0,completed=0,cached=0,failed=0,
-                            deferred=0,review=0,manual=0,low_risk=0)
+                            deferred=0,review=0,manual=0,low_risk=0,images_added=0)
         self._phase, self._preparation = '发现文件', ''
         self.stats = {}
 
@@ -69,6 +74,8 @@ class CensorScanWorker(QThread):
                       f'复用 {counts["cached"]} · 失败 {counts["failed"]} · 延后 {counts["deferred"]}')
             if self._preparation and preparing:
                 detail += ' · ' + self._preparation
+            if self._capture_only:
+                detail += f' · 本次新增 {counts["images_added"]} 张参考图'
             if active:
                 detail += '\n' + ' | '.join(f'{Path(a["path"]).name} · {a["stage"]}' +
                     (f' {a["done"]}/{a["total"]}' if a['total'] else '') for a in active)
@@ -94,7 +101,8 @@ class CensorScanWorker(QThread):
     def _run_scan(self):
         from utils.file_scan import iter_media_files
         from utils.media_types import is_video
-        self.jobs.enqueue_sources(self._paths, manual=self._manual_deferred)
+        if not self._capture_only:
+            self.jobs.enqueue_sources(self._paths, manual=self._manual_deferred)
         errors = []
         def note(message):
             errors.append(message)
@@ -110,48 +118,67 @@ class CensorScanWorker(QThread):
             self._preparation = path
             self._publish()
             if len(batch) >= 100:
-                self.jobs.enqueue(batch)
+                if not self._capture_only:
+                    self.jobs.enqueue(batch)
                 self.discovered.emit(list(batch))
                 batch.clear()
-        self.jobs.enqueue(batch)
+        if not self._capture_only:
+            self.jobs.enqueue(batch)
         if batch:
             self.discovered.emit(list(batch))
         if self._stopped:
             return
         for source in self._paths:
             if not os.path.exists(source) and is_video(source):
-                self.jobs.enqueue([source])
-                self.jobs.finished(VideoVerdict(path=source,status=ProcessingStatus.FAILED,
-                                               error='文件已不存在或不可访问'))
-                self.jobs.finish_sources([source])
+                missing = VideoVerdict(path=source,status=ProcessingStatus.FAILED,
+                                      error='文件已不存在或不可访问')
+                if not self._capture_only:
+                    self.jobs.enqueue([source])
+                    self.jobs.finished(missing)
+                    self.jobs.finish_sources([source])
+                else:
+                    missing.detector_runs['review.frames'] = dict(status='failed', added=0,
+                        sampled=0, requested=self._options.evidence_frames, error=missing.error)
+                    self.item_done.emit(missing)
                 self._counts['failed'] += 1
-        if not errors:
+        if not errors and not self._capture_only:
             self.jobs.finish_sources(self._paths)
-        else:
+        elif errors:
             self.stats['error'] = '部分来源不可访问，保留来源供续跑'
             self.error.emit(self.stats['error'])
         self._paths = files
         self._phase = '读取线索'
         self._counts['total'] = len(files)
         self._publish(force=True)
-        ordered = []
+        ordered, reused = [], []
         for index,path in enumerate(files):
             if self._stopped:
                 return
-            priority,reason = scan_priority(path)
-            self.jobs.prioritize(path,priority,reason)
-            if self._manual_deferred:
+            priority,reason = ((0, '人工请求补抓证据图') if self._capture_only else scan_priority(path))
+            if not self._capture_only:
+                self.jobs.prioritize(path,priority,reason)
+            if self._manual_deferred and not self._capture_only:
                 self.jobs.authorize(path)
-            if priority == 2 and not self.jobs.authorized(path):
+            cached = None if self._capture_only else reusable_result(self._service, path, self._options)
+            if self._stopped:
+                return
+            if cached is not None:
+                reused.append((cached, reason))
+            elif not self._capture_only and should_defer(priority, self._options, authorized=self.jobs.authorized(path),
+                              manual_requested=self._manual_deferred):
                 self.jobs.defer(path)
                 self._counts['deferred'] += 1
             else:
                 ordered.append((priority,path,reason))
             self._preparation = f'{index+1}/{len(files)} · {Path(path).name}'
             self._publish()
-        self._counts['total'] = len(ordered)
-        self._phase = '分析视频'
+        self._counts['total'] = len(ordered) + len(reused)
+        self._phase = '补抓证据图' if self._capture_only else '分析视频'
         self._publish(force=True)
+        for result, reason in reused:
+            if self._stopped:
+                return
+            self._complete_result(result, reason)
         paths = iter(sorted(ordered))
         with ThreadPoolExecutor(max_workers=self._workers) as pool:
             futures = {}
@@ -160,11 +187,17 @@ class CensorScanWorker(QThread):
                 if item is None or self._stopped:
                     return
                 _,path,reason = item
-                self.jobs.started(path)
+                if not self._capture_only:
+                    self.jobs.started(path)
                 self._file_progress(path,'校验文件与缓存',0,0)
-                future = pool.submit(self._service.probe,path,self._options,
-                    should_stop=self._should_stop,log=self.logged.emit,
+                kwargs = dict(should_stop=self._should_stop, log=self.logged.emit,
                     progress=lambda stage,done,total,p=path:self._file_progress(p,stage,done,total))
+                if self._capture_only:
+                    future = pool.submit(self._service.refresh_evidence, path,
+                        count=self._options.evidence_frames or 24,
+                        base=self._evidence_bases.get(path), **kwargs)
+                else:
+                    future = pool.submit(self._service.probe, path, self._options, **kwargs)
                 futures[future] = (path,reason)
             for _ in range(self._workers):
                 submit_next()
@@ -177,21 +210,32 @@ class CensorScanWorker(QThread):
                     except Exception as exc:
                         result = VideoVerdict(path=path,error=str(exc),status=ProcessingStatus.FAILED)
                         result.verdict.needs_review = True
-                    result.scheduling_note = reason
-                    self.jobs.finished(result)
                     with self._lock:
                         self._active_files.pop(path,None)
-                        self._completed += 1
-                        self._counts['completed'] = self._completed
-                        self._counts['cached'] += int(result.cache_hit)
-                        route = category(result)
-                        key = 'failed' if result.status not in (ProcessingStatus.COMPLETED,ProcessingStatus.CANCELLED) else route
-                        if key in ('review','manual','low_risk','failed'):
-                            self._counts[key] += 1
-                        self._publish()
-                    self.item_done.emit(result)
-                    self.progressed.emit(self._completed,len(ordered))
+                    self._complete_result(result, reason)
                     if not self._stopped:
                         submit_next()
         if self._counts['failed']:
             self.stats['error'] = f'{self._counts["failed"]}个视频失败，可重试；其他结果已保存'
+
+    def _complete_result(self, result, reason):
+        result.scheduling_note = reason
+        if not self._capture_only:
+            self.jobs.finished(result)
+        with self._lock:
+            self._completed += 1
+            self._counts['completed'] = self._completed
+            self._counts['cached'] += int(result.cache_hit)
+            route = category(result)
+            if self._capture_only:
+                outcome = result.detector_runs.get('review.frames', {}).get('status', 'failed')
+                self._counts['images_added'] += int(result.detector_runs.get('review.frames', {}).get('added', 0))
+                key = ('failed' if outcome not in ('completed', 'cancelled') else
+                       'review' if route == 'failed' else route)
+            else:
+                key = 'failed' if result.status not in (ProcessingStatus.COMPLETED, ProcessingStatus.CANCELLED) else route
+            if key in ('review', 'manual', 'low_risk', 'failed'):
+                self._counts[key] += 1
+            self._publish()
+        self.item_done.emit(result)
+        self.progressed.emit(self._completed, self._counts['total'])

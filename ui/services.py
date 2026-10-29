@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import uuid
+import weakref
 from datetime import datetime
 
 from shiboken6 import isValid
@@ -186,7 +187,17 @@ def page_workers(page):
             yield value
 
 
+def _cancel_deferred(page):
+    if isinstance(page, QObject) and not isValid(page):
+        return
+    page._task_epoch = getattr(page, '_task_epoch', 0) + 1
+    dispatch = getattr(page, '_task_dispatch', None)
+    if dispatch is not None and isValid(dispatch):
+        dispatch.cancel()
+
+
 def stop_page(page):
+    _cancel_deferred(page)
     manager = TaskManager.instance()
     for task_id, entry in list(manager._active.items()):
         if entry["owner"] is page:
@@ -223,6 +234,46 @@ class CallWorker(QThread):
             self.error.emit(str(exc))
 
 
+class _OwnedTaskStarts(QObject):
+    """Pending starts belong to the page and participate in stop/shutdown."""
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.pending = {}
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(40)
+        self.timer.timeout.connect(self.flush)
+        TaskManager.instance()._dispatchers.add(self)
+
+    def enqueue(self, worker, title, mutating):
+        self.pending[id(worker)] = (worker, title, mutating, getattr(self.owner, '_task_epoch', 0))
+        self.timer.start()
+
+    def cancel(self):
+        self.timer.stop()
+        requests, self.pending = self.pending, {}
+        for worker, _, _, _ in requests.values():
+            stop = getattr(worker, 'stop', None)
+            if callable(stop):
+                stop()
+            elif isinstance(worker, QThread) and isValid(worker):
+                worker.requestInterruption()
+
+    def flush(self):
+        if TaskManager.instance().running(self.owner):
+            self.timer.start()
+            return
+        if not self.pending:
+            return
+        key = next(iter(self.pending))
+        worker, title, mutating, epoch = self.pending.pop(key)
+        if epoch == getattr(self.owner, '_task_epoch', 0):
+            start_task(self.owner, worker, title, mutating)
+        if self.pending:
+            self.timer.start()
+
+
 class TaskManager(QObject):
     changed = Signal()
     _instance = None
@@ -247,6 +298,8 @@ class TaskManager(QObject):
         except (OSError, ValueError):
             pass
         self._active = {}
+        self._dispatchers = weakref.WeakSet()
+        self._continuation_owners = weakref.WeakSet()
         self._timer = QTimer(self)
         self._timer.setInterval(35)
         self._timer.timeout.connect(self._poll)
@@ -254,13 +307,25 @@ class TaskManager(QObject):
 
     @classmethod
     def instance(cls):
-        if cls._instance is None:
+        if cls._instance is None or (isinstance(cls._instance, QObject) and not isValid(cls._instance)):
             cls._instance = cls()
         return cls._instance
+
+    def _callback(self, method, task_id, *, packed=False):
+        receiver = weakref.ref(self)
+        def deliver(*values):
+            manager = receiver()
+            if manager is not None and isValid(manager):
+                getattr(manager, method)(task_id, values if packed else (values[0] if values else None))
+        return deliver
 
     def running(self, owner=None):
         self._poll()
         return any(owner is None or entry["owner"] is owner for entry in self._active.values())
+
+    def track_pending_owner(self, owner):
+        """Include an owned pending pipeline in stop_all, even between tasks."""
+        self._continuation_owners.add(owner)
 
     def submit(self, worker, owner, title, mutating=False, resources=()):
         self._poll()
@@ -292,6 +357,7 @@ class TaskManager(QObject):
         }
         controls = {}
         buttons = {}
+        preserve_review = isinstance(worker, QObject) and worker.property('taskPreserveReview') is True
         candidates = owner.findChildren(QObject)
         footer = getattr(owner, "_action_footer", None)
         if footer is not None:
@@ -306,7 +372,8 @@ class TaskManager(QObject):
             # Inherit the opt-in so table headers/scrollbars remain usable too.
             ancestor = control
             while ancestor is not None and ancestor is not owner:
-                if ancestor.property('taskInteractive'):
+                if (ancestor.property('taskInteractive')
+                        or (preserve_review and ancestor.property('taskReviewInteractive'))):
                     break
                 ancestor = ancestor.parent()
             if ancestor is not None and ancestor is not owner:
@@ -340,19 +407,19 @@ class TaskManager(QObject):
             "resources": resource_set,
             "stopping": False,
         }
-        worker.finished.connect(lambda *args, tid=task_id: self._result(tid, args))
+        worker.finished.connect(self._callback('_result', task_id, packed=True))
         if hasattr(worker, "result"):
-            worker.result.connect(lambda *args, tid=task_id: self._result(tid, args))
+            worker.result.connect(self._callback('_result', task_id, packed=True))
         if hasattr(worker, "error"):
-            worker.error.connect(lambda value, tid=task_id: self._error(tid, value))
+            worker.error.connect(self._callback('_error', task_id))
         if hasattr(worker, 'task_status'):
-            worker.task_status.connect(lambda value, tid=task_id: self._task_status(tid, value))
+            worker.task_status.connect(self._callback('_task_status', task_id))
         elif hasattr(worker, "progress"):
-            worker.progress.connect(lambda *args, tid=task_id: self._progress(tid, args))
+            worker.progress.connect(self._callback('_progress', task_id, packed=True))
         if hasattr(worker, "log") and not hasattr(worker, 'task_status'):
-            worker.log.connect(lambda value, tid=task_id: self._log(tid, value))
+            worker.log.connect(self._callback('_log', task_id))
         if hasattr(worker, "logged"):
-            worker.logged.connect(lambda value, tid=task_id: self._log(tid, value))
+            worker.logged.connect(self._callback('_log', task_id))
         worker.start()
         self.changed.emit()
         return True
@@ -417,6 +484,7 @@ class TaskManager(QObject):
     def stop(self, task_id):
         entry = self._active.get(task_id)
         if entry:
+            _cancel_deferred(entry['owner'])
             entry["stopping"] = True
             entry["record"]["status"] = "stopping"
             stop = getattr(entry["worker"], "stop", None)
@@ -427,6 +495,11 @@ class TaskManager(QObject):
             self.changed.emit()
 
     def stop_all(self):
+        owners = {entry['owner'] for entry in self._active.values()}
+        owners.update(self._continuation_owners)
+        owners.update(dispatch.owner for dispatch in self._dispatchers if isValid(dispatch))
+        for owner in owners:
+            _cancel_deferred(owner)
         for task_id in list(self._active):
             self.stop(task_id)
 
@@ -546,10 +619,12 @@ _TASK_LABELS = {
 
 
 def start_task(owner, worker, title=None, mutating=None):
-    if getattr(owner.window(), "_closing", False):
+    if not isValid(owner) or getattr(owner.window(), "_closing", False):
         stop = getattr(worker, "stop", None)
         if callable(stop):
             stop()
+        return False
+    if getattr(worker, '_stopped', False) is True:
         return False
     manager = TaskManager.instance()
     name = type(worker).__name__
@@ -557,9 +632,10 @@ def start_task(owner, worker, title=None, mutating=None):
     mutating = name in _WRITE_WORKERS if mutating is None else mutating
     pending = [entry for entry in manager._active.values() if entry["owner"] is owner]
     if pending:
-        # Custom result signals can precede actual QThread termination; preserve
-        # the next worker until the prior run has really returned.
-        QTimer.singleShot(40, owner, lambda: start_task(owner, worker, title, mutating))
+        dispatch = getattr(owner, '_task_dispatch', None)
+        if dispatch is None:
+            dispatch = owner._task_dispatch = _OwnedTaskStarts(owner)
+        dispatch.enqueue(worker, title, mutating)
         return True
     if not manager.submit(worker, owner, title, mutating):
         QMessageBox.information(
@@ -581,10 +657,18 @@ def busy(owner, mutating=False):
 
 
 def after_stopped(owner, callback):
-    if busy(owner):
-        QTimer.singleShot(40, owner, lambda: after_stopped(owner, callback))
-    else:
-        callback()
+    TaskManager.instance().track_pending_owner(owner)
+    epoch = getattr(owner, '_task_epoch', 0)
+    def advance():
+        if not isValid(owner) or epoch != getattr(owner, '_task_epoch', 0):
+            return
+        if getattr(owner.window(), '_closing', False):
+            return
+        if busy(owner):
+            QTimer.singleShot(40, owner, advance)
+        else:
+            callback()
+    advance()
 
 
 def import_media(owner, paths, callback):

@@ -98,8 +98,8 @@ def test_marking_moves_row_to_confirmed(page, monkeypatch):
     assert "已确认" in labels, labels
 
 
-def test_click_without_selection_falls_back_to_first_visible(page, monkeypatch):
-    """没选中任何行时，点击不该静默失败 —— 自动接管第一行。"""
+def test_click_without_selection_explains_without_marking_first_visible(page, monkeypatch):
+    """未选中时明确提示，不把旧焦点或第一行当作已审阅对象。"""
     calls = _stub_label(page, monkeypatch)
     page._on_item(_verdict(r"C:\lib\B-456.mp4"))
     page.table.clearSelection()
@@ -108,8 +108,9 @@ def test_click_without_selection_falls_back_to_first_visible(page, monkeypatch):
     page.update()
 
     page.btn_censored.click()
-    assert calls, "应当自动选中第一行并标记"
-    assert "已标记「有码」" in page.progress_title.text()
+    assert calls == [], "没有选中不得偷偷标记第一行"
+    assert "先在表格中选中" in page.progress_title.text()
+    assert page._current is None
 
 
 def test_click_with_empty_list_explains_why(page, monkeypatch):

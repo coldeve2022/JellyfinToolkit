@@ -40,6 +40,16 @@ _RESULT_COLUMNS = (
     "status,sampled_frames,analyzed_frames,detector_runs"
 )
 
+# Ordinary history projects the review authority in the same SQLite snapshot as
+# its probe row. An empty identity matches only a legacy empty-identity label.
+_HISTORY_COLUMNS = 'p.path,' + ','.join('p.' + name for name in _RESULT_COLUMNS.split(',')) + ',h.state,h.note'
+_HISTORY_FROM = (
+    'FROM censor_probe p LEFT JOIN censor_label_history h '
+    'ON h.path=p.path AND h.file_identity=p.file_identity '
+    'AND NOT EXISTS (SELECT 1 FROM censor_label_revocations r '
+    'WHERE r.path=h.path AND r.file_identity=h.file_identity)'
+)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS censor_probe (
     path        TEXT PRIMARY KEY,
@@ -460,52 +470,93 @@ class VerdictStore:
             detector_runs=runs,
         )
 
-    def put(self, result: VideoVerdict) -> None:
+    def put(self, result: VideoVerdict, *, policy=None, persist: bool = True,
+            allow_manual: bool = True) -> None:
+        """Submit an analysis against the current confirmation in one transaction.
+
+        ``policy`` opts service submissions into authoritative label fusion. A
+        writer lock must precede the label read: a review can finish while a
+        detector is running, or immediately before this call acquires its lock.
+        Incomplete analyses are reconciled for display without replacing a
+        previously successful analysis. ``allow_manual=False`` rejects the old
+        version's confirmation if the file changed or vanished during analysis.
+        """
         with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO censor_probe (path, size, mtime, duration, number, provider,"
-                " state, confidence, needs_review, reason, evidence, candidates,"
-                " visual_score, elapsed, error, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
-                " ON CONFLICT(path) DO UPDATE SET"
-                " size=excluded.size, mtime=excluded.mtime, duration=excluded.duration,"
-                " number=excluded.number, provider=excluded.provider, state=excluded.state,"
-                " confidence=excluded.confidence, needs_review=excluded.needs_review,"
-                " reason=excluded.reason, evidence=excluded.evidence,"
-                " candidates=excluded.candidates, visual_score=excluded.visual_score,"
-                " elapsed=excluded.elapsed, error=excluded.error, updated_at=excluded.updated_at",
-                (
-                    str(result.path),
-                    int(result.size),
-                    float(result.mtime),
-                    float(result.duration),
-                    result.number,
-                    result.provider,
-                    result.verdict.state.value,
-                    float(result.verdict.confidence),
-                    1 if result.verdict.needs_review else 0,
-                    result.verdict.reason,
-                    _dump_evidence(result.verdict.evidence),
-                    _dump_candidates(result.candidates),
-                    float(result.visual_score),
-                    float(result.elapsed),
-                    result.error or "",
-                    _now(),
-                ),
-            )
-            conn.execute(
-                "UPDATE censor_probe SET file_identity=?, analysis_signature=?, "
-                "status=?, sampled_frames=?, analyzed_frames=?, detector_runs=? WHERE path=?",
-                (
-                    result.file_identity,
-                    result.analysis_signature,
-                    result.status.value,
-                    result.sampled_frames,
-                    result.analyzed_frames,
-                    json.dumps(result.detector_runs, ensure_ascii=False),
-                    str(result.path),
-                ),
-            )
+            conn.execute('BEGIN IMMEDIATE')
+            if policy is not None:
+                self._reconcile_result(conn, result, policy, allow_manual=allow_manual)
+            if persist:
+                self._write_result(conn, result)
+
+    @staticmethod
+    def _reconcile_result(conn, result, policy, *, allow_manual=True):
+        from censor.fusion import fuse
+
+        row = conn.execute(
+            "SELECT state,note FROM censor_label_history h WHERE path=? AND file_identity=? "
+            "AND NOT EXISTS (SELECT 1 FROM censor_label_revocations r "
+            "WHERE r.path=h.path AND r.file_identity=h.file_identity)",
+            (str(result.path), result.file_identity),
+        ).fetchone()
+        evidence = [ev for ev in result.verdict.evidence if ev.source is not EvidenceSource.MANUAL]
+        if allow_manual and row and row[0] in (CensorState.CENSORED.value, CensorState.UNCENSORED.value):
+            evidence.append(Evidence(EvidenceSource.MANUAL, CensorState(row[0]), 1., row[1] or '人工确认'))
+        result.verdict = fuse(evidence, policy)
+        if result.status is not ProcessingStatus.COMPLETED:
+            if result.verdict.of(EvidenceSource.MANUAL) is None:
+                result.verdict = fuse([], policy)
+                result.verdict.evidence = evidence
+                result.verdict.needs_review = True
+                result.verdict.reason = result.error or result.status.label
+            else:
+                result.verdict.reason += '；最近分析未完成：' + (result.error or result.status.label)
+
+    @staticmethod
+    def _write_result(conn, result):
+        conn.execute(
+            "INSERT INTO censor_probe (path, size, mtime, duration, number, provider,"
+            " state, confidence, needs_review, reason, evidence, candidates,"
+            " visual_score, elapsed, error, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(path) DO UPDATE SET"
+            " size=excluded.size, mtime=excluded.mtime, duration=excluded.duration,"
+            " number=excluded.number, provider=excluded.provider, state=excluded.state,"
+            " confidence=excluded.confidence, needs_review=excluded.needs_review,"
+            " reason=excluded.reason, evidence=excluded.evidence,"
+            " candidates=excluded.candidates, visual_score=excluded.visual_score,"
+            " elapsed=excluded.elapsed, error=excluded.error, updated_at=excluded.updated_at",
+            (
+                str(result.path),
+                int(result.size),
+                float(result.mtime),
+                float(result.duration),
+                result.number,
+                result.provider,
+                result.verdict.state.value,
+                float(result.verdict.confidence),
+                1 if result.verdict.needs_review else 0,
+                result.verdict.reason,
+                _dump_evidence(result.verdict.evidence),
+                _dump_candidates(result.candidates),
+                float(result.visual_score),
+                float(result.elapsed),
+                result.error or "",
+                _now(),
+            ),
+        )
+        conn.execute(
+            "UPDATE censor_probe SET file_identity=?, analysis_signature=?, "
+            "status=?, sampled_frames=?, analyzed_frames=?, detector_runs=? WHERE path=?",
+            (
+                result.file_identity,
+                result.analysis_signature,
+                result.status.value,
+                result.sampled_frames,
+                result.analyzed_frames,
+                json.dumps(result.detector_runs, ensure_ascii=False),
+                str(result.path),
+            ),
+        )
 
     def delete(self, path: str) -> None:
         with self._connect() as conn:
@@ -518,9 +569,11 @@ class VerdictStore:
 
     # ── 人工标注 ──
     def set_label(
-        self, path: str, state: CensorState, note: str = "", *, file_identity: str = ""
+        self, path: str, state: CensorState, note: str = "", *, file_identity: str = "",
+        result: VideoVerdict | None = None, policy=None,
     ) -> None:
         with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             conn.execute(
                 "INSERT INTO censor_label (path, state, note, labeled_at) VALUES (?,?,?,?)"
                 " ON CONFLICT(path) DO UPDATE SET state=excluded.state,"
@@ -537,6 +590,9 @@ class VerdictStore:
                          (str(path), file_identity))
             conn.execute("INSERT INTO censor_label_events(path,file_identity,state,note,created_at) "
                          "VALUES (?,?,?,?,?)", (str(path), file_identity, state.value, note, _now()))
+            if result is not None:
+                self._reconcile_result(conn, result, policy)
+                self._write_result(conn, result)
 
     def get_label(
         self, path: str, *, file_identity: str | None = None
@@ -581,13 +637,25 @@ class VerdictStore:
             conn.execute("DELETE FROM censor_label_revocations")
             conn.execute("DELETE FROM censor_label_events")
 
-    def remove_label(self, path: str, file_identity: str) -> None:
+    def remove_label(self, path: str, file_identity: str, *, policy=None) -> VideoVerdict | None:
         with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             conn.execute("DELETE FROM censor_label WHERE path=?", (str(path),))
             conn.execute("INSERT OR REPLACE INTO censor_label_revocations VALUES (?,?,?)",
                          (str(path), file_identity, _now()))
             conn.execute("INSERT INTO censor_label_events(path,file_identity,state,note,created_at) "
                          "VALUES (?,?,NULL,?,?)", (str(path), file_identity, "撤回人工确认", _now()))
+            if policy is not None:
+                row = conn.execute(f'SELECT {_RESULT_COLUMNS} FROM censor_probe WHERE path=?',
+                                   (str(path),)).fetchone()
+                result = self._decode_row(str(path), row, file_identity=file_identity)
+                if result is not None:
+                    self._reconcile_result(conn, result, policy)
+                    # A manual-only run may have skipped the visual detectors.
+                    result.analysis_signature = ''
+                    self._write_result(conn, result)
+                return result
+        return None
 
     def get_many(self, paths: Iterable[str]) -> dict[str, VideoVerdict]:
         keys = list(dict.fromkeys(str(p) for p in paths))
@@ -637,12 +705,12 @@ class VerdictStore:
         # Stream rows from one snapshot instead of opening a connection per
         # video or materializing the entire history just to display one page.
         with self._connect() as conn:
+            conn.execute('BEGIN')
             rows = conn.execute(
-                f"SELECT path,{_RESULT_COLUMNS} "
-                "FROM censor_probe WHERE needs_review = 1 OR state = 'censored' "
-                "ORDER BY visual_score DESC, updated_at DESC,path")
+                f'SELECT {_HISTORY_COLUMNS} {_HISTORY_FROM} '
+                'ORDER BY p.visual_score DESC,p.updated_at DESC,p.path')
             for row in rows:
-                item = self._decode_row(row[0], row[1:])
+                item = self._project_history_row(row)
                 if item is not None and needs_review(item):
                     out.append(item)
                     if len(out) >= int(limit):
@@ -684,17 +752,41 @@ class VerdictStore:
         """Compatibility list API; use history_page for a durable paging cursor."""
         return self.history_page(limit, offset)['records']
 
+    def _project_history_row(self, row):
+        """Repair only the displayed confirmation, leaving the saved row intact."""
+        result = self._decode_row(row[0], row[1:-2])
+        if result is None:
+            return None
+        current = row[-2] in (CensorState.CENSORED.value, CensorState.UNCENSORED.value)
+        had_manual = result.verdict.of(EvidenceSource.MANUAL) is not None
+        if not current and not had_manual:
+            return result
+        from censor.fusion import fuse
+        evidence = [ev for ev in result.verdict.evidence if ev.source is not EvidenceSource.MANUAL]
+        if current:
+            evidence.append(Evidence(EvidenceSource.MANUAL, CensorState(row[-2]), 1., row[-1] or '人工确认'))
+        result.verdict = fuse(evidence)
+        if result.status is not ProcessingStatus.COMPLETED:
+            if not current:
+                result.verdict = fuse([])
+                result.verdict.evidence = evidence
+                result.verdict.needs_review = True
+                result.verdict.reason = result.error or result.status.label
+            else:
+                result.verdict.reason += '；最近分析未完成：' + (result.error or result.status.label)
+        return result
+
     def history_page(self, limit: int = 500, offset: int = 0) -> dict:
         limit, offset = max(0, int(limit)), max(0, int(offset))
         if not limit:
             return dict(records=[], next_offset=offset, has_more=False)
         with self._connect() as conn:
-            rows = conn.execute(f'SELECT path,{_RESULT_COLUMNS} FROM censor_probe '
-                                'ORDER BY updated_at DESC,path LIMIT ? OFFSET ?',
+            rows = conn.execute(f'SELECT {_HISTORY_COLUMNS} {_HISTORY_FROM} '
+                                'ORDER BY p.updated_at DESC,p.path LIMIT ? OFFSET ?',
                                 (limit + 1, offset)).fetchall()
         records = []
         for row in rows[:limit]:
-            result = self._decode_row(row[0], row[1:])
+            result = self._project_history_row(row)
             if result is not None:
                 records.append(result)
         return dict(records=records, next_offset=offset + min(len(rows), limit),
@@ -706,8 +798,8 @@ class VerdictStore:
         with self._connect() as conn:
             conn.execute('BEGIN')
             total = conn.execute('SELECT count(*) FROM censor_probe').fetchone()[0]
-            cursor = conn.execute(f'SELECT path,{_RESULT_COLUMNS} FROM censor_probe '
-                                  'ORDER BY updated_at DESC,path')
+            cursor = conn.execute(f'SELECT {_HISTORY_COLUMNS} {_HISTORY_FROM} '
+                                  'ORDER BY p.updated_at DESC,p.path')
             offset = 0
             while True:
                 rows = cursor.fetchmany(page_size)
@@ -715,7 +807,7 @@ class VerdictStore:
                     break
                 records = []
                 for row in rows:
-                    result = self._decode_row(row[0], row[1:])
+                    result = self._project_history_row(row)
                     if result is not None:
                         records.append(result)
                 offset += len(rows)

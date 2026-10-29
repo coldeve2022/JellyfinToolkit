@@ -49,6 +49,8 @@ class CensorOptions:
     detectors: Optional[list[str]] = None  # None = 全部启用的检测器
     frame_samples: Optional[int] = None  # Explicit deeper inspection, without global config mutation.
     recheck_manual: bool = False
+    evidence_frames: Optional[int] = None
+    evidence_only: bool = False
 
 
 class CensorService:
@@ -140,6 +142,8 @@ class CensorService:
             identity = identify_file(target).serialize()
             active = self._active_detectors(opts)
             label = self.store.get_label(target, file_identity=identity)
+            if label is not None and label[0] is CensorState.UNKNOWN:
+                label = None
             signature = self._analysis_signature(
                 target, opts, active, server_tags or [], label)
             cached = self._find_cached(target, size, mtime, identity, signature,
@@ -152,11 +156,7 @@ class CensorService:
 
     def _restore_cached(self, cached, label):
         """Apply the current version's confirmation identically on both paths."""
-        evidence = [ev for ev in cached.verdict.evidence
-                    if ev.source is not EvidenceSource.MANUAL]
-        if label is not None:
-            evidence.append(Evidence(EvidenceSource.MANUAL, label[0], 1.0, label[1]))
-        cached.verdict = fuse(evidence, self.policy)
+        self.store.put(cached, policy=self.policy, persist=False)
         cached.elapsed = 0.0
         cached.cache_hit = True
         return cached
@@ -191,6 +191,9 @@ class CensorService:
         opts = options or CensorOptions()
         target = str(path)
         start = time.perf_counter()
+        if opts.evidence_only:
+            return self.refresh_evidence(target, count=opts.evidence_frames or 24,
+                should_stop=should_stop, log=log, progress=progress)
         notify = progress or (lambda stage, done, total: None)
         notify('校验文件与缓存', 0, 0)
         try:
@@ -216,6 +219,8 @@ class CensorService:
             identity = identify_file(target).serialize()
             active = self._active_detectors(opts)
             label = self.store.get_label(target, file_identity=identity)
+            if label is not None and label[0] is CensorState.UNKNOWN:
+                label = None
             signature = self._analysis_signature(target, opts, active, server_tags or [], label)
             if not opts.force and opts.use_cache:
                 cached = self._find_cached(target, size, mtime, identity, signature,
@@ -246,6 +251,12 @@ class CensorService:
         self._active_work_dirs.add(str(ctx.work_dir.resolve()))
         if opts.frame_samples is not None:
             ctx.shared['requested_samples'] = max(6, min(600, int(opts.frame_samples)))
+        if opts.evidence_frames is not None:
+            from censor.evidence_refresh import next_round
+            previous_review = self.store.get(target, file_identity=identity)
+            review_round, phase = next_round(previous_review)
+            ctx.shared.update(evidence_frames=max(1, min(60, int(opts.evidence_frames))),
+                              evidence_round=review_round, sample_phase=phase)
         # 只有真要抽帧时才去解析 ffmpeg —— 纯元数据模式不该依赖外部工具
         if any("ffmpeg" in d.capabilities for d in active):
             ctx.ffmpeg, ctx.ffprobe = self.tools()
@@ -318,6 +329,10 @@ class CensorService:
                         "reused_frames": int(ctx.shared.get("reused_frames", 0)),
                         "triage": deepcopy(ctx.shared.get("triage", {})),
                     }
+                    if 'evidence_frames' in ctx.shared:
+                        runs[detector.name].update(evidence_round=ctx.shared['evidence_round'],
+                            sample_phase=ctx.shared['sample_phase'],
+                            evidence_target=ctx.shared['evidence_frames'])
                     all_candidates.extend(ctx.shared.get("candidates") or [])
                     maximum_score = max(maximum_score, float(ctx.shared.get("visual_score") or 0.0))
 
@@ -325,11 +340,14 @@ class CensorService:
             status = ProcessingStatus.CANCELLED
         elif error:
             status = ProcessingStatus.PARTIAL if finished else ProcessingStatus.FAILED
+        identity_matches = True
         try:
             if identify_file(target).serialize() != identity:
+                identity_matches = False
                 status = ProcessingStatus.PARTIAL
                 error += "；文件在扫描期间发生变化，结果未缓存"
         except OSError as exc:
+            identity_matches = False
             status = ProcessingStatus.PARTIAL
             error += f"；文件已不可读取: {exc}"
 
@@ -350,8 +368,11 @@ class CensorService:
             verdict=verdict,
             candidates=select_candidates(
                 all_candidates,
-                gap_seconds=float(self._cfg_get("censor_candidate_gap_seconds", 10.0)),
-                top=int(self._cfg_get("censor_candidates", 18)),
+                gap_seconds=(min(float(self._cfg_get("censor_candidate_gap_seconds", 10.0)),
+                    ctx.duration / (2 * max(1, opts.evidence_frames)))
+                    if opts.evidence_frames and ctx.duration > 0 else
+                    float(self._cfg_get("censor_candidate_gap_seconds", 10.0))),
+                top=int(opts.evidence_frames or self._cfg_get("censor_candidates", 18)),
             ),
             visual_score=maximum_score,
             elapsed=time.perf_counter() - start,
@@ -364,8 +385,9 @@ class CensorService:
             detector_runs=runs,
         )
         try:
-            if opts.use_cache and status is ProcessingStatus.COMPLETED:
-                self.store.put(result)
+            self.store.put(result, policy=self.policy,
+                           persist=opts.use_cache and status is ProcessingStatus.COMPLETED,
+                           allow_manual=identity_matches)
         except Exception as exc:  # noqa: BLE001 - 缓存写失败不该影响结果
             log(f"⚠️ 结果缓存写入失败：{exc}")
         self._active_work_dirs.discard(str(ctx.work_dir.resolve()))
@@ -445,6 +467,12 @@ class CensorService:
         analysis_options = asdict(opts)
         for control in ("force", "use_cache"):
             analysis_options.pop(control)
+        # Preserve the normal pre-upgrade analysis signature. These options
+        # only describe an explicitly requested evidence operation.
+        if analysis_options.get('evidence_frames') is None:
+            analysis_options.pop('evidence_frames', None)
+        if not analysis_options.get('evidence_only'):
+            analysis_options.pop('evidence_only', None)
         payload = {
             "schema": 2,
             "options": analysis_options,
@@ -458,6 +486,12 @@ class CensorService:
         }
         raw = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def refresh_evidence(self, path, *, count=24, base=None,
+                         should_stop=_never_stop, log=_noop, progress=None):
+        from censor.evidence_refresh import refresh_evidence
+        return refresh_evidence(self, path, count=count, base=base,
+            should_stop=should_stop, log=log, progress=progress)
 
     # ── 批量 ──
     def probe_many(
@@ -494,6 +528,8 @@ class CensorService:
         ``base`` 用于"这条结果还没写进缓存"的场景（例如界面刚拿到实时结果），
         传进来就能保住原有证据，不会只剩一条"人工确认"。
         """
+        if state not in (CensorState.CENSORED, CensorState.UNCENSORED):
+            raise ValueError('人工确认必须明确选择有像素化或未见像素化；未定请保留待复核')
         target = str(path)
         file_info = identify_file(target)
         identity = file_info.serialize()
@@ -501,7 +537,6 @@ class CensorService:
             raise ValueError("确认依据不属于当前文件")
         if base is not None and base.file_identity and base.file_identity != identity:
             raise ValueError("文件已替换，请重新扫描后确认")
-        self.store.set_label(target, state, note, file_identity=identity)
         if base is not None and base.status is ProcessingStatus.COMPLETED and not base.error:
             cached = deepcopy(base)
         else:
@@ -521,7 +556,8 @@ class CensorService:
         others = [ev for ev in cached.verdict.evidence if ev.source is not EvidenceSource.MANUAL]
         evidence = [Evidence(EvidenceSource.MANUAL, state, 1.0, note or "人工确认")]
         cached.verdict = fuse(evidence + others, self.policy)
-        self.store.put(cached)
+        self.store.set_label(target, state, note, file_identity=identity,
+                             result=cached, policy=self.policy)
         self._queue_review_metadata(target, identity, state)
         return cached
 
@@ -545,13 +581,7 @@ class CensorService:
         target = str(path)
         identity = identify_file(target).serialize()
         had_label = self.store.get_label(target, file_identity=identity) is not None
-        self.store.remove_label(target, identity)
-        cached = self.store.get(target, file_identity=identity)
-        if cached is not None:
-            cached.verdict = fuse([e for e in cached.verdict.evidence
-                                   if e.source is not EvidenceSource.MANUAL], self.policy)
-            cached.analysis_signature = ""  # A prior manual result may have skipped visuals.
-            self.store.put(cached)
+        cached = self.store.remove_label(target, identity, policy=self.policy)
         if had_label:
             self._queue_review_metadata(target, identity, None)
         return cached

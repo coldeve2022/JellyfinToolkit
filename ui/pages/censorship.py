@@ -10,8 +10,8 @@ import os
 from collections import Counter, deque
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QItemSelectionModel
+from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
     QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
@@ -28,7 +28,7 @@ from censor.releases import ReleaseService
 from censor.releases.models import normalize_number
 from censor.review_route import (
     ReviewBucket, WorkflowView, awaits_replacement, bucket as review_bucket,
-    bucket_label, conclusion_label, in_view, needs_review, category,
+    bucket_label, conclusion_label, in_view, category,
     next_review_target,
 )
 from ui.censor_gallery import EvidenceGallery
@@ -140,6 +140,13 @@ class CensorshipPage(QWidget):
         self._last_status = {}
         self._batching = False
         self._finishing = False
+        self._batch_review_navigation = None
+        self._evidence_requests = []
+        self._evidence_queue_epoch = 0
+        self._evidence_queue_timer = QTimer(self)
+        self._evidence_queue_timer.setSingleShot(True)
+        self._evidence_queue_timer.setInterval(100)
+        self._evidence_queue_timer.timeout.connect(self._pump_evidence_requests)
         self._render_timer = QTimer(self)
         self._render_timer.setInterval(60)
         self._render_timer.timeout.connect(self._drain_results)
@@ -150,7 +157,6 @@ class CensorshipPage(QWidget):
         self._flash_timer.timeout.connect(self._restore_progress_title)
         self._results: dict[str, VideoVerdict] = {}
         self._submitted: list[str] = []
-        self._row_of: dict[str, int] = {}
         self._current: Optional[VideoVerdict] = None
         # ── 无码版本检索：结果按番号缓存，同一部片的多份副本共用 ──
         self._release_service = ReleaseService(cfg)
@@ -167,6 +173,8 @@ class CensorshipPage(QWidget):
         from ui.jellyfin_review_controls import JellyfinReviewController
         self.library_review = JellyfinReviewController(self)
         self._setup_ui()
+        from ui.censor_results import ReviewTablePresenter
+        self._table_presenter = ReviewTablePresenter(self, _STATE_COLOR, _BUCKET_COLOR, _evidence_grade)
         self.library_review.changed.connect(self.library_status.setText)
         self.library_status.setText(self.library_review.last_status)
         self.library_review.start_auto_refresh()
@@ -219,6 +227,7 @@ class CensorshipPage(QWidget):
         menu.addAction('检查设置…',self._show_settings)
         menu.addAction('使用说明',self._show_help)
         menu.addAction('清理过期无引用证据图', self._cleanup_evidence)
+        menu.addAction('补抓当前筛选中缺图的视频', self._refresh_missing_evidence)
         menu.addAction('清空当前列表（保留记录）',self._clear)
         self.more_button.setMenu(menu)
         toolbar.addWidget(self.more_button)
@@ -258,6 +267,8 @@ class CensorshipPage(QWidget):
         # 不再用一个菜单同时表达结论、处理进度和业务动作（那是上一版的病根）。
         filter_row.addWidget(QLabel('视图：'))
         self.combo_filter = QComboBox()
+        self.combo_filter.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.combo_filter.setToolTip('数量为当前其他筛选命中 / 此视图已加载总数；两者相同时只显示一个数')
         self.combo_filter.setProperty('taskInteractive',True)
         for view in WorkflowView:
             self.combo_filter.addItem(view.label, view.value)
@@ -326,6 +337,7 @@ class CensorshipPage(QWidget):
         for column in (1,4,5):
             self.table.setColumnHidden(column,True)
         self.table.itemSelectionChanged.connect(self._on_row_selected)
+        self.table.currentCellChanged.connect(lambda *_: self._on_row_selected())
         # 右键菜单兜底：按钮被布局挤走时也能标记（这是最符合直觉的第二个入口）
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_row_menu)
@@ -339,6 +351,18 @@ class CensorshipPage(QWidget):
             shortcut.setAutoRepeat(False)
             shortcut.activated.connect(callback)
             self._table_shortcuts.append(shortcut)
+        evidence_actions = QHBoxLayout()
+        self.btn_refresh_evidence = QPushButton('补抓选中证据图')
+        self.btn_refresh_evidence.setToolTip('支持 Ctrl / Shift 多选；只补充参考画面，保留检测结论和人工确认。忙碌时加入队列')
+        self.btn_refresh_evidence.clicked.connect(self._refresh_selected_evidence)
+        self.btn_deep_selected = QPushButton('深入检查选中项')
+        self.btn_deep_selected.setToolTip('批量重新分析，增加取样和展示图片；后续轮次改变取样时刻，人工确认保留')
+        self.btn_deep_selected.clicked.connect(self._deepen_current)
+        for button in (self.btn_refresh_evidence, self.btn_deep_selected):
+            button.setProperty('taskInteractive', True)
+            button.setMinimumHeight(28)
+            evidence_actions.addWidget(button)
+        left_lay.addLayout(evidence_actions)
         left_lay.addWidget(self.table)
         splitter.addWidget(left)
 
@@ -353,7 +377,8 @@ class CensorshipPage(QWidget):
         review_header.addWidget(self.lbl_review_title,1)
         current_menu = QPushButton('此视频')
         actions = QMenu(current_menu)
-        actions.addAction('深入检查（3倍采样）',self._deepen_current)
+        actions.addAction('补抓选中证据图', self._refresh_selected_evidence)
+        actions.addAction('深入检查选中项（更多画面）',self._deepen_current)
         actions.addAction('撤回当前人工标记', self._withdraw_current)
         actions.addAction('交给 Lada 处理', self._send_lada)
         current_menu.setMenu(actions)
@@ -383,7 +408,8 @@ class CensorshipPage(QWidget):
             button.setShortcut(key)
             button.setToolTip(f'{key}；{hint}；保存后自动进入下一条')
             button.setProperty('cssClass',style)
-            button.clicked.connect(lambda _,value=state:self._label(value))
+            button.setProperty('taskReviewInteractive', True)
+            button.clicked.connect(lambda _,value=state:self._confirm_selected(value))
             # 不禁用：没选中行时点击会给明确提示，比灰着让人猜更好
             button.setMinimumHeight(28)
             button.setMinimumWidth(104)
@@ -393,7 +419,7 @@ class CensorshipPage(QWidget):
         self.btn_next = next_button
         next_button.setProperty('taskInteractive',True)
         next_button.setShortcut('Alt+3')
-        next_button.clicked.connect(lambda:self._advance_review(self._current.path if self._current else ''))
+        next_button.clicked.connect(self._next_review)
         row.addWidget(next_button)
         right_lay.addLayout(row)
         # 顺序是"先确认有没有无码版，再替换"：所以这里只负责把选中项送去核查，
@@ -468,7 +494,23 @@ class CensorshipPage(QWidget):
             self.table.setColumnWidth(7, 82)
             self.workspace.state['jellyfin_columns_added'] = True
         menu.addSeparator()
-        menu.addMenu(self.workspace.menu(self.more_button)).setText('工作区布局与偏好')
+        layout_menu = self.workspace.menu(self.more_button)
+        presets = layout_menu.addMenu('布局预设')
+        for title, value in [('快速复核', 'review'), ('诊断与依据', 'diagnostic'), ('显示全部列', 'all')]:
+            presets.addAction(title, lambda checked=False, name=value: self._apply_review_layout(name))
+        remember = layout_menu.addAction('下次启动记住当前视图')
+        remember.setCheckable(True)
+        remember.setChecked(self.workspace.state.get('remember_view') is True)
+        remember.toggled.connect(self._set_remember_view)
+        layout_menu.aboutToShow.connect(lambda: remember.setChecked(self.workspace.state.get('remember_view') is True))
+        menu.addMenu(layout_menu).setText('工作区布局与偏好')
+
+    def _apply_review_layout(self, name):
+        self._table_presenter.apply_layout(name)
+
+    def _set_remember_view(self, enabled):
+        self.workspace.state['remember_view'] = bool(enabled)
+        self.workspace.save()
 
     def _show_settings(self):
         if not busy(self):
@@ -681,7 +723,8 @@ class CensorshipPage(QWidget):
             exclude_keywords=self.cfg.exclude_path_keywords,
         ))
 
-    def _start_scan(self, paths: list[str], *, manual_deferred=False, force=False, deep=False) -> None:
+    def _start_scan(self, paths: list[str], *, manual_deferred=False, force=False, deep=False,
+                    evidence_only=False, missing_only=False) -> None:
         # 运行中再拖进来：不许替换正在跑的线程（历史 bug：新线程顶掉旧线程 → 漏扫）
         if self._worker is not None and self._worker.isRunning():
             self._stats_label.setText("扫描进行中，请等待完成后再添加")
@@ -696,18 +739,34 @@ class CensorshipPage(QWidget):
             return
 
         options = CensorOptions(
-            detect_visual=bool(self.cfg.censor_visual_enabled), force=force,
+            detect_visual=(not evidence_only and (deep or bool(self.cfg.censor_visual_enabled))), force=force,
             recheck_manual=deep,
             frame_samples=min(600, self.cfg.censor_frame_samples * 3) if deep else None,
+            evidence_frames=(24 if evidence_only else
+                             min(60, max(24, self.cfg.censor_candidates * 2)) if deep else None),
+            evidence_only=evidence_only,
         )
         from copy import copy, deepcopy
         from ui.services import CallWorker
         service = copy(self._service)
         service.cfg = deepcopy(self.cfg)
+        if deep:
+            service.cfg.censor_visual_enabled = True
+            if 'visual.mosaic_cv' not in service.cfg.censor_detectors:
+                service.cfg.censor_detectors = [*service.cfg.censor_detectors, 'visual.mosaic_cv']
+        bases = ({path: deepcopy(self._results[path]) for path in files if path in self._results}
+                 if evidence_only else {})
+        self._finishing = False
         self._set_running(True)
         self.progress_title.setText('后台校验文件身份与缓存…')
-        worker = CallWorker(lambda stopped: self._partition_reusable(files, options,
-            should_stop=stopped, service=service))
+        def prepare(stopped):
+            if evidence_only:
+                from censor.evidence_refresh import has_evidence
+                return ([path for path in files if not stopped() and
+                    (not missing_only or path not in bases or not has_evidence(bases[path]))], [])
+            return self._partition_reusable(files, options, should_stop=stopped, service=service)
+        worker = CallWorker(prepare)
+        worker.evidence_bases = bases
         worker.delivery_context = self._scan_context()
         worker.media_epochs = dict(self._media_epochs)
         worker.analysis_service = service
@@ -735,26 +794,32 @@ class CensorshipPage(QWidget):
             self._stats_label.setText('配置或范围已变更，旧准备结果已丢弃，请重新开始')
             return
         todo, reused = partition
+        for result in reused:
+            result._delivery_context = worker.delivery_context
+            result._media_epoch = worker.media_epochs.get(result.path, 0)
         def valid(path):
             return worker.media_epochs.get(path, 0) == self._media_epochs.get(path, 0)
         self._prepared_scan(([p for p in todo if valid(p)], [r for r in reused if valid(r.path)]),
-                            worker.scan_options, worker.manual_deferred, service=worker.analysis_service)
+                            worker.scan_options, worker.manual_deferred, service=worker.analysis_service,
+                            evidence_bases=getattr(worker, 'evidence_bases', None))
 
     @Slot()
     def _preparation_finished(self):
         if not self.sender().delivered:
             self._set_running(False)
 
-    def _prepared_scan(self, partition, options, manual_deferred, *, service=None):
+    def _prepared_scan(self, partition, options, manual_deferred, *, service=None, evidence_bases=None):
         todo, reused = partition
         if reused:
-            self._batching = True
+            self._on_discovered([result.path for result in reused])
             for result in reused:
-                self._on_item(result)
-            self._batching = False
+                self._queue_item(result)
             self._refresh_stats()
         if not todo:
             self._set_running(False)
+            if options.evidence_only:
+                self._flash('当前筛选范围内没有缺图视频，无需补抓')
+                return
             self._stats_label.setText(
                 f"{len(reused)} 个视频沿用上次结果，本次无需重查"
                 "（要强制重算请用「更多 → 忽略缓存重新分析」）")
@@ -767,6 +832,7 @@ class CensorshipPage(QWidget):
             service or self._service, files, options,
             workers=int(getattr(self.cfg, "censor_workers", 4) or 4),
             manual_deferred=manual_deferred,
+            evidence_bases=evidence_bases,
         )
         self._worker.delivery_context = self._scan_context()
         self._worker.media_epochs = dict(self._media_epochs)
@@ -775,7 +841,7 @@ class CensorshipPage(QWidget):
         self._worker.task_status.connect(self._on_task_status)
         self._worker.error.connect(self._on_log)
         self._worker.all_done.connect(self._on_all_done)
-        start_task(self, self._worker, "视频像素化检测")
+        start_task(self, self._worker, '批量补抓证据图' if options.evidence_only else "视频像素化检测")
 
     def _partition_reusable(self, files: list[str], options: CensorOptions, *, should_stop=None, service=None):
         """把"已有有效结果"的文件挑出来，其余才是要真算的。
@@ -784,29 +850,74 @@ class CensorshipPage(QWidget):
         但文件被换过（大小/修改时间变）、参数或插件版本变过，签名就不匹配，
         照样会重算 —— 不会因为"有缓存"而漏掉该更新的结果。
         """
-        if options.force:
-            return list(files), []
-        todo: list[str] = []
-        reused = []
-        for path in files:
-            if should_stop and should_stop():
-                break
-            cached = (service or self._service).cached_result(path, options)
-            if cached is None:
-                todo.append(path)
-            else:
-                reused.append(cached)
-        return todo, reused
+        from censor.scan_plan import partition_reusable
+        return partition_reusable(service or self._service, files, options,
+                                  jobs=self._jobs, should_stop=should_stop)
 
     def _on_discovered(self, paths):
+        worker = self.sender()
+        context = getattr(worker, 'delivery_context', None)
+        if context is not None and context != self._scan_context():
+            return
         seen = set(self._submitted)
-        self._submitted.extend(p for p in paths if p not in seen)
+        for path in paths:
+            if path not in seen:
+                self._submitted.append(path)
+                seen.add(path)
 
     def _deepen_current(self):
-        if self._current is not None:
-            self._start_scan([self._current.path], manual_deferred=True, force=True, deep=True)
+        paths = self._selected_visible_paths()
+        if paths:
+            self._queue_evidence_request(paths, deep=True)
+        else:
+            self._flash('先选择要深入检查的视频；支持 Ctrl / Shift 多选后一次提交')
 
-    def _advance_review(self, after_path):
+    def _refresh_selected_evidence(self):
+        self._queue_evidence_request(self._selected_visible_paths())
+
+    def _refresh_missing_evidence(self):
+        paths = [self.table.item(row, 0).data(Qt.UserRole)
+            for row in range(self.table.rowCount()) if not self.table.isRowHidden(row)]
+        self._queue_evidence_request(paths, missing_only=True)
+
+    def _queue_evidence_request(self, paths, *, deep=False, missing_only=False):
+        paths = list(dict.fromkeys(paths))
+        if not paths:
+            self._flash('先选择视频；支持 Ctrl / Shift 多选，或从“更多”补抓当前筛选范围中的缺图项')
+            return
+        from ui.services import TaskManager
+        TaskManager.instance().track_pending_owner(self)
+        epoch = getattr(self, '_task_epoch', 0)
+        if epoch != self._evidence_queue_epoch:
+            self._evidence_requests.clear()
+        self._evidence_queue_epoch = epoch
+        pending = {p for request in self._evidence_requests
+                   if request[0:2] == (deep, missing_only) for p in request[2]}
+        paths = [path for path in paths if path not in pending]
+        if paths:
+            self._evidence_requests.append((deep, missing_only, paths))
+        self._flash(f'已提交{len(paths)}个视频到本地{"深检" if deep else "补图"}队列；可继续选择其他视频，停止会取消未开始项')
+        self._pump_evidence_requests()
+
+    def _pump_evidence_requests(self):
+        if self._evidence_queue_epoch != getattr(self, '_task_epoch', 0):
+            self._evidence_requests.clear()
+            self._evidence_queue_timer.stop()
+            return
+        if not self._evidence_requests or getattr(self.window(), '_closing', False):
+            return
+        dispatch = getattr(self, '_task_dispatch', None)
+        if busy(self) or self._render_timer.isActive() or (dispatch and dispatch.pending):
+            self._evidence_queue_timer.start()
+            return
+        deep, missing_only, paths = self._evidence_requests.pop(0)
+        kwargs = dict(manual_deferred=True, force=True, deep=True) if deep else dict(
+            force=True, evidence_only=True, missing_only=missing_only)
+        self._start_scan(paths, **kwargs)
+        if self._evidence_requests:
+            self._evidence_queue_timer.start()
+
+    def _advance_review(self, after_path, *, positions=None):
         """跳到**表格里实际可见的**下一个待复核项。
 
         以前这里还会再套一层 `_matches_filter`（按视图/喜欢/播放状态二次过滤）。
@@ -814,24 +925,33 @@ class CensorshipPage(QWidget):
         而用户眼前的列表里明明还有几百条。视图被记成"暂不处理"时尤其明显：
         标记完就不动了，只能回左边列表重新点。
         """
-        positions = [self.table.item(r, 0).data(Qt.UserRole)
-                     for r in range(self.table.rowCount())]
+        if positions is None:
+            positions = self._table_presenter.ordered_paths()
         visible = {self.table.item(r, 0).data(Qt.UserRole)
                    for r in range(self.table.rowCount()) if not self.table.isRowHidden(r)}
 
         def is_candidate(path):
             result = self._results.get(path)
-            return result is not None and needs_review(result)
+            # The current visible scope is the user's review choice. Parked
+            # low-risk/deferred rows still need a human conclusion when opened.
+            return result is not None and review_bucket(result) is not ReviewBucket.CONFIRMED
 
         target = next_review_target(positions, visible, after_path, is_candidate)
         if target:
-            row = next(r for r in range(self.table.rowCount())
-                       if self.table.item(r, 0).data(Qt.UserRole) == target)
+            row = self._table_presenter.row_for(target)
             self.table.selectRow(row)
             self._on_row_selected()
             self.table.scrollToItem(self.table.item(row, 0))
             return
-        self._clear_current_review('当前列表里没有其他待复核的视频；可切换筛选或加载全部历史')
+        self._clear_current_review('当前筛选中没有其他未人工确认的视频；可切换筛选或加载全部历史')
+
+    def _next_review(self):
+        path = self._current.path if self._current else ''
+        if not path:
+            row = self.table.currentRow()
+            item = self.table.item(row, 0) if row >= 0 else None
+            path = item.data(Qt.UserRole) if item else ''
+        self._advance_review(path)
 
     def _clear_current_review(self, message='请选择当前筛选范围内的视频'):
         self._current = None
@@ -960,6 +1080,8 @@ class CensorshipPage(QWidget):
 
     def _stop(self) -> None:
         self._cancel_startup()
+        self._evidence_requests.clear()
+        self._evidence_queue_timer.stop()
         self.metadata_controller.pause()
         if self._history_loading:
             self._history_loading = False
@@ -973,6 +1095,8 @@ class CensorshipPage(QWidget):
 
     def shutdown(self) -> None:
         self._cancel_startup()
+        self._evidence_requests.clear()
+        self._evidence_queue_timer.stop()
         self.library_review.shutdown()
         self.metadata_controller.pause()
         if self._history_loading:
@@ -1013,9 +1137,10 @@ class CensorshipPage(QWidget):
             self._batching = False
             self.table.setSortingEnabled(True)
             self.table.setUpdatesEnabled(True)
-        self._refresh_stats()
+        self._apply_filter()
         if not self._pending_results:
             self._render_timer.stop()
+            self._finish_batch_review_navigation()
             if self._history_loading:
                 self._history_worker.acknowledge()
             if self._finishing:
@@ -1047,8 +1172,6 @@ class CensorshipPage(QWidget):
         if self._current is not None and self._current.path == result.path:
             self._current = result
             self._on_row_selected()
-        if not self._batching:
-            self._refresh_stats()
 
     @staticmethod
     def _record_source(result):
@@ -1057,40 +1180,7 @@ class CensorshipPage(QWidget):
         return '复用分析' if result.cache_hit else '本次结果'
 
     def _insert_row(self, result: VideoVerdict) -> None:
-        if not self._batching:
-            self.table.setSortingEnabled(False)
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        evidence_text = "；".join(t for _, t in explain(result.verdict))
-        values = [
-            os.path.basename(result.path),
-            result.number or "—",
-            conclusion_label(result),
-            bucket_label(result),
-            f"{result.visual_score:.1f}" if result.visual_score else "—",
-            (result.error or evidence_text or result.verdict.reason)[:120],
-            self._record_source(result),
-        ]
-        for col, text in enumerate(values):
-            item = QTableWidgetItem(text)
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            if col == 2:
-                item.setForeground(QColor(_STATE_COLOR.get(result.state, "#333")))
-                item.setToolTip("这部片子画面里有没有码；待复核只是流程状态，不改变结论")
-            if col == 3:
-                item.setForeground(QColor(_BUCKET_COLOR.get(review_bucket(result), "#333")))
-                item.setToolTip(_evidence_grade(result))
-            if col == 0:
-                item.setData(Qt.UserRole, result.path)
-                item.setToolTip(result.path)
-            self.table.setItem(row, col, item)
-        self._set_library_cells(row, result.path)
-        self._row_of[result.path] = row
-        if not self._batching:
-            self.table.setSortingEnabled(True)
-            self._apply_filter()
-        else:
-            self.table.setRowHidden(row, not self._matches_filter(result))
+        self._table_presenter.present(result)
 
     def _on_progress(self, done: int, total: int) -> None:
         self.scan_progress.setRange(0,max(1,total))
@@ -1139,15 +1229,19 @@ class CensorshipPage(QWidget):
 
     def _matches_filter(self, result) -> bool:
         """视图（我现在想干什么）× 结论（有没有码）—— 两个维度独立的 AND。"""
+        if not self._matches_scope(result):
+            return False
+        view = self._current_view()
+        return view is WorkflowView.ALL or in_view(view, review_bucket(result))
+
+    def _matches_scope(self, result) -> bool:
+        """The shared favorite/playback/conclusion/search scope, without view."""
         words = self.search.text().casefold().split()
         item = self.library_review.item(result.path)
         labels = ' '.join(str(value) for value in [item.get('name', ''),
             *(item.get('tags') or []), *(item.get('genres') or [])])
         text = f'{result.path} {result.number} {result.verdict.reason} {labels}'.casefold()
         if not all(word in text for word in words):
-            return False
-        view = self._current_view()
-        if not in_view(view, review_bucket(result)):
             return False
         state = self.combo_conclusion.currentData()
         if state and result.state.value != state:
@@ -1200,9 +1294,7 @@ class CensorshipPage(QWidget):
         self._load_history()
 
     def _selected_visible_paths(self):
-        rows = sorted({index.row() for index in self.table.selectionModel().selectedIndexes()})
-        return [self.table.item(row, 0).data(Qt.UserRole) for row in rows
-                if not self.table.isRowHidden(row)]
+        return self._table_presenter.selected_paths()
 
     def _copy_selection(self, *, paths=False):
         from PySide6.QtWidgets import QApplication
@@ -1239,15 +1331,18 @@ class CensorshipPage(QWidget):
         if isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)):
             return
         if name == 'next':
-            self._advance_review(self._current.path if self._current else '')
+            self._next_review()
         else:
             button = self.btn_censored if name == 'censored' else self.btn_uncensored
             if button.isEnabled():
                 state = CensorState.CENSORED if name == 'censored' else CensorState.UNCENSORED
-                if len(self._selected_visible_paths()) > 1:
-                    self._batch_label(state)
-                else:
-                    self._label(state)
+                self._confirm_selected(state)
+
+    def _confirm_selected(self, state):
+        if len(self._selected_visible_paths()) > 1:
+            self._batch_label(state)
+        else:
+            self._label(state)
 
     def on_config_changed(self):
         from ui.services import refresh_configuration
@@ -1255,23 +1350,31 @@ class CensorshipPage(QWidget):
         self.library_review.reload()
 
     def _apply_filter(self) -> None:
+        projection = self._filter_projection()
+        view = self._current_view()
         for row in range(self.table.rowCount()):
             item = self.table.item(row,0)
-            result = self._results.get(item.data(Qt.UserRole)) if item else None
-            if result is not None:
-                self.table.setRowHidden(row,not self._matches_filter(result))
+            membership = projection['membership'].get(item.data(Qt.UserRole)) if item else None
+            if membership is not None:
+                value, matches = membership
+                self.table.setRowHidden(row, not matches or not in_view(view, value))
         if self._current is not None and not self._matches_filter(self._current):
             if self._selected_visible_paths():
                 self._on_row_selected()
             else:
                 self._clear_current_review()
+        self._render_stats(projection)
 
     # ── 复核 ──
     def _on_row_selected(self) -> None:
-        paths = self._selected_visible_paths()
-        if not paths:
+        presenter = getattr(self, '_table_presenter', None)
+        if presenter is None:
             return
-        path = paths[0]
+        path = presenter.active_path()
+        if path is None:
+            if self._current is not None:
+                self._clear_current_review()
+            return
         result = self._results.get(path)
         if result is None:
             return
@@ -1291,10 +1394,21 @@ class CensorshipPage(QWidget):
         for run in result.detector_runs.values():
             if run.get('status') == 'retained_manual':
                 lines.append('已有当前版本人工确认，保留原始视觉证据；需要新分析可用深入检查。')
+            if run.get('evidence_target'):
+                lines.append(f'深入检查第{run.get("evidence_round", 1)}轮：计划保留最多'
+                    f'{run["evidence_target"]}张画面；本轮改变分层取样时刻，重复内容仍会去重。')
             plan = run.get('triage') or {}
             if plan.get('enabled'):
                 lines.append(f"分组快速检查：{plan.get('group', '')} · {plan.get('sampled_samples', result.sampled_frames)}/{plan.get('planned_samples', '')} 个计划点 · "
                              + ('已补检' if plan.get('refined') else '首轮低风险，非人工确认'))
+        capture = result.detector_runs.get('review.frames')
+        if isinstance(capture, dict):
+            lines.append(f'参考补图第{capture.get("round", 1)}轮：取样{capture.get("sampled", 0)}帧，'
+                f'新增{capture.get("added", 0)}张，重复{capture.get("duplicates", 0)}帧；'
+                f'用时{capture.get("elapsed", 0):.1f}秒；仅补充画面，原检测和人工结论保留。')
+            if capture.get('error'):
+                lines.append('补图提示：' + capture['error'])
+        lines.append(f'当前保留{len(result.candidates)}张证据/参考画面。')
         if result.from_history:
             lines.insert(1,'历史快照尚未校验当前文件；重新添加后将校验文件身份、参数及算法版本。')
         if result.error:
@@ -1305,15 +1419,25 @@ class CensorshipPage(QWidget):
         row = self.table.rowAt(pos.y())
         if row < 0:
             return
-        self.table.selectRow(row)
+        item = self.table.item(row, 0)
+        if item is None:
+            return
+        if item.data(Qt.UserRole) in self._selected_visible_paths():
+            self.table.selectionModel().setCurrentIndex(self.table.model().index(row, 0),
+                QItemSelectionModel.NoUpdate)
+        else:
+            self.table.selectRow(row)
         self._on_row_selected()
         menu = QMenu(self)
-        menu.addAction("标记「有码」", lambda: self._label(CensorState.CENSORED))
-        menu.addAction("标记「无码」", lambda: self._label(CensorState.UNCENSORED))
+        action = menu.addAction("标记「有码」", lambda: self._confirm_selected(CensorState.CENSORED))
+        action.setEnabled(self.btn_censored.isEnabled())
+        action = menu.addAction("标记「无码」", lambda: self._confirm_selected(CensorState.UNCENSORED))
+        action.setEnabled(self.btn_uncensored.isEnabled())
         menu.addSeparator()
-        menu.addAction("深入检查（3倍采样）", self._deepen_current)
-        menu.addAction("下一条", lambda: self._advance_review(
-            self._current.path if self._current else ''))
+        menu.addAction('补抓选中证据图', self._refresh_selected_evidence)
+        menu.addAction('深入检查选中项（更多画面）', self._deepen_current)
+        menu.addAction('补抓当前筛选中缺图的视频', self._refresh_missing_evidence)
+        menu.addAction("下一条", self._next_review)
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _show_thumbs(self, result: VideoVerdict) -> None:
@@ -1339,18 +1463,7 @@ class CensorshipPage(QWidget):
         self.progress_title.setText(f'列表 {len(self._results)} 条 · 选中一项可标记')
 
     def _resolve_current(self):
-        """取当前要标记的那一条：选中 → 当前行 → 第一个可见行。"""
-        if self._current is not None and self._matches_filter(self._current):
-            return self._current
-        row = self.table.currentRow()
-        if row >= 0 and self.table.isRowHidden(row):
-            row = -1
-        if row < 0:
-            rows = [r for r in range(self.table.rowCount()) if not self.table.isRowHidden(r)]
-            row = rows[0] if rows else -1
-        if row < 0:
-            return None
-        self.table.selectRow(row)
+        """Only an explicitly selected visible row may receive a human label."""
         self._on_row_selected()
         return self._current
 
@@ -1358,6 +1471,9 @@ class CensorshipPage(QWidget):
         current = self._resolve_current()
         if current is None:
             total = len(self._results)
+            if any(not self.table.isRowHidden(row) for row in range(self.table.rowCount())):
+                self._flash('请先在表格中选中要确认的视频；当前未保存任何标记。可点“下一条”定位未确认项')
+                return
             self._flash(
                 '没有可标记的行：当前视图'
                 f'（{self.combo_filter.currentText()}）里一行都没有'
@@ -1366,6 +1482,9 @@ class CensorshipPage(QWidget):
             return
         self._current = current
         path = current.path
+        # A confirmation may move this row under conclusion/status sorting.
+        # Continue from the order the user was reviewing before that mutation.
+        review_order = self._table_presenter.ordered_paths()
         try:
             refreshed = self._service.label(path, state, "界面人工确认", base=current)
         except ValueError as exc:
@@ -1407,7 +1526,7 @@ class CensorshipPage(QWidget):
                 self.metadata_controller.schedule()
         self._refresh_stats()
         if self.workspace.state.get('auto_next', True):
-            self._advance_review(path)
+            self._advance_review(path, positions=review_order)
 
     def _withdraw_current(self):
         current = self._resolve_current()
@@ -1432,6 +1551,7 @@ class CensorshipPage(QWidget):
 
     def _batch_label(self, state):
         if busy(self):
+            self._flash('后台任务仍在处理；请稍后批量确认，或只选一条进行单项确认')
             return
         paths = self._selected_visible_paths()
         if not paths:
@@ -1458,6 +1578,11 @@ class CensorshipPage(QWidget):
         from ui.review_controls import BatchConfirmationWorker
         worker = BatchConfirmationWorker(self._service, items, state)
         self._batch_review_worker = worker
+        positions = self._table_presenter.ordered_paths()
+        selected = {item.path for item in items}
+        self._batch_review_navigation = dict(positions=positions, selected=selected,
+            after=next((path for path in reversed(positions) if path in selected), ''),
+            context=self._scan_context(), epoch=getattr(self, '_task_epoch', 0), report=None)
         worker.item_done.connect(self._on_batch_confirmed)
         worker.result.connect(self._on_batch_confirmation_done)
         start_task(self, worker, '批量保存人工确认')
@@ -1476,6 +1601,28 @@ class CensorshipPage(QWidget):
             self.metadata_controller.schedule()
         self._flash(f"批量确认已保存 {report['completed']} 个；失败 {report['fail']} 个"
                     + ('；已停止，已保存的确认保留' if report['cancelled'] else ''))
+        navigation = self._batch_review_navigation
+        if navigation is not None:
+            navigation['report'] = report
+            if not self._pending_results:
+                self._finish_batch_review_navigation()
+
+    def _finish_batch_review_navigation(self):
+        navigation = self._batch_review_navigation
+        if navigation is None or navigation['report'] is None:
+            return
+        self._batch_review_navigation = None
+        report = navigation['report']
+        if (report['fail'] or report['cancelled'] or not report['completed']
+                or not self.workspace.state.get('auto_next', True)
+                or navigation['epoch'] != getattr(self, '_task_epoch', 0)
+                or navigation['context'] != self._scan_context()):
+            return
+        # Do not steal focus if the user has already chosen another video
+        # while the batch was saving or waiting for its render queue.
+        if self._current is not None and self._current.path not in navigation['selected']:
+            return
+        self._advance_review(navigation['after'], positions=navigation['positions'])
 
     def _send_lada(self):
         current = self._resolve_current()
@@ -1497,27 +1644,7 @@ class CensorshipPage(QWidget):
             self._replace_row(result)
 
     def _replace_row(self, result: VideoVerdict) -> None:
-        row = next((r for r in range(self.table.rowCount())
-                    if self.table.item(r, 0).data(Qt.UserRole) == result.path), None)
-        if row is None:
-            return
-        if not self._batching:
-            self.table.setSortingEnabled(False)
-        self.table.item(row, 6).setText(self._record_source(result))
-        self.table.item(row, 2).setText(conclusion_label(result))
-        self.table.item(row, 2).setForeground(QColor(_STATE_COLOR.get(result.state, '#333')))
-        self.table.item(row, 3).setText(bucket_label(result))
-        self.table.item(row, 3).setForeground(QColor(_BUCKET_COLOR.get(review_bucket(result), '#333')))
-        self.table.item(row, 3).setToolTip(_evidence_grade(result))
-        self.table.item(row, 4).setText(f'{result.visual_score:.1f}' if result.visual_score else '—')
-        self.table.item(row, 5).setText(
-            (result.error or "；".join(t for _, t in explain(result.verdict))
-             or result.verdict.reason)[:120])
-        if not self._batching:
-            self.table.setSortingEnabled(True)
-            self._apply_filter()
-        else:
-            self.table.setRowHidden(row, not self._matches_filter(result))
+        self._table_presenter.present(result)
 
     # ── 无码版本检索（网络）──────────────────────────────────────
     # 说明：检索属于"辅助动作"，刻意**不进 TaskManager** ——
@@ -1528,42 +1655,72 @@ class CensorshipPage(QWidget):
             return
         self.table.setRowCount(0)
         self._results.clear()
+        self._evidence_requests.clear()
+        self._evidence_queue_timer.stop()
+        self._batch_review_navigation = None
         self._category_counts.clear()
         self._review_overrides.clear()
         self._pending_results.clear()
         self._render_timer.stop()
         self._submitted.clear()
-        self._row_of.clear()
+        self._table_presenter.clear()
         self._current = None
         self.gallery.show_candidates([])
         self.txt_evidence.clear()
         self._refresh_stats()
 
+    def _filter_projection(self):
+        """Count each row once; the selected view cannot filter its own counts."""
+        counts, scoped, membership = Counter(), Counter(), {}
+        confirmed_censored = 0
+        visible = 0
+        view = self._current_view()
+        for path, result in self._results.items():
+            value = review_bucket(result)
+            matches = self._matches_scope(result)
+            counts[value] += 1
+            membership[path] = (value, matches)
+            if value is ReviewBucket.CONFIRMED and result.state is CensorState.CENSORED:
+                confirmed_censored += 1
+            if matches:
+                scoped[value] += 1
+                visible += int(in_view(view, value))
+        return dict(counts=counts, scoped=scoped, membership=membership,
+                    confirmed_censored=confirmed_censored, visible=visible)
+
+    @staticmethod
+    def _view_totals(counts):
+        return {
+            WorkflowView.TODO: sum(n for value, n in counts.items() if value.is_todo),
+            WorkflowView.ALL: sum(counts.values()),
+            WorkflowView.DONE: counts[ReviewBucket.CONFIRMED],
+            WorkflowView.PARKED: counts[ReviewBucket.LOW_RISK] + counts[ReviewBucket.DEFERRED],
+        }
+
     def _refresh_stats(self) -> None:
+        self._render_stats(self._filter_projection())
+
+    def _render_stats(self, projection) -> None:
         """两段统计，**刻意不混着算**：检查进度和检索进度是两件事。
 
         混在一起（上一版把"可换无码版"塞进同一个计数）会让人分不清
         "还有多少要我看"和"还有多少要去网上查"。
         """
-        counts = Counter(review_bucket(r) for r in self._results.values())
+        counts = projection['counts']
         todo = sum(n for b, n in counts.items() if b.is_todo)
-        confirmed_censored = sum(1 for r in self._results.values() if awaits_replacement(r))
+        confirmed_censored = projection['confirmed_censored']
         confirmed_clean = counts[ReviewBucket.CONFIRMED] - confirmed_censored
-        self._update_view_labels({
-            WorkflowView.TODO: todo,
-            WorkflowView.ALL: len(self._results),
-            WorkflowView.DONE: counts[ReviewBucket.CONFIRMED],
-            WorkflowView.PARKED: counts[ReviewBucket.LOW_RISK] + counts[ReviewBucket.DEFERRED],
-        })
+        self._update_view_labels(self._view_totals(projection['scoped']), self._view_totals(counts))
         self._stats_label.setText(
-            f'列表 {len(self._results)} · 待处理 {todo}'
+            f'列表 {len(self._results)} · 筛选匹配 {sum(projection["scoped"].values())}'
+            f' · 当前显示 {projection["visible"]} · 全列表统计：待处理 {todo}'
             f' · 已确认有码 {confirmed_censored}（在「找无码版」页检索）'
             f' · 已确认无码 {confirmed_clean}'
             f' · 低风险 {counts[ReviewBucket.LOW_RISK]}'
             f' · 已延后 {counts[ReviewBucket.DEFERRED]}'
             + (f' · 正在呈现 {len(self._pending_results)} 条结果' if self._pending_results else ''))
 
-    def _update_view_labels(self, counts: dict) -> None:
+    def _update_view_labels(self, counts: dict, totals=None) -> None:
         """把计数写进下拉项：``待我处理 (37)``。
 
         菜单里带数字是为了让"还有多少活"一眼可见 —— 上一版要逐个点开才知道。
@@ -1576,6 +1733,11 @@ class CensorshipPage(QWidget):
                 continue
             label = view.label
             if value in counts:
-                label = f"{label} ({counts[value]})"
+                total = totals[value] if totals is not None else counts[value]
+                count = counts[value]
+                label = f'{label} ({count})' if count == total else f'{label} ({count} / {total})'
+                self.combo_filter.setItemData(index,
+                    f'当前其他筛选命中 {count}；此视图已加载总数 {total}。切换视图不改变其他视图的计数范围。',
+                    Qt.ToolTipRole)
             if self.combo_filter.itemText(index) != label:
                 self.combo_filter.setItemText(index, label)
