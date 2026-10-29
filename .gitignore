@@ -106,3 +106,7 @@ _exe_data/
 
 # 图标预览（由 tools/make_icon.py --preview 生成，不入库）
 assets/preview/
+
+# desloppify 本地扫描状态（仅本地，不入库）
+.desloppify/
+scorecard.png
