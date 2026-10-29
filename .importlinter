@@ -1,0 +1,43 @@
+# 架构契约（import-linter）
+# 目的：防止"底层反向依赖上层"这类结构退化。只约束真实存在的分层，
+# 不写教条规则（比如强逼 utils 不依赖 censor 的番号解析，那是有意的复用）。
+
+[importlinter]
+root_packages =
+    ui
+    censor
+    utils
+    automation
+    workers
+
+[importlinter:contract:no-ui-imports]
+name = 业务/工具层不得依赖界面层
+type = forbidden
+source_modules =
+    censor
+    utils
+    automation
+    workers
+forbidden_modules =
+    ui
+
+[importlinter:contract:no-worker-imports]
+name = 业务层不得依赖后台任务层
+type = forbidden
+source_modules =
+    censor
+    utils
+forbidden_modules =
+    workers
+    automation
+
+[importlinter:contract:no-page-imports]
+name = 非页面模块不得依赖具体页面
+type = forbidden
+source_modules =
+    censor
+    utils
+    workers
+    automation
+forbidden_modules =
+    ui.pages
