@@ -25,7 +25,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from PySide6.QtCore import Qt, Slot
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QMimeData, QUrl
+from PySide6.QtGui import QColor, QDrag, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -53,6 +54,33 @@ _STATE_COLOR = {
 }
 _STATE_TOKEN = {"confirmed": "success", "likely": "warning", "none": "text_secondary",
                 "unknown": "text_secondary", "todo": "warning"}
+
+
+class _NumberTable(QTableWidget):
+    """找无码版的表格：能把选中行背后的**文件**拖出去。
+
+    表格默认拖出的是单元格文本（番号），拖到 Lada / 资源管理器里没用。
+    这里改成塞文件 URL，接收方就会当成"拖进来一个视频文件"。
+    """
+
+    def __init__(self, rows: int, columns: int, parent=None) -> None:
+        super().__init__(rows, columns, parent)
+        #: 由页面提供：当前要拖出去的文件路径
+        self.path_provider = lambda: []
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragOnly)
+        self.setDefaultDropAction(Qt.CopyAction)
+
+    def startDrag(self, supported_actions) -> None:  # noqa: N802 - Qt 命名
+        paths = [p for p in (self.path_provider() or []) if os.path.isfile(p)]
+        if not paths:
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+        mime.setText("\n".join(paths))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.CopyAction)
 
 
 @dataclass
@@ -108,6 +136,10 @@ class CensorReplacePage(QWidget):
         #: 检查页送来的作品（规范化番号）。非空时只查这些，清单本身仍显示全部。
         self._focus_numbers: set[str] = set()
         self._pending_focus_lookup = False
+        #: 右键「只显示这些」用；空集合 = 不限制
+        self._only_keys: set[str] = set()
+        #: Jellyfin 快照（规范化路径 → 喜欢/播放状态）；空 = 未同步
+        self._review_items: dict = {}
         self._refresh_owner = QWidget(self)
         self._refresh_owner.hide()
         self._current_key: str = ""
@@ -132,6 +164,7 @@ class CensorReplacePage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._reload_review()
         self.refresh()
 
     # ── 界面 ──
@@ -212,12 +245,44 @@ class CensorReplacePage(QWidget):
         for label, key in (('全部', ''), ('确有', 'confirmed'), ('疑似', 'likely'),
                            ('未见', 'none'), ('未查/未完成', 'unknown')):
             self.state_filter.addItem(label, key)
+        # 显式归位：默认必须是"全部"，否则一进来就只剩"确有"，
+        # 用户会以为清单少了一大半（这条以前靠 addItem 的隐式行为，靠不住）
+        self.state_filter.setCurrentIndex(0)
         self.state_filter.currentIndexChanged.connect(self._filter)
         filter_row.addWidget(self.state_filter)
         layout.addLayout(filter_row)
+
+        # 第二行筛选：喜欢 / 播放状态（复用检查页的 Jellyfin 快照，不另做一套口径）
+        library_row = QHBoxLayout()
+        self.combo_favorite = QComboBox()
+        self.combo_favorite.setProperty('taskInteractive', True)
+        for text, value in (('喜欢：全部', 'all'), ('只看喜欢', 'favorite'),
+                            ('只看未喜欢', 'not_favorite'), ('喜欢未同步', 'unknown')):
+            self.combo_favorite.addItem(text, value)
+        self.combo_favorite.setCurrentIndex(0)
+        self.combo_favorite.currentIndexChanged.connect(self._filter)
+        library_row.addWidget(self.combo_favorite)
+        self.combo_playback = QComboBox()
+        self.combo_playback.setProperty('taskInteractive', True)
+        for text, value in (('播放：全部', 'all'), ('未播放', 'unplayed'),
+                            ('播放中', 'progress'), ('已播放', 'played'),
+                            ('播放未同步', 'unknown')):
+            self.combo_playback.addItem(text, value)
+        self.combo_playback.setCurrentIndex(0)
+        self.combo_playback.currentIndexChanged.connect(self._filter)
+        library_row.addWidget(self.combo_playback)
+        self.btn_clear_filters = QPushButton('清除筛选')
+        self.btn_clear_filters.clicked.connect(self._clear_filters)
+        library_row.addWidget(self.btn_clear_filters)
+        library_row.addStretch()
+        self.lbl_filter_note = QLabel('')
+        self.lbl_filter_note.setProperty('cssClass', 'muted-label')
+        library_row.addWidget(self.lbl_filter_note)
+        layout.addLayout(library_row)
         body = QSplitter(Qt.Horizontal)
         self.splitter = body
-        self.table = QTableWidget(0, len(_COLUMNS))
+        self.table = _NumberTable(0, len(_COLUMNS))
+        self.table.path_provider = self._drag_paths
         self.table.setHorizontalHeaderLabels(_COLUMNS)
         self.table.verticalHeader().hide()
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -235,6 +300,8 @@ class CensorReplacePage(QWidget):
         self.table.setColumnWidth(3, 70)
         self.table.setColumnWidth(4, 100)
         self.table.itemSelectionChanged.connect(self._on_row_selected)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._table_menu)
         body.addWidget(self.table)
 
         right = QWidget()
@@ -260,7 +327,8 @@ class CensorReplacePage(QWidget):
         layout.addWidget(body, 1)
         from ui.workspace_preferences import WorkspacePreferences
         self.workspace = WorkspacePreferences(self, 'release', self.table, splitter=body,
-            filters={'search': self.search, 'state': self.state_filter})
+            filters={'search': self.search, 'state': self.state_filter,
+                     'favorite': self.combo_favorite, 'playback': self.combo_playback})
         menu.addMenu(self.workspace.menu(more)).setText('工作区布局与偏好')
 
     # ── 数据 ──
@@ -328,6 +396,7 @@ class CensorReplacePage(QWidget):
 
     def refresh(self) -> None:
         """从库里重建清单：已确认有码 → 按番号聚合。"""
+        self._reload_review()
         self._refresh_version += 1
         if self._refresh_worker is not None:
             self._refresh_dirty = True
@@ -469,10 +538,19 @@ class CensorReplacePage(QWidget):
             counts[row.state_key] += 1
         # 只留 5 个数：原来拼了 9 段，读起来比数字本身还费劲
         checked = counts['confirmed'] + counts['likely'] + counts['none']
-        self.lbl_summary.setText(
+        text = (
             f"{len(rows)} 部 · 已查 {checked} · 待查 {counts['todo']}"
             f" · 有 {counts['confirmed']} · 疑似 {counts['likely']} · 未见 {counts['none']}"
             + (" · 只查送来的这部份" if self._focus_numbers else ""))
+        # 筛选后让人一眼看到"现在还剩几部"，而不是只看到总数
+        visible = sum(1 for i in range(self.table.rowCount()) if not self.table.isRowHidden(i))
+        if visible != len(rows):
+            text += f"（当前筛选可见 {visible}）"
+            if visible == 0 and rows:
+                text += " —— 没有符合条件的结果，点「清除筛选」恢复"
+            if visible == 0 and rows:
+                text += " —— 没有符合条件的结果，点「清除筛选」恢复"
+        self.lbl_summary.setText(text)
         self.lbl_summary.setToolTip(
             f"共 {sum(len(r.paths) for r in rows)} 个文件；可检索 {len(searchable)} 部"
             + ("；其余没有番号，无法检索" if len(rows) > len(searchable) else ""))
@@ -505,15 +583,29 @@ class CensorReplacePage(QWidget):
 
     # ── 检索 ──
     def _filter(self):
-        words, state = self.search.text().casefold().split(), self.state_filter.currentData()
+        words = self.search.text().casefold().split()
+        state = self.state_filter.currentData()
+        # 快照没同步时两个下拉是禁用的，此时必须当作"全部"，
+        # 否则一旦有人程序化改索引，整张表会被隐藏成空
+        favorite = self.combo_favorite.currentData() if self.combo_favorite.isEnabled() else 'all'
+        playback = self.combo_playback.currentData() if self.combo_playback.isEnabled() else 'all'
         hidden_current = False
         for index in range(self.table.rowCount()):
             item = self.table.item(index, 0)
             row = self._rows.get(item.data(Qt.UserRole)) if item else None
-            show = row is not None and (not state or row.state_key == state or
-                    (state == 'unknown' and row.state_key == 'todo'))
-            if row:
-                show = show and all(word in (row.number + ' ' + ' '.join(row.paths)).casefold() for word in words)
+            show = row is not None
+            if show:
+                show = (not state or row.state_key == state
+                        or (state == 'unknown' and row.state_key == 'todo'))
+            if show and self._only_keys:
+                show = row.key in self._only_keys
+            if show and words:
+                text = (row.number + ' ' + ' '.join(row.paths)).casefold()
+                show = all(word in text for word in words)
+            if show and favorite != 'all':
+                show = self._favorite_matches(row, favorite)
+            if show and playback != 'all':
+                show = self._playback_matches(row, playback)
             self.table.setRowHidden(index, not show)
             hidden_current |= not show and row is not None and row.key == self._current_key
         if hidden_current:
@@ -522,6 +614,182 @@ class CensorReplacePage(QWidget):
             self.files.setRowCount(0)
             self.panel.clear()
             self.lbl_detail.setText('选择一个番号查看候选与文件')
+        self._update_summary()
+        self._update_summary()
+
+    # ── Jellyfin 快照（喜欢 / 播放）：复用检查页那套，不另建口径 ──
+    def _reload_review(self) -> None:
+        """重读本地 Jellyfin 快照。读不到就置空，筛选器跟着禁用。"""
+        items: dict = {}
+        try:
+            from utils.jellyfin_review import JellyfinReviewService
+
+            service = JellyfinReviewService(self.cfg, data_dir=self._censor.store.db_path.parent)
+            items = service.cached_items() or {}
+        except Exception:  # noqa: BLE001 - 没配服务器/快照坏了都不该影响清单
+            items = {}
+        self._review_items = items
+        has_data = bool(items)
+        for combo in (self.combo_favorite, self.combo_playback):
+            combo.setEnabled(has_data)
+            combo.setToolTip('' if has_data else
+                             '还没有 Jellyfin 喜欢/播放状态。到「视频像素化检查」页选好观看账号并同步一次，回到这里就能按喜欢筛了')
+        self.lbl_filter_note.setText('' if has_data else '未同步 Jellyfin 状态，喜欢/播放筛选不可用')
+
+    def _review_of(self, path: str) -> dict:
+        if not self._review_items:
+            return {}
+        try:
+            from utils.jellyfin_review import JellyfinReviewService
+
+            return self._review_items.get(JellyfinReviewService.normalize_path(path), {}) or {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _favorite_matches(self, row: 'NumberRow', want: str) -> bool:
+        """任一文件被标喜欢就算这部片喜欢；全部未标才算"未喜欢"。"""
+        states = [self._review_of(p).get('is_favorite') for p in row.paths]
+        if want == 'favorite':
+            return any(state is True for state in states)
+        if want == 'not_favorite':
+            return bool(states) and all(state is False for state in states)
+        if want == 'unknown':
+            return all(state is None for state in states)
+        return True
+
+    def _playback_matches(self, row: 'NumberRow', want: str) -> bool:
+        played, progress = [], []
+        for path in row.paths:
+            item = self._review_of(path)
+            played.append(item.get('played'))
+            progress.append(bool(item.get('has_progress') or item.get('playback_ticks', 0)))
+        if want == 'played':
+            return all(state is True for state in played)
+        if want == 'unplayed':
+            return all(state is False and not tick for state, tick in zip(played, progress))
+        if want == 'progress':
+            return any(tick and state is not True for state, tick in zip(played, progress))
+        if want == 'unknown':
+            return all(state is None for state in played)
+        return True
+
+    def _clear_filters(self) -> None:
+        self.search.clear()
+        self.state_filter.setCurrentIndex(0)
+        self.combo_favorite.setCurrentIndex(0)
+        self.combo_playback.setCurrentIndex(0)
+        self._only_keys = set()
+        self._filter()
+
+    # ── 选中与拖出 ──
+    def _selected_rows(self) -> 'list[NumberRow]':
+        model = self.table.selectionModel()
+        if model is None:
+            return []
+        out = []
+        for index in sorted({i.row() for i in model.selectedIndexes()}):
+            if self.table.isRowHidden(index):
+                continue
+            item = self.table.item(index, 0)
+            row = self._rows.get(item.data(Qt.UserRole)) if item else None
+            if row is not None:
+                out.append(row)
+        return out
+
+    def _drag_paths(self) -> 'list[str]':
+        """拖出去的是**文件**（接收方当成拖入视频），不是番号文本。"""
+        rows = self._selected_rows()
+        if not rows:
+            index = self.table.currentRow()
+            item = self.table.item(index, 0) if index >= 0 else None
+            row = self._rows.get(item.data(Qt.UserRole)) if item else None
+            rows = [row] if row is not None else []
+        paths: 'list[str]' = []
+        for row in rows:
+            paths.extend(row.paths)
+        return list(dict.fromkeys(paths))
+
+    # ── 右键菜单 ──
+    def _table_menu(self, pos) -> None:
+        index = self.table.rowAt(pos.y())
+        if index >= 0 and not self.table.isRowHidden(index):
+            if index not in {i.row() for i in self.table.selectionModel().selectedIndexes()}:
+                self.table.selectRow(index)
+        rows = self._selected_rows()
+        if not rows:
+            return
+        count = len(rows)
+        menu = QMenu(self)
+        menu.addAction(f'查询选中（{count}）', self._lookup_selected)
+        menu.addAction(f'送去替换（{count}）', self._send_selected_to_versions)
+        menu.addAction(f'送去 Lada 破码（{count}）', self._send_selected_to_lada)
+        menu.addSeparator()
+        menu.addAction('复制番号', self._copy_numbers)
+        menu.addAction('复制文件路径', self._copy_paths)
+        menu.addAction('复制磁链', self._copy_magnets)
+        menu.addAction('打开候选页面', self._open_selected_page)
+        menu.addSeparator()
+        menu.addAction('只显示这些（再点「清除筛选」恢复）', self._focus_selected)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _copy(self, text: str, what: str) -> None:
+        text = text.strip()
+        if not text:
+            self.lbl_summary.setText(f'没有可复制的{what}')
+            return
+        QGuiApplication.clipboard().setText(text)
+        lines = text.count(chr(10)) + 1
+        self.lbl_summary.setText(f'已复制 {lines} 行{what}')
+
+    def _copy_numbers(self) -> None:
+        self._copy('\n'.join(row.number for row in self._selected_rows() if row.number), '番号')
+
+    def _copy_paths(self) -> None:
+        paths: 'list[str]' = []
+        for row in self._selected_rows():
+            paths.extend(row.paths)
+        self._copy('\n'.join(dict.fromkeys(paths)), '文件路径')
+
+    def _copy_magnets(self) -> None:
+        links: 'list[str]' = []
+        for row in self._selected_rows():
+            best = row.report.best if row.report else None
+            magnet = getattr(best, 'best_magnet', None) if best else None
+            if magnet is not None and getattr(magnet, 'link', ''):
+                links.append(magnet.link)
+        self._copy('\n'.join(dict.fromkeys(links)), '磁链')
+
+    def _send_selected_to_lada(self) -> None:
+        paths: 'list[str]' = []
+        for row in self._selected_rows():
+            paths.extend(row.paths)
+        paths = [p for p in dict.fromkeys(paths) if os.path.isfile(p)]
+        if not paths:
+            self.lbl_summary.setText('选中的文件都不在本地，无法送去 Lada')
+            return
+        events.lada_ready.emit(paths)
+        self.lbl_summary.setText(f'已把 {len(paths)} 个文件送去「马赛克破解」页')
+
+    def _open_selected_page(self) -> None:
+        rows = [row for row in self._selected_rows() if row.report and row.report.candidates]
+        if not rows:
+            self.lbl_summary.setText('选中的番号还没有候选页面')
+            return
+        from PySide6.QtGui import QDesktopServices
+
+        opened = 0
+        for row in rows[:10]:
+            best = row.report.best if row.report else None
+            url = getattr(best, 'page_url', '') or ''
+            if url:
+                QDesktopServices.openUrl(QUrl(url))
+                opened += 1
+        self.lbl_summary.setText(f'已打开 {opened} 个候选页面' + ('（最多 10 个）' if len(rows) > 10 else ''))
+
+    def _focus_selected(self) -> None:
+        self._only_keys = {row.key for row in self._selected_rows()}
+        self._filter()
+        self.lbl_summary.setText(f'只显示选中的 {len(self._only_keys)} 个（点「清除筛选」恢复）')
 
     def _lookup_selected(self):
         indexes = self.table.selectionModel().selectedRows()
