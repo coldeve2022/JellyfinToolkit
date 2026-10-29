@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from censor import CensorService
 from censor.releases import ReleaseReport, ReleaseService
+from censor.release_filter import FilterRule, evaluate, describe
 from censor.releases.models import normalize_number
 from ui.censor_release import ReleaseLookupWorker, ReleasePanel
 from ui.services import events, start_task
@@ -138,6 +139,9 @@ class CensorReplacePage(QWidget):
         self._pending_focus_lookup = False
         #: 右键「只显示这些」用；空集合 = 不限制
         self._only_keys: set[str] = set()
+        #: 高级筛选：任意条件组合（见 censor/release_filter.py）
+        self._rules: 'list[FilterRule]' = []
+        self._logic: str = 'and'
         #: Jellyfin 快照（规范化路径 → 喜欢/播放状态）；空 = 未同步
         self._review_items: dict = {}
         self._refresh_owner = QWidget(self)
@@ -271,6 +275,11 @@ class CensorReplacePage(QWidget):
         self.combo_playback.setCurrentIndex(0)
         self.combo_playback.currentIndexChanged.connect(self._filter)
         library_row.addWidget(self.combo_playback)
+        self.btn_advanced_filter = QPushButton('筛选…')
+        self.btn_advanced_filter.setToolTip('自由组合条件：候选数、磁链、来源、文件名特征、'
+                                            '检索时间、置信度…可保存成预设')
+        self.btn_advanced_filter.clicked.connect(self._open_filter_dialog)
+        library_row.addWidget(self.btn_advanced_filter)
         self.btn_clear_filters = QPushButton('清除筛选')
         self.btn_clear_filters.clicked.connect(self._clear_filters)
         library_row.addWidget(self.btn_clear_filters)
@@ -329,6 +338,13 @@ class CensorReplacePage(QWidget):
         self.workspace = WorkspacePreferences(self, 'release', self.table, splitter=body,
             filters={'search': self.search, 'state': self.state_filter,
                      'favorite': self.combo_favorite, 'playback': self.combo_playback})
+        state = self.workspace.state
+        saved_rules = state.get('filter_rules') or []
+        if isinstance(saved_rules, list):
+            self._rules = [FilterRule.from_dict(item) for item in saved_rules
+                           if isinstance(item, dict)]
+        self._logic = str(state.get('filter_logic') or 'and')
+        self._sync_filter_button()
         menu.addMenu(self.workspace.menu(more)).setText('工作区布局与偏好')
 
     # ── 数据 ──
@@ -606,6 +622,8 @@ class CensorReplacePage(QWidget):
                 show = self._favorite_matches(row, favorite)
             if show and playback != 'all':
                 show = self._playback_matches(row, playback)
+            if show and self._rules:
+                show = evaluate(self._rules, self._logic, row, self._filter_context())
             self.table.setRowHidden(index, not show)
             hidden_current |= not show and row is not None and row.key == self._current_key
         if hidden_current:
@@ -673,12 +691,57 @@ class CensorReplacePage(QWidget):
             return all(state is None for state in played)
         return True
 
+    def _filter_context(self) -> dict:
+        """给规则引擎的外部数据：Jellyfin 快照 + 文件存在性。"""
+        return {'review': self._review_of, 'exists': os.path.isfile}
+
+    def _open_filter_dialog(self) -> None:
+        from ui.release_filter_dialog import ReleaseFilterDialog
+
+        presets = self.workspace.state.get('filter_presets') or {}
+        dialog = ReleaseFilterDialog(
+            self, rules=self._rules, logic=self._logic, presets=presets,
+            preview=self._preview_count)
+        if not dialog.exec():
+            return
+        self._rules = dialog.rules()
+        self._logic = dialog.logic()
+        self.workspace.state['filter_presets'] = dialog.presets()
+        self.workspace.state['filter_rules'] = [rule.as_dict() for rule in self._rules]
+        self.workspace.state['filter_logic'] = self._logic
+        self.workspace.save()
+        self._sync_filter_button()
+        self._filter()
+
+    def _preview_count(self, rules, logic) -> int:
+        ctx = self._filter_context()
+        return sum(1 for row in self._rows.values()
+                   if evaluate(rules, logic, row, ctx))
+
+    def _sync_filter_button(self) -> None:
+        count = len(self._rules)
+        self.btn_advanced_filter.setText(f'筛选（{count}）' if count else '筛选…')
+        if count:
+            summary = '；'.join(describe(rule) for rule in self._rules[:4])
+            if count > 4:
+                summary += f'；…共 {count} 条'
+            self.btn_advanced_filter.setToolTip(f'当前条件（{self._logic.upper()}）：{summary}')
+        else:
+            self.btn_advanced_filter.setToolTip(
+                '自由组合条件：候选数、磁链、来源、文件名特征、检索时间、置信度…可保存成预设')
+
     def _clear_filters(self) -> None:
         self.search.clear()
         self.state_filter.setCurrentIndex(0)
         self.combo_favorite.setCurrentIndex(0)
         self.combo_playback.setCurrentIndex(0)
         self._only_keys = set()
+        self._rules = []
+        self._logic = 'and'
+        self.workspace.state['filter_rules'] = []
+        self.workspace.state['filter_logic'] = 'and'
+        self.workspace.save()
+        self._sync_filter_button()
         self._filter()
 
     # ── 选中与拖出 ──
