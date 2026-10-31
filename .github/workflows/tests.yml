@@ -170,7 +170,7 @@ jobs:
         if: steps.pytest.outcome == 'failure'
         env:
           JUNIT_XML: ${{ runner.temp }}/junit.xml
-        run: python tools/dev/ci_test_summary.py "$JUNIT_XML"
+        run: python tools/dev/ci_test_summary.py
 
       - name: 确认测试没有污染工作区
         shell: bash

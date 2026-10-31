@@ -14,6 +14,7 @@ CI 的运行日志要登录才能下载，但检查注解不需要。测试失�
 
 from __future__ import annotations
 
+import os
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -77,8 +78,14 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = list(sys.argv[1:] if argv is None else argv)
+    if not args:
+        # workflow 里不传参数：pwsh 下 "$JUNIT_XML" 是未定义变量，会被展开成空，
+        # 脚本会拿到空路径。统一从环境变量取，bash / pwsh 都一样。
+        env_path = os.environ.get("JUNIT_XML", "").strip()
+        if env_path:
+            args = [env_path]
     if len(args) != 1:
-        print("用法: python tools/dev/ci_test_summary.py <junit.xml>")
+        print("用法: JUNIT_XML=<junit.xml> python tools/dev/ci_test_summary.py [junit.xml]")
         return 2
     return summarize(Path(args[0]))
 

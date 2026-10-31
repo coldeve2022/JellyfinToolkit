@@ -7,7 +7,9 @@ import time
 
 import pytest
 
-from censor.sampling import FrameSampler, SamplingCancelled, SamplingError, SamplingTimeout
+from censor.sampling import (
+    FrameSampler, SamplingCancelled, SamplingError, SamplingTimeout, _ffmpeg_version,
+)
 
 
 @pytest.fixture
@@ -18,6 +20,16 @@ def binaries():
     return ffmpeg, ffprobe
 
 
+def _require_modern_ffmpeg(binaries) -> None:
+    """老 ffmpeg 上这些断言不成立，跳过并说明原因。
+
+    ``-fps_mode`` 是 5.1 才有的名字，之前只有 ``-vsync``，而两者在 5.1 前后
+    的丢帧/时间戳处理并不等价 —— 合成素材解出来的帧都对不上，断言没意义。
+    """
+    if _ffmpeg_version(binaries[0]) < (5, 1):
+        pytest.skip("ffmpeg < 5.1 的 vsync 语义不同，合成素材 PTS 对不上")
+
+
 def synthetic_video(tmp_path, binaries, *, offset=0, vfr=False, rate="2"):
     """Five known gray frames, only the first being an H.264 keyframe."""
     video = tmp_path / "synthetic.mp4"
@@ -26,9 +38,10 @@ def synthetic_video(tmp_path, binaries, *, offset=0, vfr=False, rate="2"):
     if vfr:
         # Hand-derived PTS: 0, 0.5, 1.5, 3, 5 seconds.
         cmd += ["-vf", "setpts=N*(N+1)/(4*TB)"]
-    # 用 -vsync 而不是 -fps_mode：后者 5.1 才有，Ubuntu 22.04 的 4.4 会直接报
-    # "Unrecognized option"，测试素材都造不出来。
-    cmd += ["-vsync", "vfr", "-c:v", "libx264", "-qp", "0", "-g", "100",
+    # 参数名按版本选：-fps_mode 是 5.1 才加的，老版本只有 -vsync；
+    # 反过来 ffmpeg 8 已经把 -vsync 删了，写死任何一个都会在某些机器上炸。
+    sync_flag = "-fps_mode" if _ffmpeg_version(binaries[0]) >= (5, 1) else "-vsync"
+    cmd += [sync_flag, "vfr", "-c:v", "libx264", "-qp", "0", "-g", "100",
             "-sc_threshold", "0", "-output_ts_offset", str(offset), str(video)]
     subprocess.run(cmd, input=b"".join(bytes([v]) * 1024 for v in (20, 60, 100, 140, 180)),
                    capture_output=True, check=True, timeout=20)
@@ -38,6 +51,7 @@ def synthetic_video(tmp_path, binaries, *, offset=0, vfr=False, rate="2"):
 @pytest.mark.parametrize("offset", [0, 7])
 @pytest.mark.parametrize("vfr, expected", [(False, 1.0), (True, 1.5)])
 def test_actual_presentation_time_matches_decoded_non_keyframe(tmp_path, binaries, offset, vfr, expected):
+    _require_modern_ffmpeg(binaries)
     video = synthetic_video(tmp_path, binaries, offset=offset, vfr=vfr)
     tool = FrameSampler(*binaries, width=32, height=32, pixel_format="gray")
     frame = tool.frame_at(video, 0.7)
@@ -55,6 +69,7 @@ def test_presentation_time_uses_integer_pts_precision(tmp_path, binaries):
 
 
 def test_large_frame_metadata_does_not_hide_presentation_time(tmp_path, binaries):
+    _require_modern_ffmpeg(binaries)
     source = synthetic_video(tmp_path, binaries)
     tagged = tmp_path / "synthetic_metadata.mp4"
     subprocess.run([binaries[0], "-v", "error", "-i", str(source), "-c:v", "copy",
