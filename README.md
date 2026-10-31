@@ -34,11 +34,11 @@
 | 🗑️ 删除暂存 | 怕点错删掉不该删的 | 先审阅目标和理由，再移进隔离区；任务中心可恢复 |
 | 🔁 重复处理 | 同一个番号好几个版本 / 分辨率 | 按番号分组，留优删差；CD 分卷不会被当成重复项 |
 | 🎬 视频像素化检查 | 需要判断本地文件是否含像素化结构 | 精确抽样与证据画廊辅助复核，人工确认绑定文件版本，可撤回；媒体库导入、任务恢复、内存预算与工作区偏好可配置。抽样低风险不证明全片没有像素化 |
-| 🔎 无码版本检索 | 已人工确认有码，需要寻找替换版本 | 按完整番号查询 JavDB / JavBus / Supjav，区分证据结论与失败/取消；支持自动入队、过期重查、失败续跑，只默认复制作品与版本匹配的磁链。下载后的候选可转入可恢复替换计划 |
+| 🔎 替换版本检索 | 已确认需要替换，要找一个可用替代版本 | 按完整作品编号查询 JavDB / JavBus / Supjav，区分证据结论与失败/取消；表头点选取值 + 页内组合条件（AND/OR）共同决定可见行，喜欢 / 播放状态按作品聚合；支持自动入队、过期重查、失败续跑，只默认复制作品与版本匹配的下载链接。下载后的候选可转入可恢复替换计划 |
 | 📝 字幕缺失检测 | 不知道哪些片子没字幕 | 按「同名 + 字幕扩展名」判定，不限语言标记写法，认 `Subs/` 子目录 |
 | ✍️ 批量生成字幕 | 缺的太多，一个个补不现实 | 驱动 Faster-Whisper / TransWithAI，可选生成后去重、拆长句 |
-| 🔄 破解视频替换 | 修复完的产物怎么换回原位 | 先配对校验时长与音轨，同名歧义不会自动选错，保留可恢复备份 |
-| 🔓 马赛克破解 | 要批量跑 Lada | 并发 + 显存门控 + 产出时长校验，产物直接交给「破解视频替换」 |
+| 🔄 视频版本替换 | 修复完的产物怎么换回原位 | 先配对校验时长与音轨，同名歧义不会自动选错，保留可恢复备份 |
+| 🔓 画面修复（Lada） | 要批量跑 Lada | 并发 + 显存门控 + 产出时长校验，产物直接交给「视频版本替换」 |
 | 🔧 视频修复转码 | 下载下来就是坏的 / Jellyfin 播不了 | 坏帧修复与兼容性转码放在同一页，可用显卡加速 |
 | 📋 NFO 关联修复 | `.ts` 转 `.mp4` 之后信息全乱 | 修正 NFO 与关联资源对不上的问题 |
 | 🗄️ 数据库工具 | 要查表结构、搬播放记录 | 跨库转移播放记录 + 检查表结构 |
@@ -47,7 +47,7 @@
 | ⚙️ 设置 | 连服务器、指路径、配外部工具 | 观看用户、服务器路径映射、评分口径、FFmpeg 与第三方工具 |
 | 📌 任务中心 | 「刚才那一大批操作到底干了什么」 | 任务状态与历史、文件恢复、旧版反馈逐项迁移 |
 
-**两处需要自备第三方程序**：「批量生成字幕」用 Faster-Whisper 打包版，「马赛克破解」用 Lada 的 `lada-cli.exe`。画面级检码额外需要 `ffmpeg`（程序目录或 PATH 里即可）。都不随仓库分发，在「设置 → 第三方工具」里指定位置即可，详见 [docs/第三方工具集成.md](docs/第三方工具集成.md)。
+**两处需要自备第三方程序**：「批量生成字幕」用 Faster-Whisper 打包版，「画面修复」用 Lada 的 `lada-cli.exe`。画面级检码额外需要 `ffmpeg`（程序目录或 PATH 里即可）。都不随仓库分发，在「设置 → 第三方工具」里指定位置即可，详见 [docs/第三方工具集成.md](docs/第三方工具集成.md)。
 
 ## 下载与运行
 
@@ -68,14 +68,16 @@ start.bat          # Windows：自动建 .venv 装依赖并启动
 
 也可以手动来：`python -m venv .venv` → 装 `requirements.txt` → `python main.py`。Windows 上双击 `start-silent.vbs` 或 `main.pyw` 可以不带控制台窗口启动。
 
-命令行带四个开关：
+命令行带六个开关：
 
 | 参数 | 作用 |
 | --- | --- |
 | `--doctor` | 打印环境自检结果后退出（数据目录、ffmpeg 路径、实测可用的编码器与硬解方式），不启动界面 |
 | `--version` | 打印版本号 |
-| `--portable` | 强制便携模式 |
-| `--data-dir <路径>` | 指定数据目录，等价于环境变量 `JELLYFIN_TOOLKIT_DATA_DIR` |
+| `--portable` | 便携模式（默认使用程序文件夹内的配置和 data） |
+| `--data-dir <路径>` | 指定已有资料库根目录，包含 config.json 和 data 子目录 |
+| `--init-profile` | 明确初始化新资料库；不会重建已登记身份但缺失的数据库 |
+| `--profile-info` | 只读显示实际资料库位置和状态 |
 
 ## 系统要求
 
@@ -113,6 +115,11 @@ FFmpeg 不必装进 PATH：可以在「设置 → FFmpeg 转码设置」里指�
 | 内容 | 位置 |
 | --- | --- |
 | 配置 | `<数据目录>/config.json` |
+| 资料库身份 | `<数据目录>/profile.json`（稳定 ID）；本机选择存在程序目录的 `data-profile.json` |
+| 检测与检索事实 | `<数据目录>/data/censor.db`（检测记录、人工标记、检索报告与队列；检测按文件、检索按作品） |
+| 喜欢 / 播放快照 | `<数据目录>/data/jellyfin_review.sqlite3` |
+| 页面偏好与筛选条件 | `<数据目录>/data/workspace_preferences.json` |
+| 复核截图与裁剪图 | `<数据目录>/data/censor_thumbs/` |
 | 打标记录、画像缓存 | `<数据目录>/data/smart.db` |
 | 删除与替换留痕 | `<数据目录>/data/trash_journal.db` |
 | 分集合并归档日志 | `<数据目录>/data/merge_archive_journal.json` |
@@ -120,7 +127,13 @@ FFmpeg 不必装进 PATH：可以在「设置 → FFmpeg 转码设置」里指�
 | 标签清洗备份 | `<数据目录>/data/jellyfin_clean_backup_*.json` |
 | 运行错误日志 | `<数据目录>/data/app-error.log` |
 
-`<数据目录>` 默认是 `%APPDATA%\JellyfinToolkit`（源码运行则是项目目录）。想做成绿色版，在程序目录放一个空的 `portable.txt`，数据就跟着程序走；环境变量 `JELLYFIN_TOOLKIT_DATA_DIR` 优先级最高。
+检测记录以**文件路径**为单位，检索报告以**规范化作品编号**为单位，所以「检测页数的是文件、替换页数的是作品」，两个数字本来就不必相等。人工标记的权威来源是 `(路径, 文件身份)` 的组合，只改过路径不算同一条记录。
+
+`<数据目录>` 默认是程序文件夹：配置位于 `config.json`，数据库位于 `data/`。整个文件夹移动后，证据图片仍可读取；升级保留配置、`profile.json`、`data/` 和备份。已有外部资料库可通过资料库管理器明确选择，指针仅保存到当前程序的 `data-profile.json`，不再隐式跟随用户 AppData 中的历史全局登记。旧登记与旧 `AppData/` 资料仅作为首次导入选择线索。
+
+开发时使用 `dev-start.bat`，默认读取项目同级的 `JellyfinToolkit-Data/`；后续代码版本可复用同一个长期资料库。`dev-start.bat --profile-info` 可只读核对位置；实验副本可用 `dev-start.bat --data-dir <副本根目录>`。开发启动器和本地指针不进入发布包，环境变量覆盖只对当前进程生效。
+
+同一资料库只允许一个图形程序实例写入。显式目录不存在会报错，只有明确的 `--init-profile` 才初始化新目录；资料库身份存在但数据库丢失时不会自动重建。结构升级或批量修复实验应先复制到独立目录验证。
 
 配置项的完整含义见 [`config.example.json`](config.example.json)，复制成 `config.json` 放进数据目录可做默认值预设。常用的几项：`library_source`（数据来源）、`merge_backup_root`（合并备份放哪，留空就用数据目录）、`ffmpeg_gpu_codec` / `ffmpeg_hardware_accel`（留空 = 自动实测）、`exclude_path_keywords`（哪些目录不参与分析）、`min_video_size_mb`（小于该体积的文件跳过，默认 10）。
 
@@ -166,22 +179,36 @@ AI 功能是可选的，连不上不影响其他功能。默认地址 `http://lo
 
 ```
 jellyfin-toolkit/
-├── main.py / main.pyw       # 入口（--doctor / --version / --portable / --data-dir）
+├── main.py / main.pyw       # 入口（--doctor / --version / --portable / --data-dir / --init-profile / --profile-info）
 ├── config.py                # 配置与数据目录解析（跨平台 + 便携模式）
 ├── version.py               # 版本唯一来源
-├── ui/                      # PySide6 界面：main_window 路由 + pages/ 18 个页面 + theme/styles/widgets
+├── ui/                      # PySide6 界面：main_window 路由 + pages/ 19 个页面 + theme/styles/widgets
+│   ├── release_filters.py   #   替换页的页内条件编辑器与表头取值菜单
+│   └── data_profiles.py     #   资料库选择、初始化与诊断
+├── censor/                  # 检测与检索：采样 / 融合 / 人工标记 / 网络检索 / 查询投影
+│   ├── release_query.py     #   文件 → 作品投影 + ReleaseQuery（显示/计数/操作共用）
+│   └── release_filter.py    #   字段、运算符、取值与规则校验
 ├── workers/                 # QThread 后台任务（扫描 / 分析 / 转码 / 合并 / 生成字幕…）
 ├── utils/                   # 与 Qt 解耦的纯逻辑层，可单测
 │   ├── library*.py          #   库采集：库文件（两种架构）/ REST API / 统一数据源
 │   ├── scoring*.py          #   命中度评分引擎
 │   ├── merge*.py            #   分集合并与安全归档、回滚
+│   ├── profile_*.py         #   资料库身份、单实例锁、迁移、图片相对引用
+│   ├── media_review_query.py#   文件级喜欢/播放解释与作品聚合
+│   ├── user_state_store.py  #   快照关系投影（旧 JSON 兼容）
 │   ├── subtitle_clean.py    #   「有没有字幕」的唯一判定实现
 │   └── tools.py             #   外部工具定位 + 硬件能力实测
 ├── automation/              # 无界面编排流水线（采集 → 评分 → 执行）
+├── docs/                    # 使用、架构与契约说明（只放仍然有效的内容）
 ├── tools/                   # make_icon / make_version_info；dev/ 下是手动脚本（pytest 不收集）
 ├── scripts/                 # build_release / version_manage / release_flow / verify_release / patch_whisper_encoding
 └── tests/                   # pytest（离屏运行，不弹窗）
 ```
+
+`docs/` 只保留**仍然有效**的说明：怎么用、子系统怎么设计、分层契约是什么。
+历次交接日志、审计报告、专项检修记录属于过程产物，随版本归档、不留在仓库里
+（避免"文档目录变成变更史"，新读者也能一眼看清哪些结论还有效）。
+若需要查历史结论，请向维护者索取对应版本的归档。
 
 ## 开发
 

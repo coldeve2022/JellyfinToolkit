@@ -5,6 +5,9 @@
 config.json
 config.local.json
 data-profile.json
+/profile.json
+.profile.lock
+migration-report.json
 data/
 AppData/
 portable.txt
@@ -110,3 +113,12 @@ assets/preview/
 # desloppify 本地扫描状态（仅本地，不入库）
 .desloppify/
 scorecard.png
+
+# ─────────────────────────────────────────────────────────────
+# 过程产物（交接日志 / 实施计划 / 研究方案 / 单项迁移记录）
+# 随版本归档、不进仓库；仓库里的 docs 只放仍然有效的说明
+# ─────────────────────────────────────────────────────────────
+docs/superpowers/
+docs/交接文档-*.md
+docs/用户便携数据与开发共享资料库方案-*.md
+docs/资料库迁移与开发使用说明-*.md
