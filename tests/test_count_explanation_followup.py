@@ -11,7 +11,7 @@ def test_all_installation_paths_exclude_known_unsupported_qt_release():
     root = Path(__file__).resolve().parents[1]
     runtime = next(
         line
-        for line in (root / "requirements.txt").read_text().splitlines()
+        for line in (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
         if line.startswith("PySide6")
     )
     project = re.search(

@@ -291,7 +291,7 @@ def test_xml_concurrent_change_not_overwritten(setup, monkeypatch):
     monkeypatch.setattr(file_ops, "safe_write_text", race)
     confirm(setup, S.CENSORED)
     sync.run_pending()
-    assert "external" in nfo.read_text()
+    assert "external" in nfo.read_text(encoding="utf-8")
     assert sync.status()["failed"] == 1
 
 
@@ -419,7 +419,7 @@ def test_nfo_creation_never_overwrites_concurrent_creator(setup, monkeypatch):
     monkeypatch.setattr(file_ops, "safe_replace", race)
     confirm(setup, S.CENSORED)
     sync.run_pending()
-    assert "external" in nfo.read_text()
+    assert "external" in nfo.read_text(encoding="utf-8")
     assert sync.records()[0]["nfo"] == "failed"
 
 

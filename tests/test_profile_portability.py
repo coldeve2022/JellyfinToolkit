@@ -34,7 +34,7 @@ def test_local_pointer_uses_program_relative_path_from_any_cwd(tmp_path, monkeyp
     monkeypatch.setattr(config, 'program_dir', lambda: program)
     monkeypatch.chdir(tmp_path.parent)
     assert config._resolve_base_dir() == target
-    assert json.loads((program / 'data-profile.json').read_text())['root'] == '../JellyfinToolkit-Data'
+    assert json.loads((program / 'data-profile.json').read_text(encoding="utf-8"))['root'] == '../JellyfinToolkit-Data'
 
 
 def test_open_existing_missing_root_never_creates_it(tmp_path):
@@ -157,14 +157,14 @@ def test_whole_profile_move_repairs_rollback_paths_without_changing_media(tmp_pa
             json.dumps({'backup':str(backup),'original':'C:/library/video.mp4'})))
     moved = tmp_path / 'moved'
     shutil.copytree(old, moved)
-    identity = json.loads((old / 'profile.json').read_text())['profile_id']
+    identity = json.loads((old / 'profile.json').read_text(encoding="utf-8"))['profile_id']
     open_profile(moved)
     with sqlite3.connect(moved / 'data/operations.db') as db:
         backup_path, media, raw = db.execute('SELECT backup,original,payload FROM ops').fetchone()
     assert Path(backup_path) == moved / 'data/quarantine/backup.bin'
     assert media == json.loads(raw)['original'] == 'C:/library/video.mp4'
     assert Path(json.loads(raw)['backup']).is_file()
-    assert json.loads((moved / 'profile.json').read_text())['profile_id'] == identity
+    assert json.loads((moved / 'profile.json').read_text(encoding="utf-8"))['profile_id'] == identity
 
 
 def test_external_assets_and_relative_traversal_are_not_redirected(tmp_path):
@@ -264,7 +264,7 @@ def test_relocation_repairs_internal_backup_configuration_only(tmp_path):
     moved = tmp_path / 'moved'
     shutil.copytree(old, moved)
     open_profile(moved)
-    revised = json.loads((moved / 'config.json').read_text())
+    revised = json.loads((moved / 'config.json').read_text(encoding="utf-8"))
     assert revised['merge_backup_root'] == str(moved / 'backups')
     assert revised['outside'] == config['outside'] and revised['server'] == config['server']
 

@@ -118,7 +118,7 @@ def test_real_merge_preserves_two_audio_tracks_and_external_offsets(tmp_path, bi
     import json
 
     assert sum(s["codec_type"] == "audio" for s in json.loads(meta.stdout)["streams"]) == 2
-    subtitles = Path(output).with_suffix(".eng.srt").read_text()
+    subtitles = Path(output).with_suffix(".eng.srt").read_text(encoding="utf-8")
     assert "part 1" in subtitles and "part 2" in subtitles
     cues = __import__("utils.subtitle_clean", fromlist=["parse_srt"]).parse_srt(subtitles)
     assert cues[1]["start"] > 1 and cues[0]["start"] == pytest.approx(0.1)
@@ -174,7 +174,7 @@ def test_whisper_failed_launch_does_not_clean_existing_subtitles(tmp_path, monke
         lambda *a, **kw: dict(code=None, error="cannot start", stopped=False, lines=[]),
     )
     ok, _ = WhisperGenWorker(ToolkitConfig(), [str(src)], "fake")._one(str(src))
-    assert not ok and sub.read_text() == content
+    assert not ok and sub.read_text(encoding="utf-8") == content
 
 
 def test_selected_gpu_query_uses_device_one(monkeypatch):
@@ -232,7 +232,7 @@ def test_whisper_failure_after_partial_write_preserves_existing_caption(tmp_path
 
     monkeypatch.setattr(whisper_tool, "run_one", fail)
     ok, _ = WhisperGenWorker(ToolkitConfig(), [str(src)], "fake", {"--output_dir"})._one(str(src))
-    assert not ok and sub.read_text() == "old valid caption"
+    assert not ok and sub.read_text(encoding="utf-8") == "old valid caption"
 
 
 def test_bad_lada_output_is_not_left_as_active_video(tmp_path, monkeypatch):
@@ -339,7 +339,7 @@ def test_duplicate_names_have_distinct_subtitles_and_remain_discoverable(tmp_pat
     first = subtitle_clean.find_subtitles(paths[0], ["srt"], cfg.whisper_output_dir)
     second = subtitle_clean.find_subtitles(paths[1], ["srt"], cfg.whisper_output_dir)
     assert len(first) == len(second) == 1 and first[0] != second[0]
-    assert "first" in first[0].read_text() and "second" in second[0].read_text()
+    assert "first" in first[0].read_text(encoding="utf-8") and "second" in second[0].read_text(encoding="utf-8")
 
 
 def test_separate_subtitle_jobs_do_not_share_same_basename_output(tmp_path, monkeypatch):
@@ -365,7 +365,7 @@ def test_separate_subtitle_jobs_do_not_share_same_basename_output(tmp_path, monk
         assert WhisperGenWorker(cfg, [str(path)], "fake")._one(str(path))[0]
         results.append(subtitle_clean.find_subtitles(str(path), ["srt"], cfg.whisper_output_dir)[0])
     assert results[0] != results[1]
-    assert "first" in results[0].read_text() and "second" in results[1].read_text()
+    assert "first" in results[0].read_text(encoding="utf-8") and "second" in results[1].read_text(encoding="utf-8")
 
 
 def test_mov_text_keeps_mp4_container_and_caption_codec(tmp_path, binaries):
@@ -433,7 +433,7 @@ def test_invalid_second_subtitle_format_rolls_back_first_install(tmp_path, monke
     cfg.whisper_sub_formats = "srt,vtt"
     cfg.whisper_cleanup = False
     assert not WhisperGenWorker(cfg, [str(path)], "fake")._one(str(path))[0]
-    assert caption.read_text() == old
+    assert caption.read_text(encoding="utf-8") == old
 
 
 def test_video_health_import_does_not_load_qt():

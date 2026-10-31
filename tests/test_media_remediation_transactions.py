@@ -61,8 +61,8 @@ def test_nfo_collision_preserves_both_files(tmp_path):
     dst.write_text("curated")
     with pytest.raises(FileExistsError):
         safe_rename(str(src), str(dst))
-    assert src.read_text() == "old"
-    assert dst.read_text() == "curated"
+    assert src.read_text(encoding="utf-8") == "old"
+    assert dst.read_text(encoding="utf-8") == "curated"
 
 
 def test_missing_nfo_source_never_removes_target(tmp_path):
@@ -72,7 +72,7 @@ def test_missing_nfo_source_never_removes_target(tmp_path):
     dst.write_text("curated")
     with pytest.raises(OSError):
         safe_rename(str(tmp_path / "missing.nfo"), str(dst))
-    assert dst.read_text() == "curated"
+    assert dst.read_text(encoding="utf-8") == "curated"
 
 
 def test_transaction_can_restore_overwritten_target(tmp_path):
@@ -199,7 +199,7 @@ def test_vtt_short_timestamps_and_settings_survive_clean(tmp_path):
     p = tmp_path / "subtitle.vtt"
     p.write_text("WEBVTT\n\nfirst\n00:01.000 --> 00:03.000 align:start\nHello\n", encoding="utf-8")
     clean_file(p)
-    after = p.read_text()
+    after = p.read_text(encoding="utf-8")
     assert "Hello" in after and "align:start" in after and "first" in after
 
 
@@ -210,7 +210,7 @@ def test_unparseable_subtitles_are_never_overwritten(tmp_path):
     original = "bad timestamp --> unknown\nHello\n"
     p.write_text(original)
     clean_file(p)
-    assert p.read_text() == original
+    assert p.read_text(encoding="utf-8") == original
 
 
 def test_unnumbered_srt_cue_retained(tmp_path):
@@ -219,7 +219,7 @@ def test_unnumbered_srt_cue_retained(tmp_path):
     p = tmp_path / "subtitle.srt"
     p.write_text("00:00:01,000 --> 00:00:03,000\nHello\n")
     clean_file(p)
-    assert "Hello" in p.read_text()
+    assert "Hello" in p.read_text(encoding="utf-8")
 
 
 def test_archive_sessions_with_same_number_stay_separate(tmp_path):
@@ -292,7 +292,7 @@ def test_nfo_plan_refuses_changed_source(tmp_path):
     plan = nfo.preview_nfo_fixes([str(tmp_path)])
     p.write_text("new curated content")
     result = nfo.execute_nfo_fixes(plan)
-    assert result["fail"] == 1 and p.read_text() == "new curated content"
+    assert result["fail"] == 1 and p.read_text(encoding="utf-8") == "new curated content"
 
 
 def test_archive_records_intent_before_moving_any_original(tmp_path, monkeypatch):
@@ -370,7 +370,7 @@ def test_legacy_rename_refuses_sidecar_collision_before_video_move(tmp_path):
     dst = tmp_path / "ABC-123.srt"
     dst.write_text("curated captions")
     ok, _, _ = finalize_legacy_merged_output(str(video))
-    assert not ok and video.exists() and dst.read_text() == "curated captions"
+    assert not ok and video.exists() and dst.read_text(encoding="utf-8") == "curated captions"
 
 
 def test_replacement_detects_target_change_between_plan_check_and_transaction(
@@ -498,7 +498,7 @@ def test_nfo_content_plan_refuses_change_at_transaction_start(tmp_path, monkeypa
 
     monkeypatch.setattr(file_ops, "safe_write_text", raced)
     stats = nfo.execute_nfo_fixes(plan, log=lambda _: None)
-    assert stats["fail"] == 1 and path.read_text() == "new user edit"
+    assert stats["fail"] == 1 and path.read_text(encoding="utf-8") == "new user edit"
 
 
 def test_staged_commit_refuses_late_target_edit(tmp_path, monkeypatch):
