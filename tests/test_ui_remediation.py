@@ -456,7 +456,13 @@ def test_task_center_restores_actual_quarantined_fixture(qapp, qtbot, cfg, tmp_p
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     page._restore_selected()
     qtbot.waitUntil(lambda: not busy(page), timeout=3000)
-    assert source.read_bytes() == b"fixture-media"
+
+    def restored() -> bool:
+        # 恢复是后台任务：busy 先变 False、文件后落盘，中间这一瞬去读会
+        # FileNotFoundError（CI 的 Ubuntu 与 macOS 都撞到过，本机快所以看不到）。
+        return source.exists() and source.read_bytes() == b"fixture-media"
+
+    qtbot.waitUntil(restored, timeout=15000)
 
 
 def test_automation_binding_actual_user_invalidates_old_plan(qapp, cfg):

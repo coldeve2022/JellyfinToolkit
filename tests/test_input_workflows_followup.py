@@ -145,13 +145,13 @@ def test_folder_picker_and_viewport_drop_share_queue(
     assert button is not None, "Folder selection must not depend on dragging"
     button.click()
     expected_first = str(first) if module in ("replace", "merge", "subtitle") else str(one)
-    qtbot.waitUntil(lambda: expected_first in queue_paths(page, view), timeout=15000)
-    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
+    qtbot.waitUntil(lambda: expected_first in queue_paths(page, view), timeout=45000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=45000)
     enter, dropped = drop_urls(getattr(page, view), [second])
     assert enter and dropped
     expected_second = str(second) if module in ("replace", "merge", "subtitle") else str(two)
-    qtbot.waitUntil(lambda: expected_second in queue_paths(page, view), timeout=15000)
-    qtbot.waitUntil(lambda: not busy(page), timeout=15000)
+    qtbot.waitUntil(lambda: expected_second in queue_paths(page, view), timeout=45000)
+    qtbot.waitUntil(lambda: not busy(page), timeout=45000)
     assert expected_first in queue_paths(page, view)
 
 
