@@ -72,6 +72,10 @@ def summarize(xml_path: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows runner 的默认输出编码是 cp1252，打印中文用例名会直接
+    # UnicodeEncodeError —— 那一步本来就是"失败后才跑"，再崩一次就什么也看不到。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 1:
         print("用法: python tools/dev/ci_test_summary.py <junit.xml>")

@@ -26,7 +26,9 @@ def synthetic_video(tmp_path, binaries, *, offset=0, vfr=False, rate="2"):
     if vfr:
         # Hand-derived PTS: 0, 0.5, 1.5, 3, 5 seconds.
         cmd += ["-vf", "setpts=N*(N+1)/(4*TB)"]
-    cmd += ["-fps_mode", "vfr", "-c:v", "libx264", "-qp", "0", "-g", "100",
+    # 用 -vsync 而不是 -fps_mode：后者 5.1 才有，Ubuntu 22.04 的 4.4 会直接报
+    # "Unrecognized option"，测试素材都造不出来。
+    cmd += ["-vsync", "vfr", "-c:v", "libx264", "-qp", "0", "-g", "100",
             "-sc_threshold", "0", "-output_ts_offset", str(offset), str(video)]
     subprocess.run(cmd, input=b"".join(bytes([v]) * 1024 for v in (20, 60, 100, 140, 180)),
                    capture_output=True, check=True, timeout=20)

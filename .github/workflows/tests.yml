@@ -51,11 +51,13 @@ jobs:
       - name: 确认源码里没有本机个人路径
         run: |
           set -e
-          # 排除 CI 配置自身（它列举了这些关键词）与文档目录
+          # 排除：CI 配置自身（它列举了这些关键词）、贡献文档、整个 tests 目录
+          # —— 测试要用 "/Users/viewer/..." 这类虚构路径构造服务器响应，
+          # 那是测试数据不是本机路径。
           hits=$(git grep -nI -E 'C:\\Users\\|/Users/[a-z]|迅雷|\\.workbuddy' \
                    -- '*.py' '*.vbs' '*.bat' '*.sh' '*.json' '*.toml' '*.yml' \
                    ':!CONTRIBUTING.md' ':!.github/workflows/tests.yml' \
-                   ':!tests/test_portability.py' || true)
+                   ':!tests/*' || true)
           if [ -n "$hits" ]; then
             printf '%s\n' "$hits"
             # 逐条变成注解，日志拿不到时也能看到是哪个文件哪一行

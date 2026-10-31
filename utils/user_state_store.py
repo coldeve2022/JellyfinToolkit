@@ -4,6 +4,8 @@ Reads never create or migrate files. The legacy JSON remains the compatibility
 authority: a digest detects writes made by an older application. Only successful
 publication creates the indexed projection, in the same SQLite transaction.
 """
+from __future__ import annotations
+
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone

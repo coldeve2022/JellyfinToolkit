@@ -1,4 +1,11 @@
+from pathlib import Path
+
 from utils.file_scan import iter_media_files
+
+
+def _name(path) -> str:
+    """取文件名。不用 split("\\") —— Linux 上分隔符是 /，会拿到整条路径。"""
+    return Path(path).name
 
 
 def test_auxiliary_tokens_and_root_folders_are_excluded(tmp_path):
@@ -7,7 +14,7 @@ def test_auxiliary_tokens_and_root_folders_are_excluded(tmp_path):
     extras = tmp_path / "trailers"
     extras.mkdir()
     (extras / "ABC.mp4").touch()
-    assert [p.split("\\")[-1] for p in iter_media_files([tmp_path, extras])] == ["ABC.mp4"]
+    assert [_name(p) for p in iter_media_files([tmp_path, extras])] == ["ABC.mp4"]
 
 
 def test_job_survives_restart_and_retries_interrupted_file(tmp_path):

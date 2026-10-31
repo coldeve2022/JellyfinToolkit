@@ -18,6 +18,7 @@ import time
 import struct
 import zlib
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -38,6 +39,32 @@ class SamplingTimeout(SamplingError):
 
 def _never_stop() -> bool:
     return False
+
+
+@lru_cache(maxsize=8)
+def _ffmpeg_version(ffmpeg: str) -> tuple[int, int]:
+    """ffmpeg 的主次版本。读不到就当 (0, 0)，按老版本处理。"""
+    try:
+        done = subprocess.run([ffmpeg, "-version"], capture_output=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return (0, 0)
+    text = (done.stdout or b"").decode("utf-8", "replace")
+    match = re.search(r"ffmpeg version (\d+)\.(\d+)", text)
+    if not match:
+        return (0, 0)
+    return (int(match.group(1)), int(match.group(2)))
+
+
+def frame_sync_args(ffmpeg: str) -> list[str]:
+    """禁止 ffmpeg 补帧/丢帧，保持原始 PTS。
+
+    ``-fps_mode`` 是 5.1 才引入的选项。Ubuntu 22.04 自带 ffmpeg 4.4，
+    直接写 ``-fps_mode`` 会 "Unrecognized option" 退出，抽帧全废。
+    老版本用同义的旧名 ``-vsync``。
+    """
+    if _ffmpeg_version(ffmpeg) >= (5, 1):
+        return ["-fps_mode", "passthrough"]
+    return ["-vsync", "passthrough"]
 
 
 _FRAME_TIME_BASE = re.compile(
@@ -563,7 +590,7 @@ class FrameSampler:
             "1",
             "-vf",
             self._scale_filter() + ",trim=end_frame=1,showinfo@sampling=checksum=0",
-            "-fps_mode", "passthrough",
+            *frame_sync_args(self.ffmpeg),
             "-f",
             "rawvideo",
             "-pix_fmt",

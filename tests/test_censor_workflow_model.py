@@ -26,8 +26,17 @@ from censor.review_route import (  # noqa: E402
 )
 
 
+def _lib(name: str) -> str:
+    """库内路径，用当前平台的分隔符拼。
+
+    原先这里写死 ``r"C:\\lib\\X.mp4"``：Linux 上 ``os.path.basename`` 不认反斜杠，
+    列表里显示的名字会变成整条路径，于是只有 Windows 能过。
+    """
+    return str(Path("lib") / name)
+
+
 def _result(state=CensorState.UNKNOWN, *, manual=False, status=ProcessingStatus.COMPLETED,
-            candidates=(), review_required=None, path=r"C:\lib\ABC-123.mp4"):
+            candidates=(), review_required=None, path=_lib("ABC-123.mp4")):
     result = VideoVerdict(path=path, status=status)
     evidence = [Evidence(EvidenceSource.VISUAL, state, 0.9, "画面",
                          review_required=review_required)]
@@ -62,7 +71,7 @@ def test_auto_conclusion_only_goes_positive():
     assert conclusion_label(censored) == "有码"
     assert bucket(censored) is ReviewBucket.UNREVIEWED
 
-    negative = VideoVerdict(path=r"C:\lib\D-4.mp4")
+    negative = VideoVerdict(path=_lib("D-4.mp4"))
     negative.verdict = fuse([Evidence(EvidenceSource.VISUAL, CensorState.UNCENSORED,
                                       0.9, "未见马赛克网格")])
     assert negative.state is CensorState.UNKNOWN, "画面没检出也不能自动判无码"
@@ -86,7 +95,7 @@ def test_low_risk_is_not_a_todo():
 
 def test_deferred_name_clue_is_not_a_todo():
     """没有画面证据、但文件名明说是无码/流出 → 延后，不占待办。"""
-    result = VideoVerdict(path=r"C:\lib\ABC-123 无码流出.mp4")
+    result = VideoVerdict(path=_lib("ABC-123 无码流出.mp4"))
     result.verdict = fuse([])
     assert bucket(result) is ReviewBucket.DEFERRED
     assert not needs_review(result)
@@ -155,11 +164,11 @@ def test_columns_split_conclusion_and_process(page):
 
 
 def test_view_and_conclusion_filters_are_independent(page):
-    page._on_item(_result(CensorState.CENSORED, path=r"C:\lib\A-1.mp4"))
-    page._on_item(_result(CensorState.UNCENSORED, path=r"C:\lib\B-2.mp4"))
+    page._on_item(_result(CensorState.CENSORED, path=_lib("A-1.mp4")))
+    page._on_item(_result(CensorState.UNCENSORED, path=_lib("B-2.mp4")))
     page._on_item(_result(CensorState.UNKNOWN, review_required=False,
-                          path=r"C:\lib\C-3.mp4"))
-    page._results[r"C:\lib\C-3.mp4"].verdict.needs_review = False
+                          path=_lib("C-3.mp4")))
+    page._results[_lib("C-3.mp4")].verdict.needs_review = False
 
     def visible():
         return {page.table.item(r, 0).data(0) for r in range(page.table.rowCount())
@@ -177,14 +186,14 @@ def test_view_and_conclusion_filters_are_independent(page):
 
 
 def test_view_labels_carry_counts(page):
-    page._on_item(_result(CensorState.CENSORED, path=r"C:\lib\A-1.mp4"))
+    page._on_item(_result(CensorState.CENSORED, path=_lib("A-1.mp4")))
     page._refresh_stats()
     texts = [page.combo_filter.itemText(i) for i in range(page.combo_filter.count())]
     assert any(text.endswith("待我处理 (1)") for text in texts), texts
 
 
 def test_manual_label_moves_row_to_confirmed(page, monkeypatch):
-    page._on_item(_result(CensorState.CENSORED, path=r"C:\lib\A-1.mp4"))
+    page._on_item(_result(CensorState.CENSORED, path=_lib("A-1.mp4")))
     page.table.selectRow(0)
     page._on_row_selected()
     monkeypatch.setattr(page._service, "label",
@@ -252,7 +261,7 @@ def test_import_all_cached_does_not_start_a_scan(page, monkeypatch, tmp_path, qt
 
 def test_restore_pending_loads_history_and_switches_view(page, monkeypatch):
     """关掉程序再打开，待处理项要自动接上 —— 这是"遗漏"最实际的来源。"""
-    pending = [_result(CensorState.UNKNOWN, path=rf"C:\lib\old{i}.mp4") for i in range(3)]
+    pending = [_result(CensorState.UNKNOWN, path=_lib(f"old{i}.mp4")) for i in range(3)]
     monkeypatch.setattr(page._service, "review_queue", lambda limit=500: pending)
     page._restore_pending()
     assert page.table.rowCount() == 3
@@ -261,8 +270,8 @@ def test_restore_pending_loads_history_and_switches_view(page, monkeypatch):
 
 
 def test_restore_does_not_duplicate_existing_rows(page, monkeypatch):
-    page._on_item(_result(CensorState.UNKNOWN, path=r"C:\lib\old0.mp4"))
-    pending = [_result(CensorState.UNKNOWN, path=r"C:\lib\old0.mp4")]
+    page._on_item(_result(CensorState.UNKNOWN, path=_lib("old0.mp4")))
+    pending = [_result(CensorState.UNKNOWN, path=_lib("old0.mp4"))]
     monkeypatch.setattr(page._service, "review_queue", lambda limit=500: pending)
     page._restore_pending()
     assert page.table.rowCount() == 1, "已经在列表里的不该再加一行"
