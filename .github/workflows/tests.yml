@@ -57,7 +57,11 @@ jobs:
                    ':!CONTRIBUTING.md' ':!.github/workflows/tests.yml' \
                    ':!tests/test_portability.py' || true)
           if [ -n "$hits" ]; then
-            echo "$hits"
+            printf '%s\n' "$hits"
+            # 逐条变成注解，日志拿不到时也能看到是哪个文件哪一行
+            printf '%s\n' "$hits" | head -20 | while IFS= read -r line; do
+              echo "::error::命中个人路径 ${line}"
+            done
             echo "::error::源码中发现本机个人路径"
             exit 1
           fi
@@ -99,7 +103,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ["3.9", "3.11", "3.13"]
+        # ubuntu-latest 已迁到 26.04，setup-python 在上面没有 3.9 的构建；
+        # 3.9 是项目声明的最低版本，改到 22.04 上继续测，别直接删掉。
+        exclude:
+          - os: ubuntu-latest
+            python: "3.9"
         include:
+          - os: ubuntu-22.04
+            python: "3.9"
           - os: macos-latest
             python: "3.12"
     steps:
@@ -143,11 +154,21 @@ jobs:
         run: python main.py --doctor
 
       - name: 运行测试
+        id: pytest
+        continue-on-error: true
         env:
           QT_QPA_PLATFORM: offscreen
           # 测试期间把数据目录钉到临时路径，确保绝不写仓库
           JELLYFIN_TOOLKIT_DATA_DIR: ${{ runner.temp }}/jellyfin-toolkit-ci
-        run: python -m pytest tests -q
+        run: python -m pytest tests -q --tb=line -rf --junitxml="${{ runner.temp }}/junit.xml"
+
+      # 日志要登录才能看，注解不用。失败时把用例名和原因直接抛成注解，
+      # 否则只能看到一句 "Process completed with exit code 1"。
+      - name: 汇总失败用例
+        if: steps.pytest.outcome == 'failure'
+        env:
+          JUNIT_XML: ${{ runner.temp }}/junit.xml
+        run: python tools/dev/ci_test_summary.py "$JUNIT_XML"
 
       - name: 确认测试没有污染工作区
         shell: bash
