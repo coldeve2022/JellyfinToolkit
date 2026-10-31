@@ -1,4 +1,4 @@
-"""找无码版的筛选规则引擎 —— 只负责"这条记录满不满足"，不碰界面。
+"""替换版本检索的筛选规则引擎 —— 只负责"这条记录满不满足"，不碰界面。
 
 为什么单独一层
 --------------
@@ -14,8 +14,10 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
+from utils.media_review_query import aggregate_review
 
 __all__ = ["FilterRule", "FieldSpec", "FIELDS", "evaluate", "describe", "fields_for_ui"]
 
@@ -113,41 +115,19 @@ def _tagged(row, words: Iterable[str]) -> bool:
     return any(word.casefold() in text for word in words)
 
 
-def _review_of(row, ctx, key):
-    lookup = ctx.get("review")
-    if not callable(lookup):
-        return None
-    states = []
-    for path in getattr(row, "paths", []) or []:
-        states.append((lookup(path) or {}).get(key))
-    return states
-
-
 def _favorite(row, ctx) -> str:
-    states = _review_of(row, ctx, "is_favorite") or []
-    if any(state is True for state in states):
-        return "favorite"
-    if states and all(state is False for state in states):
-        return "not_favorite"
-    return "unknown"
+    return _review_states(row, ctx)[0]
 
 
 def _played(row, ctx) -> str:
+    return _review_states(row, ctx)[1]
+
+
+def _review_states(row, ctx):
     lookup = ctx.get("review")
     if not callable(lookup):
-        return "unknown"
-    played, progress = [], []
-    for path in getattr(row, "paths", []) or []:
-        item = lookup(path) or {}
-        played.append(item.get("played"))
-        progress.append(bool(item.get("has_progress") or item.get("playback_ticks", 0)))
-    if played and all(state is True for state in played):
-        return "played"
-    if any(tick and state is not True for state, tick in zip(played, progress)):
-        return "progress"
-    if played and all(state is False and not tick for state, tick in zip(played, progress)):
-        return "unplayed"
-    return "unknown"
+        return 'unknown', 'unknown'
+    return aggregate_review((lookup(path) or {}) for path in getattr(row, 'paths', []))
 
 
 def _exists(row, ctx) -> bool:
@@ -158,14 +138,11 @@ def _exists(row, ctx) -> bool:
 
 
 def _sources(row) -> str:
-    report = _report(row)
     names = set()
     for candidate in _candidates(row):
         name = str(getattr(candidate, "source", "") or "")
         if name:
             names.add(name)
-    for name in (getattr(report, "sources", {}) or {}):
-        names.add(str(name))
     return " ".join(sorted(names))
 
 
@@ -181,7 +158,11 @@ FIELDS: dict[str, FieldSpec] = {
         FieldSpec("state", "检索结论", "enum", ("eq", "ne"),
                   lambda row, ctx: getattr(row, "state_key", ""),
                   choices=(("todo", "未查"), ("confirmed", "确有"), ("likely", "疑似"),
-                           ("none", "未见"), ("unknown", "未完成"), ("failed", "失败"))),
+                           ("none", "未见"), ("unknown", "未完成/未知"))),
+        FieldSpec("lookup_status", "检索执行状态", "enum", ("eq", "ne"),
+                  lambda row, ctx: getattr(getattr(_report(row), 'status', None), 'value', 'todo'),
+                  choices=(("todo", "未查"), ("completed", "完成"), ("partial", "部分完成"),
+                           ("failed", "失败"), ("cancelled", "已取消"))),
         FieldSpec("candidates", "候选条数", "number", _NUM_OPS,
                   lambda row, ctx: len(_candidates(row)), unit="条"),
         FieldSpec("magnets", "磁链条数", "number", _NUM_OPS,
@@ -193,6 +174,14 @@ FIELDS: dict[str, FieldSpec] = {
                   unit="0–1"),
         FieldSpec("sources", "命中来源", "text", _TEXT_OPS,
                   lambda row, ctx: _sources(row)),
+        FieldSpec("searched_sources", "尝试过的来源", "text", _TEXT_OPS,
+                  lambda row, ctx: ' '.join(sorted(getattr(_report(row), 'sources', {}) or {}))),
+        FieldSpec("probe_confidence", "检测结论置信度（最高）", "number", _NUM_OPS,
+                  lambda row, ctx: max((r.verdict.confidence for r in getattr(row, 'records', ())), default=0), unit="0–1"),
+        FieldSpec("visual_score", "画面检测分数（最高）", "number", _NUM_OPS,
+                  lambda row, ctx: max((r.visual_score for r in getattr(row, 'records', ())), default=0), unit="原始分数"),
+        FieldSpec("probe_elapsed", "检测耗时（合计）", "number", _NUM_OPS,
+                  lambda row, ctx: sum(r.elapsed for r in getattr(row, 'records', ())), unit="秒"),
         FieldSpec("queried", "最近检索时间", "date", _DATE_OPS,
                   lambda row, ctx: float(getattr(_report(row), "queried_at", 0.0) or 0.0),
                   unit="天"),
@@ -218,11 +207,11 @@ FIELDS: dict[str, FieldSpec] = {
         FieldSpec("favorite", "Jellyfin 喜欢", "enum", ("eq", "ne"),
                   _favorite,
                   choices=(("favorite", "已喜欢"), ("not_favorite", "未喜欢"),
-                           ("unknown", "未同步"))),
+                           ("unknown", "未知/未匹配"))),
         FieldSpec("played", "Jellyfin 播放状态", "enum", ("eq", "ne"),
                   _played,
                   choices=(("played", "已播放"), ("progress", "播放中"),
-                           ("unplayed", "未播放"), ("unknown", "未同步"))),
+                           ("unplayed", "未播放"), ("unknown", "未知/未匹配"))),
     )
 }
 
@@ -232,24 +221,41 @@ FIELDS: dict[str, FieldSpec] = {
 def _as_float(value, spec_field: str) -> float:
     text = str(value or "").strip().lower().replace(",", "")
     if not text:
-        return 0.0
+        raise ValueError('请填写数值')
     # "10gb" / "5 g" 这类写法直接换算成字节，省得用户自己乘
     for unit, factor in (("tb", 1024 ** 4), ("gb", 1024 ** 3), ("mb", 1024 ** 2)):
-        if text.endswith(unit):
-            try:
-                return float(text[: -len(unit)]) * factor
-            except ValueError:
-                return 0.0
+        if spec_field == 'magnet_size' and text.endswith(unit):
+            text = str(float(text[: -len(unit)]) * factor)
+            break
     try:
-        return float(text)
+        number = float(text)
     except ValueError:
-        return 0.0
+        raise ValueError('请输入有效数值；磁链大小支持 MB / GB / TB') from None
+    if not math.isfinite(number):
+        raise ValueError('数值必须为有限值')
+    return number
+
+
+def validate_rule(rule: FilterRule) -> None:
+    spec = FIELDS.get(rule.field)
+    if spec is None:
+        raise ValueError(f'不支持的字段：{rule.field}')
+    if rule.op not in spec.ops:
+        raise ValueError(f'{spec.label}不支持该运算符')
+    if spec.kind == 'number':
+        _as_float(rule.value, spec.key)
+    elif spec.kind == 'date' and rule.op != 'never':
+        if _as_float(rule.value, spec.key) <= 0:
+            raise ValueError('天数必须大于零')
+    elif spec.kind == 'enum' and rule.value not in dict(spec.choices):
+        raise ValueError(f'{spec.label}的取值无效')
 
 
 def _one(rule: FilterRule, row, ctx) -> bool:
     spec = FIELDS.get(rule.field)
     if spec is None:
         return True
+    validate_rule(rule)
     actual = spec.getter(row, ctx)
     op = rule.op
 
@@ -261,12 +267,7 @@ def _one(rule: FilterRule, row, ctx) -> bool:
         stamp = float(actual or 0.0)
         if op == "never":
             return stamp <= 0
-        try:
-            days = float(rule.value or 0)
-        except ValueError:
-            return True
-        if days <= 0:
-            return True
+        days = _as_float(rule.value, spec.key)
         if stamp <= 0:
             return False
         age = (__import__("time").time() - stamp) / 86400.0

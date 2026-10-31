@@ -22,9 +22,16 @@ def page(qapp, qtbot):
 
 
 def seed(page, count=603):
+    """造一批"历史已完成的扫描结果"。
+
+    显式写 `status='completed'`：只插 path 的话列默认值是 'partial'，
+    那是"插进去但还没分析过"的语义，界面会如实标注"未跑完"。
+    """
     with page._service.store._connect() as connection:
-        connection.executemany('INSERT INTO censor_probe(path) VALUES (?)',
-                               [(f'old-{index:05}.mp4',) for index in range(count)])
+        connection.executemany(
+            "INSERT INTO censor_probe(path, status) VALUES (?, 'completed')",
+            [(f'old-{index:05}.mp4',) for index in range(count)],
+        )
     page._service.store.set_label('old-00000.mp4', CensorState.CENSORED)
     manual = VideoVerdict(path='old-00000.mp4')
     manual.verdict = fuse([Evidence(EvidenceSource.MANUAL, CensorState.CENSORED, 1., '人工确认')])
@@ -173,7 +180,9 @@ def test_auto_history_reports_saved_counts_without_gui_db_scan(page, qtbot, monk
     monkeypatch.setattr(page._service.store, 'stats', stats)
     page.show()
     qtbot.waitUntil(lambda: len(page._results) == 603, timeout=5000)
-    assert '已保存扫描 603' in page.data_status.text()
+    assert '已入库 603 条' in page.data_status.text()
+    # 历史行都是完整分析过的，不该被标成"未跑完"
+    assert '未跑完' not in page.data_status.text()
     assert '人工确认 1' in page.data_status.text()
     assert threads and all(t != threading.get_ident() for t in threads)
 

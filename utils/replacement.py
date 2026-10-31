@@ -200,6 +200,17 @@ def execute_replacements(plan, *, journal=None, should_stop=None, log=print, val
                 raise ValueError(result["error"])
             stats["ok"] += 1
             log(f"替换成功（可恢复）：{row['source']} → {row['target']}")
+            if converted:
+                # 转封装成功后，`safe_replace(move_source=True)` 删掉的是**转封装
+                # 后的临时文件**，原始「恢复版」还在原地（它的 source_hash 被跳过
+                # 校验，等于没人管它）。不清理的话：磁盘上同时留下新片 + 那个
+                # xxx.restored.mp4，下次扫描还会把它当成新片重检一遍。
+                try:
+                    Path(row["source"]).unlink(missing_ok=True)
+                except OSError as exc:
+                    # 删不掉不算替换失败：目标已经就位，只是留了个源文件。
+                    result["source_left"] = str(exc)
+                    log(f"⚠️ 已替换，但原始文件没能删除（可手动清理）：{row['source']}：{exc}")
         except (OSError, ValueError, KeyError) as exc:
             if converted:
                 Path(converted).unlink(missing_ok=True)

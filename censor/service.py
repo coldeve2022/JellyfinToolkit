@@ -88,7 +88,12 @@ class CensorService:
         return root / "censor_thumbs"
 
     def _thumb_dir(self, path: str) -> Path:
-        digest = hashlib.md5(str(path).encode("utf-8", "replace")).hexdigest()[:16]
+        # 只用来生成缩略图目录名，不承担任何安全职责。
+        # 显式声明 usedforsecurity=False，否则 bandit 会按"弱哈希用于安全"报 HIGH
+        # （Python 3.9+ 支持该参数，与本项目 MIN_PYTHON 一致）。
+        digest = hashlib.md5(
+            str(path).encode("utf-8", "replace"), usedforsecurity=False
+        ).hexdigest()[:16]
         return self.work_dir / digest
 
     # ── 工具解析 ──
@@ -385,8 +390,15 @@ class CensorService:
             detector_runs=runs,
         )
         try:
+            # 落库条件只跟"要不要缓存"有关，与完成度无关。
+            # 以前写成 `use_cache and status is COMPLETED`，代价是：一个检测器
+            # 抛异常 → 整批 PARTIAL → 一条都不入库 → 界面 226 行、库里 0 行。
+            #
+            # 但身份对不上时（分析期间文件被换掉）绝不能写：那会把一份描述
+            # "旧文件"的结论挂到新文件上。未完成的结果由 store._write_result
+            # 保证不覆盖已完成的结论；读缓存时也会因 status != completed 判 miss。
             self.store.put(result, policy=self.policy,
-                           persist=opts.use_cache and status is ProcessingStatus.COMPLETED,
+                           persist=opts.use_cache and identity_matches,
                            allow_manual=identity_matches)
         except Exception as exc:  # noqa: BLE001 - 缓存写失败不该影响结果
             log(f"⚠️ 结果缓存写入失败：{exc}")
@@ -567,7 +579,10 @@ class CensorService:
 
     def _queue_review_metadata(self, path, identity, state):
         self.last_metadata_sync_error = ''
-        if not (self._cfg_get('censor_sync_nfo', False) or self._cfg_get('censor_sync_jellyfin', False)):
+        # 兜底必须是"真默认值"：这两个开关在 config.py 里默认 True（检测完顺手同步
+        # NFO/服务器标签）。以前这里写 False，于是用 dict 配置（测试、CLI、
+        # CensorService({...})）时同步被静默关掉，而界面上复选框显示为勾选。
+        if not (self._cfg_get('censor_sync_nfo', True) or self._cfg_get('censor_sync_jellyfin', True)):
             return
         try:
             self.metadata_sync().enqueue(path, identity, state)

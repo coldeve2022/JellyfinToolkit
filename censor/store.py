@@ -126,7 +126,10 @@ def _load_evidence(raw: str) -> list[Evidence]:
     return out
 
 
-def _dump_candidates(candidates: Iterable[FrameCandidate]) -> str:
+def _dump_candidates(candidates: Iterable[FrameCandidate], data_dir=None) -> str:
+    from utils.profile_assets import store_asset
+    def asset(value):
+        return store_asset(value, data_dir) if data_dir is not None else value
     return json.dumps(
         [
             {
@@ -135,9 +138,9 @@ def _dump_candidates(candidates: Iterable[FrameCandidate]) -> str:
                 "block_size": c.block_size,
                 "box": list(c.box) if c.box else None,
                 "skin_ratio": c.skin_ratio,
-                "thumb_path": c.thumb_path,
+                "thumb_path": asset(c.thumb_path),
                 "frame_hash": c.frame_hash,
-                "crop_path": c.crop_path,
+                "crop_path": asset(c.crop_path),
             }
             for c in candidates
         ],
@@ -194,11 +197,15 @@ class StoreStats:
     unknown: int = 0
     review: int = 0
     labeled: int = 0
+    #: 库里存在、但最近一次分析没跑完（partial / failed / cancelled）的行数。
+    #: 与 total 分开报，避免"已扫 N"把跑失败的行也算成扫完了。
+    incomplete: int = 0
 
     def as_text(self) -> str:
         return (
-            f"已扫 {self.total} · 检出像素化 {self.censored} · 人工未见 {self.uncensored} · "
-            f"待确认 {self.unknown} · 待复核 {self.review} · 人工记录 {self.labeled}"
+            f"已入库 {self.total}（完整 {self.total - self.incomplete} · 未完成 {self.incomplete}）"
+            f" · 检出像素化 {self.censored} · 人工未见 {self.uncensored}"
+            f" · 待确认 {self.unknown} · 待复核 {self.review} · 人工记录 {self.labeled}"
         )
 
 
@@ -340,9 +347,14 @@ class VerdictStore:
             if statement.strip():
                 conn.execute(statement)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(censor_probe)")}
+        added_status = False
         for name, definition in {
             "file_identity": "TEXT NOT NULL DEFAULT ''",
             "analysis_signature": "TEXT NOT NULL DEFAULT ''",
+            # 默认 'partial' 对"刚插进去还没分析的行"是对的，但对**升级上来的历史库**
+            # 是错的：老版本的 censor_probe 只在分析跑完后才写入，存量行都是完成的。
+            # 所以下面会针对"本次新建该列"的情况回填成 completed，否则老库会整库
+            # 显示"未跑完"，而且严格读缓存会一律 miss（每次全库重扫）。
             "status": "TEXT NOT NULL DEFAULT 'partial'",
             "sampled_frames": "INTEGER NOT NULL DEFAULT 0",
             "analyzed_frames": "INTEGER NOT NULL DEFAULT 0",
@@ -350,6 +362,12 @@ class VerdictStore:
         }.items():
             if name not in columns:
                 conn.execute(f"ALTER TABLE censor_probe ADD COLUMN {name} {definition}")
+                if name == "status":
+                    added_status = True
+        if added_status:
+            conn.execute(
+                "UPDATE censor_probe SET status='completed' WHERE status='partial'"
+            )
         had_history = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='censor_label_history'"
         ).fetchone()
@@ -391,13 +409,18 @@ class VerdictStore:
         return self._decode_row(key, row, size=size, mtime=mtime,
                                 analysis_signature=analysis_signature, file_identity=file_identity)
 
-    @staticmethod
-    def _decode_row(key, row, *, size=-1, mtime=-1., analysis_signature=None, file_identity=None):
+    def _decode_row(self, key, row, *, size=-1, mtime=-1., analysis_signature=None, file_identity=None):
         # A damaged record must be a miss on every read path, including a
         # direct rescan. Keep the row for diagnosis; a completed scan repairs it.
         try:
-            return VerdictStore._decode_valid_row(key, row, size=size, mtime=mtime,
+            result = VerdictStore._decode_valid_row(key, row, size=size, mtime=mtime,
                 analysis_signature=analysis_signature, file_identity=file_identity)
+            if result is not None:
+                from utils.profile_assets import resolve_asset
+                for candidate in result.candidates:
+                    candidate.thumb_path = resolve_asset(candidate.thumb_path, self.db_path.parent)
+                    candidate.crop_path = resolve_asset(candidate.crop_path, self.db_path.parent)
+            return result
         except (ValueError, TypeError, KeyError, OverflowError):
             return None
 
@@ -511,8 +534,25 @@ class VerdictStore:
             else:
                 result.verdict.reason += '；最近分析未完成：' + (result.error or result.status.label)
 
-    @staticmethod
-    def _write_result(conn, result):
+    def _write_result(self, conn, result):
+        """写入一条分析结论。
+
+        一条铁律：**未完成的分析不得覆盖已完成的结论**。
+
+        以前这里是无条件 UPSERT，而 `probe` 只在 `COMPLETED` 时才会 persist，
+        两边凑在一起就是用户报的"列表 226 条、已保存 0 条"：
+        只要有一个检测器抛异常，整批结果就变成 `PARTIAL` → 一行都不落库 →
+        `stats()` 读到 0 → 重启后那 226 条整批消失。
+
+        现在未完成也落库（界面上的行数与库里的行数才对得上），
+        但绝不顶掉一条已经完整跑完的好结论。
+        """
+        if result.status is not ProcessingStatus.COMPLETED:
+            existing = conn.execute(
+                "SELECT status FROM censor_probe WHERE path=?", (str(result.path),)
+            ).fetchone()
+            if existing is not None and existing[0] == ProcessingStatus.COMPLETED.value:
+                return
         conn.execute(
             "INSERT INTO censor_probe (path, size, mtime, duration, number, provider,"
             " state, confidence, needs_review, reason, evidence, candidates,"
@@ -537,7 +577,7 @@ class VerdictStore:
                 1 if result.verdict.needs_review else 0,
                 result.verdict.reason,
                 _dump_evidence(result.verdict.evidence),
-                _dump_candidates(result.candidates),
+                _dump_candidates(result.candidates, self.db_path.parent),
                 float(result.visual_score),
                 float(result.elapsed),
                 result.error or "",
@@ -694,6 +734,12 @@ class VerdictStore:
                 ]
             )
             stats.labeled = int(conn.execute("SELECT COUNT(*) FROM censor_label").fetchone()[0])
+            stats.incomplete = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM censor_probe WHERE status != ?",
+                    (ProcessingStatus.COMPLETED.value,),
+                ).fetchone()[0]
+            )
         return stats
 
     def review_queue(self, limit: int = 500) -> list[VideoVerdict]:
@@ -720,24 +766,21 @@ class VerdictStore:
     def confirmed_censored(self, verify_identity=True) -> list[VideoVerdict]:
         """**已人工确认「有码」**的记录 —— 阶段二（找替换）的唯一数据来源。
 
-        注意这不是"算法判有码"，而是 `censor_label` 里人工存下的结论；
+        与历史页共用按身份关联的人工标记投影，不依赖 probe 内旧证据副本；
         换了文件版本（file_identity 不匹配）的老标记不会混进来。
         """
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT p.path FROM censor_label l JOIN censor_probe p ON p.path = l.path"
-                " WHERE l.state = 'censored' ORDER BY p.updated_at DESC, p.path"
-            ).fetchall()
+            rows = conn.execute(f"SELECT {_HISTORY_COLUMNS} {_HISTORY_FROM} "
+                                "WHERE h.state='censored' ORDER BY p.updated_at DESC,p.path").fetchall()
         out: list[VideoVerdict] = []
-        records = self.get_many(path for (path,) in rows)
-        for (path,) in rows:
-            item = records.get(path)
+        for row in rows:
+            item = self._project_history_row(row)
             if item is None:
                 continue
             if verify_identity:
                 from censor.identity import identify_file
                 try:
-                    identity = identify_file(path).serialize()
+                    identity = identify_file(item.path).serialize()
                 except OSError:
                     continue
                 if item.file_identity != identity:
@@ -824,5 +867,8 @@ class VerdictStore:
             for candidate in _load_candidates(raw):
                 for path in (candidate.thumb_path, candidate.crop_path):
                     if path:
-                        paths.add(str(Path(path).resolve()))
+                        from utils.profile_assets import resolve_asset
+                        resolved = resolve_asset(path, self.db_path.parent)
+                        if resolved:
+                            paths.add(str(Path(resolved).resolve()))
         return paths

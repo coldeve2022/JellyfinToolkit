@@ -86,6 +86,13 @@ def test_scope_selector_save_failure_rolls_back(qapp):
 
 
 def test_main_window_blocks_fixed_action_footer_until_scope_selected(qapp):
+    """未选范围时只禁用主操作，不整页变灰。
+
+    老行为是 `page.setEnabled(False)`，代价是用户点进「库概览 / 快速打标」看到一个
+    全灰的页面，连表头都读不了，只能判定"功能坏了"；而新手引导恰好把用户送进这些
+    页面。现在页面保持可读，主按钮禁用，
+    顶部范围条用警示色说明原因。
+    """
     from ui.main_window import MainWindow
     from ui.pages.review import ReviewPage
 
@@ -94,11 +101,14 @@ def test_main_window_blocks_fixed_action_footer_until_scope_selected(qapp):
     window = MainWindow(cfg)
     page = ReviewPage(cfg)
     window.register_page(page)
-    assert not page.isEnabled()
-    assert not page.btn_analyze.isEnabled()
+    assert page.isEnabled(), "页面本身不该被禁用"
+    assert not page.btn_analyze.isEnabled(), "主操作应被禁用"
+    assert window.scope_bar.summary.property("scopeWarning") is True
+    assert "先选择媒体库范围" in window.scope_bar.choose_button.text()
+
     assert window.scope_bar.apply_selection([], [], ["/movies"])
-    assert page.isEnabled()
     assert page.btn_analyze.isEnabled()
+    assert window.scope_bar.summary.property("scopeWarning") is False
     window.close()
 
 

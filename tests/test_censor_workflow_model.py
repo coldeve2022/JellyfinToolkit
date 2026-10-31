@@ -296,7 +296,7 @@ def test_confirming_censored_enqueues_number(page, monkeypatch):
                         lambda path, state, note="", base=None: confirmed)
     page._label(CensorState.CENSORED)
     assert queued and queued[-1] == ["A123"], queued
-    assert "找无码版" in page._stats_label.text()
+    assert "替换版本检索" in page._stats_label.text()
 
 
 def test_confirming_uncensored_never_enqueues(page, monkeypatch):
@@ -316,7 +316,7 @@ def test_confirming_uncensored_never_enqueues(page, monkeypatch):
 
 
 def test_lookup_is_not_on_the_checking_page_anymore(page):
-    """检查页不再显示检索结果 —— 那是「找无码版」页的事。"""
+    """检查页不再显示检索结果 —— 那是「替换版本检索」页的事。"""
     from ui.pages.censorship import _COLUMNS
 
     assert "无码版" not in _COLUMNS
@@ -329,4 +329,4 @@ def test_stats_point_at_the_replace_page(page):
     page._refresh_stats()
     text = page._stats_label.text()
     assert "已确认有码 1" in text, text
-    assert "找无码版" in text, text
+    assert "替换版本检索" in text, text

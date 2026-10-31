@@ -77,11 +77,11 @@ def test_env_override_wins(monkeypatch, tmp_path):
     monkeypatch.delenv(config_mod.DATA_DIR_ENV, raising=False)
     assert config_mod.used_configured_data_dir() is False
     # 没有环境变量时应回退到源码目录（开发模式）。
-    # 注意：3.22.1 起多了"用户级固定资料库登记"这一层，本机 APPDATA 里登记的是
-    # 另一个工作副本，会盖住源码目录。这里把登记屏蔽掉，才是在测本条规则的语义。
-    from utils import data_profile
+    # A developer may explicitly select a sibling profile using a local pointer.
+    # Isolate that machine-local preference when testing the ordinary default.
+    from utils import profile_runtime
 
-    monkeypatch.setattr(data_profile, "registered_root", lambda _path: None)
+    monkeypatch.setattr(profile_runtime, "read_local_pointer", lambda _path: None)
     assert config_mod._resolve_base_dir() == config_mod.program_dir()
 
 

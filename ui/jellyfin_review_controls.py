@@ -6,7 +6,7 @@ from PySide6.QtCore import QObject, Signal, QTimer, Qt
 from PySide6.QtWidgets import QInputDialog
 
 from ui.services import CallWorker, busy, start_task, events
-from utils.jellyfin_review import JellyfinReviewService
+from utils.jellyfin_review import JellyfinReviewService, shared_review_service
 
 
 class JellyfinReviewController(QObject):
@@ -19,20 +19,34 @@ class JellyfinReviewController(QObject):
         self.items = {}
         self.context_key = ''
         self.last_status = ''
+        self._snapshot_service = None
+        self._notifying = False
+        self._closed = False
         self.reload(repaint=False)
+        events.user_state_changed.connect(self._state_changed)
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.refresh)
 
     def service(self):
-        return JellyfinReviewService(self.page.cfg, data_dir=self.page._service.store.db_path.parent)
+        candidate = shared_review_service(self.page.cfg, data_dir=self.page._service.store.db_path.parent)
+        previous = self._snapshot_service
+        if (previous is None or previous.context_key != candidate.context_key
+                or previous._db_path.resolve() != candidate._db_path.resolve()):
+            self._snapshot_service = candidate
+        return self._snapshot_service
 
     def reload(self, *, repaint=True):
         service = self.service()
         self.context_key = service.context_key
-        self.items = service.cached_items()
-        self.last_status = ('Jellyfin：请选择观看账号后同步喜欢和播放状态' if not service.user_id
-                            else f'Jellyfin：已选账号 · 缓存 {len(self.items)} 项，未匹配项保持未知')
+        self.snapshot = service.read_snapshot()
+        self.items = self.snapshot.items
+        if self.snapshot.status == 'ready':
+            timestamp = (self.snapshot.updated_at[:19].replace('T', ' ') + ' UTC'
+                         if self.snapshot.updated_at else '旧快照，时间未知')
+            self.last_status = f'Jellyfin：缓存 {len(self.items)} 项 · {timestamp} · 未匹配项保持未知'
+        else:
+            self.last_status = 'Jellyfin：' + self.snapshot.message
         self.changed.emit(self.last_status)
         if repaint:
             self.repaint()
@@ -50,7 +64,8 @@ class JellyfinReviewController(QObject):
             return
         def work(cancel):
             result = service.refresh(should_stop=cancel)
-            return dict(summary=result, items=service.cached_items(), context_key=service.context_key)
+            snapshot = service.read_snapshot()
+            return dict(summary=result, items=snapshot.items, snapshot=snapshot, context_key=service.context_key)
         worker = CallWorker(work)
         self.page._favorites_worker = worker
         worker.result.connect(self.accept_snapshot)
@@ -70,10 +85,23 @@ class JellyfinReviewController(QObject):
             return
         self.context_key = payload['context_key']
         self.items = payload.get('items', {})
+        self.snapshot = payload.get('snapshot') or self.service().read_snapshot()
         self.last_status = (f"Jellyfin：已同步 {summary.get('count', len(self.items))} 项"
                             f" · 喜欢 {summary.get('favorites', 0)} · 状态未知 {summary.get('unknown', 0)}")
         self.changed.emit(self.last_status)
         self.repaint()
+        self._notifying = True
+        try:
+            events.user_state_changed.emit(self.context_key, str(self.service()._db_path.parent.resolve()))
+        finally:
+            self._notifying = False
+
+    def _state_changed(self, context_key, data_dir):
+        if self._closed or self._notifying:
+            return
+        service = self.service()
+        if context_key == service.context_key and data_dir == str(service._db_path.parent.resolve()):
+            self.reload()
 
     def repaint(self):
         table = self.page.table
@@ -143,4 +171,5 @@ class JellyfinReviewController(QObject):
             self.timer.start(1800)
 
     def shutdown(self):
+        self._closed = True
         self.timer.stop()

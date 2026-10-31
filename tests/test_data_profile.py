@@ -142,7 +142,7 @@ def test_cancel_or_foreign_selection_does_not_create_profile(tmp_path):
         assert not args['registry'].exists()
 
 
-def test_config_resolves_registered_root_for_source_and_frozen(tmp_path, monkeypatch):
+def test_config_requires_local_selection_for_source_and_frozen(tmp_path, monkeypatch):
     import config
     from utils.data_profile import remember_profile
     shared = tmp_path / 'user'
@@ -155,7 +155,10 @@ def test_config_resolves_registered_root_for_source_and_frozen(tmp_path, monkeyp
     monkeypatch.setattr(config, 'program_dir', lambda: tmp_path / 'release')
     for frozen in (False, True):
         monkeypatch.setattr(config.sys, 'frozen', frozen, raising=False)
-        assert config._resolve_base_dir() == old.resolve()
+        assert config._resolve_base_dir() == tmp_path / 'release'
+    from utils.profile_runtime import write_local_pointer
+    write_local_pointer(tmp_path / 'release', old)
+    assert config._resolve_base_dir() == old.resolve()
 
 
 def test_broken_database_is_not_registered(tmp_path):

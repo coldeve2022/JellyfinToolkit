@@ -1,16 +1,16 @@
-"""无码版本检索的领域模型。
+"""版本可用性检索的领域模型。
 
 和 `censor.models` 一样，这一层不碰网络、不碰 Qt，只描述"查到的东西长什么样"。
 
 三个概念要分清：
 
 ``ReleaseCandidate``
-    网络上**一个具体条目**（JavDB 的某条作品页 / 某个种子页），
-    带片商、类别、发行日期和它自己的磁链。
+    网络上**一个具体条目**（某个站点的作品页 / 种子页），
+    带片商、类别、发行日期和它自己的下载链接。
 
 ``Availability``
-    这部作品**是否存在无码版**的四态结论。注意它描述的是"网络上有没有"，
-    不是"本地这个文件有没有码" —— 后者由 :mod:`censor.fusion` 负责。
+    这部作品**是否存在可用的替代版本**的四态结论。注意它描述的是"网络上有没有"，
+    不是"本地这个文件是否需要处理" —— 后者由 :mod:`censor.fusion` 负责。
 
 ``ReleaseReport``
     一次检索的完整结果：四态结论 + 全部条目 + 每个站点的成败。
@@ -42,11 +42,11 @@ def normalize_number(value: str) -> str:
 
 
 class Availability(str, Enum):
-    """这部**作品**在网络上的无码版可得性。"""
+    """这部**作品**在网络上的替代版本可得性。"""
 
-    CONFIRMED = "confirmed"   # 查到明确的无码条目（官方无码 / 流出 / 破解）
-    LIKELY = "likely"         # 有条目线索（标题/标签含无码字样）但没有确证条目
-    NONE = "none"             # 查到作品，但没有任何无码版本
+    CONFIRMED = "confirmed"   # 查到明确的替代版本条目
+    LIKELY = "likely"         # 有条目线索（标题/标签命中标记）但没有确证条目
+    NONE = "none"             # 查到作品，但没有任何替代版本
     UNKNOWN = "unknown"       # 没查成：无番号 / 站点全部不可用 / 无结果
 
     @property
@@ -114,7 +114,7 @@ class ReleaseCandidate:
     release_date: str = ""
     duration_minutes: int = 0
     categories: tuple[str, ...] = ()
-    uncensored: bool = False       # 该条目本身是否无码版
+    uncensored: bool = False       # 该条目本身是否属于替代版本
     uncensored_reason: str = ""    # 判定依据（必须可读，便于核对）
     uncensored_confidence: float = 0.0  # 依据有多硬：站点标记/厂牌 0.9，仅标题线索 0.55
     magnets: tuple[MagnetLink, ...] = ()
@@ -172,7 +172,7 @@ class ReleaseReport:
 
     @property
     def best(self) -> ReleaseCandidate | None:
-        """最值得下载的那条：有磁链的无码条目优先，其次体积大的。"""
+        """最值得下载的那条：有下载链接的替代版本条目优先，其次体积大的。"""
         pool = [c for c in self.uncensored if c.best_magnet] or list(self.uncensored)
         if not pool:
             return None
@@ -209,5 +209,5 @@ class ReleaseReport:
         if self.availability is Availability.LIKELY:
             return "疑似"
         if self.availability is Availability.NONE:
-            return "未见无码版"
+            return "未见替代版本"
         return "未查" + (f"（{self.note}）" if self.note else "")

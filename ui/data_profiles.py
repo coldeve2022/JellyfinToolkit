@@ -5,16 +5,21 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFileDialog, QInputDialog, QLabel,
-    QMessageBox, QPushButton, QVBoxLayout,
+    QMessageBox, QPushButton, QVBoxLayout, QPlainTextEdit, QApplication,
 )
 
-from utils.data_profile import PROFILE_FILENAME, ProfileError, inspect_root, prepare_profile, remember_profile
+from utils.data_profile import (PROFILE_FILENAME, ProfileError, inspect_root,
+                               profile_diagnostics, format_profile_diagnostics)
+from utils.profile_runtime import startup_selection, open_profile, write_local_pointer
+from utils.profile_lock import ProfileLock
+
+_startup_lock = None
 
 
 def choose_profile(rows):
     labels = [f"人工确认 {row['labels']} · 扫描 {row['scans']}\n{row['root']}" for row in rows]
     label, accepted = QInputDialog.getItem(None, '选择继续使用的资料库',
-        '发现多个独立资料库。选择一次后，各版本继续使用同一个库；不复制或覆盖其他库。',
+        '发现旧资料库。请选择本次使用的位置；选择外部目录后仅登记到当前程序文件夹，不会自动合并。',
         labels, 0, False)
     return rows[labels.index(label)]['root'] if accepted else None
 
@@ -34,7 +39,7 @@ def select_existing_profile(parent=None):
         if QMessageBox.question(parent, '登记默认资料库', detail,
                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return False
-        remember_profile(selected, config.user_data_root() / PROFILE_FILENAME)
+        write_local_pointer(config.program_dir(), selected)
     except (ProfileError, OSError) as exc:
         QMessageBox.warning(parent, '资料库未切换', str(exc))
         return False
@@ -45,31 +50,62 @@ def select_existing_profile(parent=None):
 
 
 def recover_profile(message):
-    answer = QMessageBox.warning(None, '资料库未能打开', message +
-        '\n\n不会静默新建空库。请恢复原目录，或选择已有资料库后重试。',
-        QMessageBox.Retry | QMessageBox.Cancel, QMessageBox.Cancel)
-    return answer == QMessageBox.Retry and select_existing_profile()
-
-
-def prepare_startup_profile():
     import config
-    arguments = dict(default_root=config.BASE_DIR, registry=config.user_data_root() / PROFILE_FILENAME,
-                     program_root=config.program_dir(), shared_root=config.user_data_root(),
-                     explicit=bool(os.environ.get(config.DATA_DIR_ENV)), portable=config.portable_mode(),
-                     choose=choose_profile)
-    try:
-        root = prepare_profile(**arguments)
-    except (ProfileError, OSError) as exc:
-        if not recover_profile(str(exc)):
-            return False
+    box = QMessageBox(QMessageBox.Warning, '资料库未能打开', message +
+        '\n\n请选择已有资料库，或在没有本地资料时明确新建。')
+    select = box.addButton('选择已有资料库', QMessageBox.ActionRole)
+    new = None
+    program = config.program_dir()
+    if not (program / 'profile.json').exists() and not (program / 'data/censor.db').exists():
+        new = box.addButton('新建程序文件夹内的资料库', QMessageBox.AcceptRole)
+    cancel = box.addButton(QMessageBox.Cancel)
+    box.setDefaultButton(cancel)
+    box.exec()
+    if new is not None and box.clickedButton() is new:
+        return 'new_local'
+    return box.clickedButton() is select and select_existing_profile()
+
+
+def release_startup_profile():
+    global _startup_lock
+    if _startup_lock is not None:
+        _startup_lock.release()
+        _startup_lock = None
+
+
+def prepare_startup_profile(*, create=False):
+    global _startup_lock
+    import config
+    for attempt in range(2):
         try:
-            root = prepare_profile(**arguments)
-        except (ProfileError, OSError) as retry_error:
-            QMessageBox.critical(None, '资料库仍不可用', str(retry_error))
-            return False
-    # No services have been constructed yet. Rebind any import-time aliases.
-    config.set_data_root(root)
-    return True
+            explicit = os.environ.get(config.DATA_DIR_ENV)
+            root, may_create = startup_selection(config.program_dir(), explicit_root=explicit,
+                create=create, legacy_registry=config.user_data_root() / PROFILE_FILENAME, choose=choose_profile)
+            if may_create:
+                root.mkdir(parents=True, exist_ok=True)
+            lock = ProfileLock(root).acquire()
+            try:
+                open_profile(root, create=may_create)
+                if not explicit and root != config.program_dir().resolve():
+                    write_local_pointer(config.program_dir(), root)
+            except BaseException:
+                lock.release()
+                raise
+            _startup_lock = lock
+            config.set_data_root(root)
+            return True
+        except (ProfileError, OSError) as exc:
+            # Explicit launch arguments cannot be repaired by saving a different
+            # local pointer; make that failure actionable instead of looping.
+            answer = recover_profile(str(exc)) if not explicit and not attempt else False
+            if answer == 'new_local':
+                create = True
+                continue
+            if explicit or attempt or not answer:
+                if explicit:
+                    QMessageBox.critical(None, '指定资料库不可用', str(exc))
+                return False
+    return False
 
 
 def show_profile_manager(parent=None):
@@ -79,16 +115,29 @@ def show_profile_manager(parent=None):
     dialog.setMinimumWidth(620)
     layout = QVBoxLayout(dialog)
     location = QLabel('当前资料库根目录：\n' + str(config.BASE_DIR) + '\n\n数据库：\n' + str(config.DATA_DIR / 'censor.db'))
+    location.setTextFormat(Qt.PlainText)
     location.setTextInteractionFlags(Qt.TextSelectableByMouse)
     location.setWordWrap(True)
     layout.addWidget(location)
-    try:
-        info = inspect_root(config.BASE_DIR)
-        text = f"数据库已保存：扫描 {info['scans']} 条 · 人工确认 {info['labels']} 条 · 历史 {info['history']} 条"
-    except (ProfileError, OSError) as exc:
-        text = str(exc)
-    counts = QLabel(text); counts.setWordWrap(True); layout.addWidget(counts)
-    note = QLabel('资料库独立于程序版本，升级继续读取同一目录。\n'
+    details = QPlainTextEdit()
+    details.setReadOnly(True)
+    details.setMinimumHeight(230)
+    def refresh_diagnostics():
+        try:
+            info = profile_diagnostics(config.BASE_DIR, config.program_dir() / PROFILE_FILENAME)
+            text = format_profile_diagnostics(info)
+        except (ProfileError, OSError) as exc:
+            text = str(exc)
+        details.setPlainText(text)
+    refresh_diagnostics()
+    layout.addWidget(details)
+    refresh_button = QPushButton('刷新资料库诊断')
+    refresh_button.clicked.connect(refresh_diagnostics)
+    layout.addWidget(refresh_button)
+    copy_button = QPushButton('复制资料库诊断信息')
+    copy_button.clicked.connect(lambda: QApplication.clipboard().setText(details.toPlainText()))
+    layout.addWidget(copy_button)
+    note = QLabel('默认资料保存在程序文件夹内；开发或外部资料库由当前程序的本地指针指定。\n'
                   '停止、关闭页面或清空列表不会删除数据库；不同独立库不会自动覆盖合并。\n'
                   '切换目录下次启动生效，运行中不会混用两个资料库。')
     note.setWordWrap(True); layout.addWidget(note)

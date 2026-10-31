@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QSpinBox,
     QDoubleSpinBox,
-    QMessageBox,
     QPushButton,
 )
 
@@ -30,6 +29,7 @@ class Events(QObject):
     restored_ready = Signal(list, list)
     media_changed = Signal(list)
     censor_changed = Signal(list)
+    user_state_changed = Signal(str, str)  # configuration context, absolute data directory
     replacement_ready = Signal(list, list)
     lada_ready = Signal(list)
     media_upgrade_requested = Signal(list)
@@ -487,11 +487,18 @@ class TaskManager(QObject):
             _cancel_deferred(entry['owner'])
             entry["stopping"] = True
             entry["record"]["status"] = "stopping"
-            stop = getattr(entry["worker"], "stop", None)
+            worker = entry["worker"]
+            stop = getattr(worker, "stop", None)
             if callable(stop):
                 stop()
             else:
-                entry["worker"].requestInterruption()
+                # `submit()` 接受鸭子类型的 worker（只要有 start/finished），
+                # 所以这里不能假定它一定有 Qt 的 requestInterruption。
+                # 以前直接调用，遇到自定义 worker 就抛 AttributeError，
+                # 连带 stop_all() 中断在半路 —— 剩下的任务再也停不下来。
+                interrupt = getattr(worker, "requestInterruption", None)
+                if callable(interrupt):
+                    interrupt()
             self.changed.emit()
 
     def stop_all(self):
@@ -505,46 +512,76 @@ class TaskManager(QObject):
 
     def _poll(self):
         for task_id, entry in list(self._active.items()):
-            try:
-                running = entry["worker"].isRunning()
-            except RuntimeError:
-                running = False
+            worker = entry["worker"]
+            # 本项目里 worker 不一定是 QObject：`submit()` 只要求有 start/finished，
+            # 测试与部分内部实现用的是鸭子类型的可运行对象。对这类对象**不能**
+            # 用 isValid 判断死活，否则会被当场当成"已销毁"，任务下一拍就被收掉。
+            is_qt = isinstance(worker, QObject)
+            alive = isValid(worker) if is_qt else True
+            running = False
+            if alive:
+                try:
+                    running = bool(worker.isRunning())
+                except (RuntimeError, AttributeError):
+                    running = False
             if running:
+                continue
+            # 有些 worker 跟着页面一起被销毁，但它们把结果留在 `stats` 里
+            # （"A stopped parent-owned thread may already have been destroyed
+            # with its page; its Python stats still describe the outcome"）。
+            # 这种要照常结账；只有**Qt 对象已销毁且没有 stats** 的才无从判断。
+            stats = getattr(worker, "stats", None)
+            if is_qt and not alive and not isinstance(stats, dict):
+                # 以前这种条目会一直留在 _active 里，而 submit() 判断"是否还有写
+                # 任务在跑"是全局的 —— 于是它会让所有页面的写操作永久变成
+                # "点了只弹一句等待"。收尾成 interrupted，35ms 内自愈。
+                self._abandon(task_id, entry)
                 continue
             if not entry.get("delivery_barrier_passed"):
                 if not entry.get("delivery_barrier_scheduled"):
                     entry["delivery_barrier_scheduled"] = True
                     QTimer.singleShot(0, self, lambda tid=task_id: self._delivered(tid))
                 continue
-            stats = getattr(entry["worker"], "stats", None)
             if isinstance(stats, dict):
                 self._result(task_id, (stats,))
             record = entry["record"]
-            cancelled = entry["stopping"] or getattr(entry["worker"], "_stopped", False)
+            cancelled = entry["stopping"] or getattr(worker, "_stopped", False)
             record["status"] = (
                 "cancelled" if cancelled else ("failed" if record.get("error") else "succeeded")
             )
             record["ended"] = datetime.now().isoformat(timespec="seconds")
             if record["status"] == "succeeded":
                 record["progress"] = 100
-            for control, enabled in entry["controls"].items():
-                try:
-                    control.setEnabled(enabled)
-                except RuntimeError:
-                    pass
-            for button, enabled in entry["buttons"].items():
-                try:
-                    button.setEnabled(enabled)
-                except RuntimeError:
-                    pass
+            self._restore_controls(entry)
             del self._active[task_id]
-            worker = entry['worker']
-            # A stopped parent-owned thread may already have been destroyed
-            # with its page; its Python stats above still describe the outcome.
-            if isinstance(worker, QObject) and isValid(worker) and worker.property('taskAutoDelete'):
+            if is_qt and alive and worker.property('taskAutoDelete'):
                 worker.deleteLater()
             self._save_history()
             self.changed.emit()
+
+    def _restore_controls(self, entry) -> None:
+        """把任务期间禁用的控件恢复原状（控件可能已随页面销毁，逐个兜底）。"""
+        for control, enabled in entry["controls"].items():
+            try:
+                control.setEnabled(enabled)
+            except RuntimeError:
+                pass
+        for button, enabled in entry["buttons"].items():
+            try:
+                button.setEnabled(enabled)
+            except RuntimeError:
+                pass
+
+    def _abandon(self, task_id, entry) -> None:
+        """收尾一个 worker 已消失的任务，别让它卡住全局写锁。"""
+        record = entry["record"]
+        record["status"] = "interrupted"
+        record["ended"] = datetime.now().isoformat(timespec="seconds")
+        record["error"] = record.get("error") or "后台任务已随页面结束，未能回报结果"
+        self._restore_controls(entry)
+        self._active.pop(task_id, None)
+        self._save_history()
+        self.changed.emit()
 
     def _delivered(self, task_id):
         entry = self._active.get(task_id)
@@ -618,6 +655,28 @@ _TASK_LABELS = {
 }
 
 
+def _notify_task_blocked(owner, reason: str) -> None:
+    """告诉用户"这次点击被拒绝了"，但**不要弹模态框**。
+
+    以前这里 `QMessageBox.information(...)`，两个问题：
+    1. 模态框会阻塞调用方的事件循环 —— 无人值守/自动化环境里直接把进程挂死
+       （全量测试"跑到某处就不动了"就是这么来的）；
+    2. 对真人来说，弹框打断操作，而任务中心本来就有队列状态可看。
+    """
+    message = f"当前还有任务在运行，这次操作没有开始：{reason}"
+    log_panel = getattr(owner, "log_panel", None)
+    log_warning = getattr(log_panel, "log_warning", None)
+    if callable(log_warning):
+        log_warning(message)
+    try:
+        window = owner.window()
+        status = getattr(window, "statusBar", None)
+        if callable(status):
+            status().showMessage(message, 8000)
+    except RuntimeError:
+        pass
+
+
 def start_task(owner, worker, title=None, mutating=None):
     if not isValid(owner) or getattr(owner.window(), "_closing", False):
         stop = getattr(worker, "stop", None)
@@ -638,11 +697,7 @@ def start_task(owner, worker, title=None, mutating=None):
         dispatch.enqueue(worker, title, mutating)
         return True
     if not manager.submit(worker, owner, title, mutating):
-        QMessageBox.information(
-            owner,
-            "等待当前任务结束",
-            "当前页面或媒体写操作仍在进行。请在任务中心等待结束或请求停止。",
-        )
+        _notify_task_blocked(owner, "当前页面或媒体写操作仍在进行，可在任务中心等待或请求停止")
         return False
     return True
 

@@ -79,30 +79,46 @@ class ReleaseSettings(QWidget):
         self._loaded_values = self.values()
         events.config_changed.connect(self.reload)
 
+    def _set_one(self, name, new):
+        """把单个字段写进对应控件（reload 与 reset_to_defaults 共用）。"""
+        if name == 'release_enabled':
+            self.enabled.setChecked(new)
+        elif name == 'release_auto_lookup':
+            self.auto.setChecked(new)
+        elif name in ('release_sources', 'release_supjav_engines'):
+            controls = self.sources if name == 'release_sources' else self.engines
+            for key, control in controls.items():
+                control.setChecked(key in new)
+        elif name == 'release_proxy':
+            self.proxy.setText(new)
+        elif name == 'release_cf_bypass_url':
+            self.bypass.setText(new)
+        elif name == 'release_supjav_mode':
+            self.supjav_mode.setCurrentIndex(max(0, self.supjav_mode.findData(new)))
+        else:
+            self.numbers[name].setValue(new)
+
     def reload(self):
         """Refresh untouched fields; a deliberate local draft remains editable."""
         current = self.values()
         for name, old in self._loaded_values.items():
-            new = getattr(self._cfg, name)
             if current[name] != old:
                 continue
-            if name == 'release_enabled':
-                self.enabled.setChecked(new)
-            elif name == 'release_auto_lookup':
-                self.auto.setChecked(new)
-            elif name in ('release_sources', 'release_supjav_engines'):
-                controls = self.sources if name == 'release_sources' else self.engines
-                for key, control in controls.items():
-                    control.setChecked(key in new)
-            elif name == 'release_proxy':
-                self.proxy.setText(new)
-            elif name == 'release_cf_bypass_url':
-                self.bypass.setText(new)
-            elif name == 'release_supjav_mode':
-                self.supjav_mode.setCurrentIndex(max(0, self.supjav_mode.findData(new)))
-            else:
-                self.numbers[name].setValue(new)
+            self._set_one(name, getattr(self._cfg, name))
         self._loaded_values = {name: deepcopy(getattr(self._cfg, name)) for name in current}
+
+    def reset_to_defaults(self):
+        """把本组的控件恢复成代码默认值（不写 cfg，等宿主点「保存」）。
+
+        以前「恢复默认设置」只重置设置页自己那 39 个控件，这一组 15 个
+        `release_*` 原封不动 —— 界面看着干净了，点保存又把旧值写回去，
+        用户以为"恢复默认没用"。注意不动 `_loaded_values`：它记录的是
+        "上次从 cfg 同步进来的值"，保持不动才能让 reload 认得出这是本地改动。
+        """
+        from config import DEFAULT_CONFIG
+
+        for name in self.values():
+            self._set_one(name, DEFAULT_CONFIG.get(name, getattr(self._cfg, name)))
 
     def validated_values(self):
         values = self.values()

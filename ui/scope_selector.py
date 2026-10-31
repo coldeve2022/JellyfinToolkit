@@ -31,6 +31,7 @@ class ScopeBar(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(12, 6, 12, 6)
         self.summary = QLabel()
+        self.summary.setObjectName("scope-summary")
         self.summary.setWordWrap(True)
         row.addWidget(self.summary, 1)
         self.choose_button = QPushButton("选择媒体库 / 目录…")
@@ -58,7 +59,8 @@ class ScopeBar(QWidget):
         self.choose_button.setEnabled(not self._tasks_running())
 
     def refresh(self):
-        if not self.selection_ready():
+        ready = self.selection_ready()
+        if not ready:
             text = "库分析范围：未选择。请先选择电影、动漫等媒体库或目录，再开始分析。"
         else:
             selected = set(getattr(self.cfg, "library_scope_ids", []))
@@ -69,6 +71,20 @@ class ScopeBar(QWidget):
             text = "库分析范围：" + ("；".join(names) if names else "全部媒体库（已明确选择，会合并分析）")
         self.summary.setText(text)
         self.summary.setToolTip(text + "\n影响概览、画像、打标、删除建议、从库挑选和自动化；手动添加文件按其输入处理。")
+        # 未选范围时把提示标成警示色、按钮改成动作句：整页禁用曾让用户
+        # 以为"功能坏了"，而唯一线索只有这一行灰字。
+        self.summary.setProperty("scopeWarning", not ready)
+        style = self.summary.style()
+        if style is not None:
+            style.unpolish(self.summary)
+            style.polish(self.summary)
+        self.choose_button.setText(
+            "选择媒体库 / 目录…" if ready else "① 先选择媒体库范围…")
+        self.choose_button.setProperty("cssClass", "" if ready else "accent")
+        button_style = self.choose_button.style()
+        if button_style is not None:
+            button_style.unpolish(self.choose_button)
+            button_style.polish(self.choose_button)
         self._tasks_changed()
 
     def apply_selection(self, catalog, ids, paths, *, all_libraries=False):

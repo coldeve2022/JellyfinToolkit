@@ -125,6 +125,15 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def assert_clean_package(package_root):
+    root = Path(package_root)
+    forbidden = ('config.json', 'profile.json', 'data-profile.json', 'migration-report.json',
+                 '.profile.lock', 'data', 'AppData', 'backups', 'dev-start.bat')
+    found = [name for name in forbidden if (root / name).exists()]
+    if found:
+        raise ValueError('发布包含本地资料或开发入口，拒绝封包：' + ', '.join(found))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="构建发布包")
     parser.add_argument("--skip-tests", action="store_true")
@@ -249,6 +258,11 @@ def main() -> int:
     )
 
     # 5) 打 zip + SHA256
+    try:
+        assert_clean_package(dist / APP_NAME)
+    except ValueError as exc:
+        print('[失败] ' + str(exc))
+        return 1
     size_mb = sum(f.stat().st_size for f in (dist / APP_NAME).rglob("*") if f.is_file())
     print(f"\n目录大小: {size_mb / 1024 / 1024:.1f} MB")
 

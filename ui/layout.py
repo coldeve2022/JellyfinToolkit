@@ -3,6 +3,36 @@
 from PySide6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QGridLayout, QHBoxLayout
 
 
+#: 每个页面的「主操作」按钮属性名。
+#: 三处在用：底部动作栏（`dock_actions`）、库范围未定时的禁用（`MainWindow`）、
+#: 以及文档里说明"这个页面的入口是哪一个"。只此一份。
+PRIMARY_ACTION = {
+    "profile": "btn_analyze",
+    "insight": "btn_scan",
+    "tasks": "btn_stop",
+    "review": "btn_analyze",
+    "delete": "btn_load",
+    "dedup": "btn_load",
+    "subtitle": "btn_start",
+    "subtitle_gen": "btn_start",
+    "replace": "btn_start",
+    "lada": "btn_start",
+    "repair": "btn_start",
+    "nfo_fix": "btn_start",
+    "db_tools": "btn_transfer",
+    "merge": "btn_merge_checked",
+    "automation": "btn_audit",
+    "settings": "btn_save",
+}
+
+
+def primary_action(page):
+    """取页面的主操作按钮（找不到返回 None，不抛）。"""
+    module = type(page).__module__.rsplit(".", 1)[-1]
+    attr = PRIMARY_ACTION.get(module)
+    return getattr(page, attr, None) if attr else None
+
+
 def _layouts(layout):
     yield layout
     for index in range(layout.count()):
@@ -23,26 +53,7 @@ def _find_row(page, widget):
 
 
 def dock_actions(page, target_layout):
-    module = type(page).__module__.rsplit(".", 1)[-1]
-    attr = {
-        "profile": "btn_analyze",
-        "insight": "btn_scan",
-        "tasks": "btn_stop",
-        "review": "btn_analyze",
-        "delete": "btn_load",
-        "dedup": "btn_load",
-        "subtitle": "btn_start",
-        "subtitle_gen": "btn_start",
-        "replace": "btn_start",
-        "lada": "btn_start",
-        "repair": "btn_start",
-        "nfo_fix": "btn_start",
-        "db_tools": "btn_transfer",
-        "merge": "btn_merge_checked",
-        "automation": "btn_audit",
-        "settings": "btn_save",
-    }.get(module)
-    button = getattr(page, attr, None) if attr else None
+    button = primary_action(page)
     row = _find_row(page, button) if button is not None else None
     if row is None or not isinstance(row, QHBoxLayout):
         return

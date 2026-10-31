@@ -145,6 +145,8 @@ def build_stylesheet(theme_name: str | None = None) -> str:
     }}
     QLabel[cssClass="subtitle"] {{ color: {text_secondary}; font-size: 12px; }}
     QLabel[cssClass="muted-label"] {{ color: {text_secondary}; }}
+    /* 库范围未选定时的常驻提示：必须一眼看到，不能只是一行灰字 */
+    QLabel#scope-summary[scopeWarning="true"] {{ color: {danger}; font-weight: 600; }}
 
     QLabel[cssClass="info-card"] {{
         background-color: {bg_card};

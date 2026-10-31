@@ -1,16 +1,16 @@
-"""找替换页 —— 阶段二：对**已确认有码**的视频，按番号去网上查无码版。
+"""替换版本检索页 —— 阶段二：对已确认「需要替换」的视频，按作品编号查可用替代版本。
 
 为什么单独一页
 --------------
-"检查有没有码"和"上网找替换"是两件独立的事（见 docs/像素化状态与工作流.md）。
+"检查画面是否需要处理"和"上网找替代版本"是两件独立的事（见 docs/像素化状态与工作流.md）。
 把它们塞在一页里，检查页的表格既要显示结论又要显示检索状态、还要放候选面板，
 最后两边都不好用。
 
-这一页只干一件事：**拿着你已经标记为「有码」的番号，去站点查有没有无码版。**
-好处是：
+这一页只干一件事：**拿着你已经标记为「需要替换」的作品编号，去外部站点
+查有没有可用的替代版本。**好处是：
 
 - 检查页的表格可以精简回"文件名 / 结论 / 处理 / 记录来源"；
-- 已确认有码的视频在这里**按番号聚合**（一部片多个副本只占一行），
+- 已确认需替换的视频在这里**按作品编号聚合**（一部片多个副本只占一行），
   可以反复重查、可以导出清单；
 - 检索失败、站点被拦这些事不会干扰检查流程。
 
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import csv
 import os
-from dataclasses import dataclass, field
 from typing import Optional
 
 from PySide6.QtCore import Qt, Slot
@@ -35,7 +34,9 @@ from PySide6.QtWidgets import (
 
 from censor import CensorService
 from censor.releases import ReleaseReport, ReleaseService
-from censor.release_filter import FilterRule, evaluate, describe
+from censor.release_filter import FIELDS, FilterRule
+from censor.release_query import NumberRow, ReleaseQuery
+from ui.release_filters import ReleaseFilterBar, ColumnFilterMenu, FilterHeader
 from censor.releases.models import normalize_number
 from ui.censor_release import ReleaseLookupWorker, ReleasePanel
 from ui.services import events, start_task
@@ -44,7 +45,8 @@ from ui import theme
 
 __all__ = ["CensorReplacePage"]
 
-_COLUMNS = ["番号", "片数", "检索结果", "候选", "最大种子", "最近检索"]
+_COLUMNS = ["番号", "片数", "检索结果", "候选", "最大种子", "最近检索", "喜欢", "播放状态"]
+_COLUMN_FIELDS = ["number", "files", "state", "candidates", "magnet_size", "queried", "favorite", "played"]
 
 _STATE_COLOR = {
     "confirmed": "#1e8449",   # 确有
@@ -58,7 +60,7 @@ _STATE_TOKEN = {"confirmed": "success", "likely": "warning", "none": "text_secon
 
 
 class _NumberTable(QTableWidget):
-    """找无码版的表格：能把选中行背后的**文件**拖出去。
+    """替换版本检索的表格：能把选中行背后的**文件**拖出去。
 
     表格默认拖出的是单元格文本（番号），拖到 Lada / 资源管理器里没用。
     这里改成塞文件 URL，接收方就会当成"拖进来一个视频文件"。
@@ -84,44 +86,8 @@ class _NumberTable(QTableWidget):
         drag.exec(Qt.CopyAction)
 
 
-@dataclass
-class NumberRow:
-    """一个番号（可能对应多个文件副本）。"""
-
-    number: str
-    paths: list[str] = field(default_factory=list)
-    report: Optional[ReleaseReport] = None
-
-    @property
-    def key(self) -> str:
-        return normalize_number(self.number) or "（无番号）"
-
-    @property
-    def searchable(self) -> bool:
-        return bool(normalize_number(self.number))
-
-    @property
-    def state_key(self) -> str:
-        return "todo" if self.report is None else self.report.stage
-
-    @property
-    def state_text(self) -> str:
-        if self.report is None:
-            return "未查" if self.searchable else "无番号"
-        return self.report.as_text()
-
-    @property
-    def best_magnet_text(self) -> str:
-        if self.report is None:
-            return "—"
-        best = self.report.best
-        if best is None or best.best_magnet is None:
-            return "—"
-        return best.best_magnet.size_text
-
-
 class CensorReplacePage(QWidget):
-    """阶段二工作台：已确认有码 → 查无码版。"""
+    """阶段二工作台：已确认需替换 → 查可用替代版本。"""
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
@@ -142,6 +108,8 @@ class CensorReplacePage(QWidget):
         #: 高级筛选：任意条件组合（见 censor/release_filter.py）
         self._rules: 'list[FilterRule]' = []
         self._logic: str = 'and'
+        self._column_values = {}
+        self._snapshot_service = None
         #: Jellyfin 快照（规范化路径 → 喜欢/播放状态）；空 = 未同步
         self._review_items: dict = {}
         self._refresh_owner = QWidget(self)
@@ -150,6 +118,7 @@ class CensorReplacePage(QWidget):
         self._setup_ui()
         events.censor_changed.connect(self._on_censor_changed)
         events.media_changed.connect(self._media_changed)
+        events.user_state_changed.connect(self._user_state_changed)
 
     def _media_changed(self, paths):
         self.refresh()
@@ -178,12 +147,12 @@ class CensorReplacePage(QWidget):
         layout.setSpacing(7)
 
         toolbar = QHBoxLayout()
-        title = QLabel("找无码版")
+        title = QLabel("替换版本检索")
         title.setProperty("cssClass", "page-title")
         toolbar.addWidget(title)
         toolbar.addStretch()
         self.btn_refresh = QPushButton("刷新清单")
-        self.btn_refresh.setToolTip("重新读库里的「已确认有码」记录")
+        self.btn_refresh.setToolTip("重新读库里「已确认需替换」的记录")
         self.btn_refresh.clicked.connect(self.refresh)
         toolbar.addWidget(self.btn_refresh)
         self.btn_lookup_new = QPushButton("查询未查")
@@ -202,7 +171,7 @@ class CensorReplacePage(QWidget):
         self.btn_focus_clear.setVisible(False)
         toolbar.addWidget(self.btn_focus_clear)
         self.btn_lookup_all = QPushButton("全部重查")
-        self.btn_lookup_all.setToolTip("忽略缓存，把所有番号重新查一遍")
+        self.btn_lookup_all.setToolTip("忽略缓存，重查当前筛选范围内的番号")
         self.btn_lookup_all.clicked.connect(lambda: self._lookup(force=True))
         toolbar.addWidget(self.btn_lookup_all)
         retry = QPushButton("重试失败")
@@ -232,7 +201,7 @@ class CensorReplacePage(QWidget):
         toolbar.insertWidget(2, selected)
         layout.addLayout(toolbar)
 
-        self.lbl_summary = QLabel("正在读取已确认有码的记录…")
+        self.lbl_summary = QLabel("正在读取已确认需替换的记录…")
         self.lbl_summary.setWordWrap(True)
         self.lbl_summary.setProperty("cssClass", "muted-label")
         layout.addWidget(self.lbl_summary)
@@ -247,7 +216,7 @@ class CensorReplacePage(QWidget):
         self.state_filter = QComboBox()
         self.state_filter.setProperty('taskInteractive', True)
         for label, key in (('全部', ''), ('确有', 'confirmed'), ('疑似', 'likely'),
-                           ('未见', 'none'), ('未查/未完成', 'unknown')):
+                           ('未见', 'none'), ('未查', 'todo'), ('未完成/未知', 'unknown')):
             self.state_filter.addItem(label, key)
         # 显式归位：默认必须是"全部"，否则一进来就只剩"确有"，
         # 用户会以为清单少了一大半（这条以前靠 addItem 的隐式行为，靠不住）
@@ -261,7 +230,7 @@ class CensorReplacePage(QWidget):
         self.combo_favorite = QComboBox()
         self.combo_favorite.setProperty('taskInteractive', True)
         for text, value in (('喜欢：全部', 'all'), ('只看喜欢', 'favorite'),
-                            ('只看未喜欢', 'not_favorite'), ('喜欢未同步', 'unknown')):
+                            ('只看未喜欢', 'not_favorite'), ('喜欢状态未知', 'unknown')):
             self.combo_favorite.addItem(text, value)
         self.combo_favorite.setCurrentIndex(0)
         self.combo_favorite.currentIndexChanged.connect(self._filter)
@@ -270,16 +239,11 @@ class CensorReplacePage(QWidget):
         self.combo_playback.setProperty('taskInteractive', True)
         for text, value in (('播放：全部', 'all'), ('未播放', 'unplayed'),
                             ('播放中', 'progress'), ('已播放', 'played'),
-                            ('播放未同步', 'unknown')):
+                            ('播放状态未知', 'unknown')):
             self.combo_playback.addItem(text, value)
         self.combo_playback.setCurrentIndex(0)
         self.combo_playback.currentIndexChanged.connect(self._filter)
         library_row.addWidget(self.combo_playback)
-        self.btn_advanced_filter = QPushButton('筛选…')
-        self.btn_advanced_filter.setToolTip('自由组合条件：候选数、磁链、来源、文件名特征、'
-                                            '检索时间、置信度…可保存成预设')
-        self.btn_advanced_filter.clicked.connect(self._open_filter_dialog)
-        library_row.addWidget(self.btn_advanced_filter)
         self.btn_clear_filters = QPushButton('清除筛选')
         self.btn_clear_filters.clicked.connect(self._clear_filters)
         library_row.addWidget(self.btn_clear_filters)
@@ -288,9 +252,17 @@ class CensorReplacePage(QWidget):
         self.lbl_filter_note.setProperty('cssClass', 'muted-label')
         library_row.addWidget(self.lbl_filter_note)
         layout.addLayout(library_row)
+        self.filter_bar = ReleaseFilterBar(self)
+        self.filter_bar.changed.connect(self._conditions_changed)
+        layout.addWidget(self.filter_bar)
+        self.lbl_active_filters = QLabel()
+        self.lbl_active_filters.setWordWrap(True)
+        self.lbl_active_filters.setProperty("cssClass", "muted-label")
+        layout.addWidget(self.lbl_active_filters)
         body = QSplitter(Qt.Horizontal)
         self.splitter = body
         self.table = _NumberTable(0, len(_COLUMNS))
+        self.table.setHorizontalHeader(FilterHeader(self.table))
         self.table.path_provider = self._drag_paths
         self.table.setHorizontalHeaderLabels(_COLUMNS)
         self.table.verticalHeader().hide()
@@ -303,6 +275,10 @@ class CensorReplacePage(QWidget):
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(True)
         header.setSectionsMovable(True)
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(self._header_menu)
+        header.filter_requested.connect(self._header_menu)
+        header.setToolTip("点击表头右侧 ▾ 筛选本列；点击标题排序；其他字段在上方添加条件")
         self.table.setColumnWidth(0, 150)
         self.table.setColumnWidth(1, 60)
         self.table.setColumnWidth(2, 190)
@@ -344,7 +320,14 @@ class CensorReplacePage(QWidget):
             self._rules = [FilterRule.from_dict(item) for item in saved_rules
                            if isinstance(item, dict)]
         self._logic = str(state.get('filter_logic') or 'and')
-        self._sync_filter_button()
+        self.filter_bar.set_rules(self._rules, self._logic)
+        self._rules = self.filter_bar.rules()
+        self._logic = self.filter_bar.logic_key()
+        saved_columns = state.get("column_filters", {})
+        if isinstance(saved_columns, dict):
+            self._column_values = {k: set(str(x) for x in v) for k, v in saved_columns.items()
+                                   if k in _COLUMN_FIELDS and isinstance(v, list)}
+        self._filter()
         menu.addMenu(self.workspace.menu(more)).setText('工作区布局与偏好')
 
     # ── 数据 ──
@@ -411,7 +394,7 @@ class CensorReplacePage(QWidget):
             '在那边加入新版本、预览配对后再执行替换')
 
     def refresh(self) -> None:
-        """从库里重建清单：已确认有码 → 按番号聚合。"""
+        """从库里重建清单：已确认需替换 → 按作品编号聚合。"""
         self._reload_review()
         self._refresh_version += 1
         if self._refresh_worker is not None:
@@ -449,11 +432,13 @@ class CensorReplacePage(QWidget):
         for item in records:
             if stopped():
                 return {}
-            key = normalize_number(item.number) or "（无番号）"
+            key = NumberRow(item.number or "", [item.path]).key
             row = grouped.setdefault(key, NumberRow(number=item.number or ""))
             if not row.number and item.number:
                 row.number = item.number
-            row.paths.append(item.path)
+            if item.path not in row.paths:
+                row.paths.append(item.path)
+                row.records.append(item)
         reports = release.store.get_many(grouped)
         attempts = release.store.latest_attempts(grouped)
         for key, row in grouped.items():
@@ -513,11 +498,14 @@ class CensorReplacePage(QWidget):
                 str(len(row.report.candidates)) if row.report else "—",
                 row.best_magnet_text,
                 self._queried_at(row),
+                self._review_text(row, "favorite"),
+                self._review_text(row, "played"),
             ]
             for col, text in enumerate(values):
-                item = make_number_item(text, len(row.paths) if col == 1 else
-                                        len(row.report.candidates) if row.report else 0) \
-                    if col in (1, 3) else QTableWidgetItem(text)
+                numeric = {1: len(row.paths), 3: len(row.report.candidates) if row.report else 0,
+                           4: FIELDS['magnet_size'].getter(row, {}),
+                           5: row.report.queried_at if row.report else 0}
+                item = make_number_item(text, numeric[col]) if col in numeric else QTableWidgetItem(text)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 if col == 0:
                     item.setData(Qt.UserRole, row.key)
@@ -526,9 +514,10 @@ class CensorReplacePage(QWidget):
                 self.table.setItem(index, col, item)
         self.table.setSortingEnabled(True)
         self._filter()
-        if selected in self._rows:
+        if selected in self._rows and selected in {r.key for r in self._visible_rows()}:
             for index in range(self.table.rowCount()):
-                if self.table.item(index, 0).data(Qt.UserRole) == selected:
+                if (self.table.item(index, 0).data(Qt.UserRole) == selected
+                        and not self.table.isRowHidden(index)):
                     self.table.selectRow(index)
                     break
         else:
@@ -564,8 +553,6 @@ class CensorReplacePage(QWidget):
             text += f"（当前筛选可见 {visible}）"
             if visible == 0 and rows:
                 text += " —— 没有符合条件的结果，点「清除筛选」恢复"
-            if visible == 0 and rows:
-                text += " —— 没有符合条件的结果，点「清除筛选」恢复"
         self.lbl_summary.setText(text)
         self.lbl_summary.setToolTip(
             f"共 {sum(len(r.paths) for r in rows)} 个文件；可检索 {len(searchable)} 部"
@@ -574,6 +561,7 @@ class CensorReplacePage(QWidget):
     # ── 选择 ──
     def _on_row_selected(self) -> None:
         indexes = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        indexes = [i for i in indexes if not self.table.isRowHidden(i.row())]
         if not indexes:
             return
         item = self.table.item(indexes[0].row(), 0)
@@ -598,61 +586,65 @@ class CensorReplacePage(QWidget):
             self.files.setItem(index, 0, item)
 
     # ── 检索 ──
+    def _query(self, rules=None, logic=None):
+        return ReleaseQuery(
+            words=tuple(self.search.text().casefold().split()),
+            quick={'state': self.state_filter.currentData(),
+                   'favorite': self.combo_favorite.currentData() if self.combo_favorite.isEnabled() else 'all',
+                   'played': self.combo_playback.currentData() if self.combo_playback.isEnabled() else 'all'},
+            columns=self._column_values,
+            rules=tuple(self._rules if rules is None else rules),
+            logic=self._logic if logic is None else logic,
+            only_keys=frozenset(self._only_keys))
+
+    def _visible_rows(self):
+        query, ctx = self._query(), self._filter_context()
+        return [row for row in self._rows.values() if query.matches(row, ctx)]
+
     def _filter(self):
-        words = self.search.text().casefold().split()
-        state = self.state_filter.currentData()
-        # 快照没同步时两个下拉是禁用的，此时必须当作"全部"，
-        # 否则一旦有人程序化改索引，整张表会被隐藏成空
-        favorite = self.combo_favorite.currentData() if self.combo_favorite.isEnabled() else 'all'
-        playback = self.combo_playback.currentData() if self.combo_playback.isEnabled() else 'all'
+        if not hasattr(self, 'table'):
+            return
+        query, ctx = self._query(), self._filter_context()
         hidden_current = False
         for index in range(self.table.rowCount()):
             item = self.table.item(index, 0)
             row = self._rows.get(item.data(Qt.UserRole)) if item else None
-            show = row is not None
-            if show:
-                show = (not state or row.state_key == state
-                        or (state == 'unknown' and row.state_key == 'todo'))
-            if show and self._only_keys:
-                show = row.key in self._only_keys
-            if show and words:
-                text = (row.number + ' ' + ' '.join(row.paths)).casefold()
-                show = all(word in text for word in words)
-            if show and favorite != 'all':
-                show = self._favorite_matches(row, favorite)
-            if show and playback != 'all':
-                show = self._playback_matches(row, playback)
-            if show and self._rules:
-                show = evaluate(self._rules, self._logic, row, self._filter_context())
+            show = row is not None and query.matches(row, ctx)
             self.table.setRowHidden(index, not show)
+            if not show:
+                for col in range(self.table.columnCount()):
+                    cell = self.table.item(index, col)
+                    if cell:
+                        cell.setSelected(False)
             hidden_current |= not show and row is not None and row.key == self._current_key
         if hidden_current:
-            self.table.clearSelection()
             self._current_key = ''
             self.files.setRowCount(0)
             self.panel.clear()
             self.lbl_detail.setText('选择一个番号查看候选与文件')
-        self._update_summary()
+        self._sync_filter_summary()
         self._update_summary()
 
-    # ── Jellyfin 快照（喜欢 / 播放）：复用检查页那套，不另建口径 ──
-    def _reload_review(self) -> None:
-        """重读本地 Jellyfin 快照。读不到就置空，筛选器跟着禁用。"""
-        items: dict = {}
-        try:
-            from utils.jellyfin_review import JellyfinReviewService
+    def _review_service(self):
+        from utils.jellyfin_review import shared_review_service
+        self._snapshot_service = shared_review_service(self.cfg, self._censor.store.db_path.parent)
+        return self._snapshot_service
 
-            service = JellyfinReviewService(self.cfg, data_dir=self._censor.store.db_path.parent)
-            items = service.cached_items() or {}
-        except Exception:  # noqa: BLE001 - 没配服务器/快照坏了都不该影响清单
-            items = {}
-        self._review_items = items
-        has_data = bool(items)
+    def _user_state_changed(self, context_key, data_dir):
+        service = self._review_service()
+        if context_key == service.context_key and data_dir == str(service._db_path.parent.resolve()):
+            self._reload_review()
+            self._fill_table()
+
+    def _reload_review(self):
+        service = self._review_service()
+        snapshot = service.read_snapshot()
+        self._review_items = snapshot.items
+        ready = snapshot.status == 'ready'
         for combo in (self.combo_favorite, self.combo_playback):
-            combo.setEnabled(has_data)
-            combo.setToolTip('' if has_data else
-                             '还没有 Jellyfin 喜欢/播放状态。到「视频像素化检查」页选好观看账号并同步一次，回到这里就能按喜欢筛了')
-        self.lbl_filter_note.setText('' if has_data else '未同步 Jellyfin 状态，喜欢/播放筛选不可用')
+            combo.setEnabled(ready)
+            combo.setToolTip('' if ready else snapshot.message)
+        self.lbl_filter_note.setText('' if ready else 'Jellyfin：' + snapshot.message)
 
     def _review_of(self, path: str) -> dict:
         if not self._review_items:
@@ -664,84 +656,118 @@ class CensorReplacePage(QWidget):
         except Exception:  # noqa: BLE001
             return {}
 
-    def _favorite_matches(self, row: 'NumberRow', want: str) -> bool:
-        """任一文件被标喜欢就算这部片喜欢；全部未标才算"未喜欢"。"""
-        states = [self._review_of(p).get('is_favorite') for p in row.paths]
-        if want == 'favorite':
-            return any(state is True for state in states)
-        if want == 'not_favorite':
-            return bool(states) and all(state is False for state in states)
-        if want == 'unknown':
-            return all(state is None for state in states)
-        return True
+    def _favorite_matches(self, row, want):
+        return want == 'all' or FIELDS['favorite'].getter(row, self._filter_context()) == want
 
-    def _playback_matches(self, row: 'NumberRow', want: str) -> bool:
-        played, progress = [], []
-        for path in row.paths:
-            item = self._review_of(path)
-            played.append(item.get('played'))
-            progress.append(bool(item.get('has_progress') or item.get('playback_ticks', 0)))
-        if want == 'played':
-            return all(state is True for state in played)
-        if want == 'unplayed':
-            return all(state is False and not tick for state, tick in zip(played, progress))
-        if want == 'progress':
-            return any(tick and state is not True for state, tick in zip(played, progress))
-        if want == 'unknown':
-            return all(state is None for state in played)
-        return True
+    def _playback_matches(self, row, want):
+        return want == 'all' or FIELDS['played'].getter(row, self._filter_context()) == want
 
-    def _filter_context(self) -> dict:
-        """给规则引擎的外部数据：Jellyfin 快照 + 文件存在性。"""
+    def _review_text(self, row, field):
+        spec = FIELDS[field]
+        return dict(spec.choices).get(spec.getter(row, self._filter_context()), '未知')
+
+    def _filter_context(self):
         return {'review': self._review_of, 'exists': os.path.isfile}
 
-    def _open_filter_dialog(self) -> None:
-        from ui.release_filter_dialog import ReleaseFilterDialog
-
-        presets = self.workspace.state.get('filter_presets') or {}
-        dialog = ReleaseFilterDialog(
-            self, rules=self._rules, logic=self._logic, presets=presets,
-            preview=self._preview_count)
-        if not dialog.exec():
-            return
-        self._rules = dialog.rules()
-        self._logic = dialog.logic()
-        self.workspace.state['filter_presets'] = dialog.presets()
-        self.workspace.state['filter_rules'] = [rule.as_dict() for rule in self._rules]
-        self.workspace.state['filter_logic'] = self._logic
-        self.workspace.save()
-        self._sync_filter_button()
+    def _conditions_changed(self):
+        self._rules = self.filter_bar.rules()
+        self._logic = self.filter_bar.logic_key()
+        self._save_filters()
         self._filter()
 
-    def _preview_count(self, rules, logic) -> int:
-        ctx = self._filter_context()
-        return sum(1 for row in self._rows.values()
-                   if evaluate(rules, logic, row, ctx))
+    def _save_filters(self):
+        if not hasattr(self, 'workspace'):
+            return
+        self.workspace.state['filter_rules'] = [rule.as_dict() for rule in self._rules]
+        self.workspace.state['filter_logic'] = self._logic
+        self.workspace.state['column_filters'] = {k: sorted(v) for k, v in self._column_values.items()}
+        self.workspace.schedule()
 
-    def _sync_filter_button(self) -> None:
-        count = len(self._rules)
-        self.btn_advanced_filter.setText(f'筛选（{count}）' if count else '筛选…')
-        if count:
-            summary = '；'.join(describe(rule) for rule in self._rules[:4])
-            if count > 4:
-                summary += f'；…共 {count} 条'
-            self.btn_advanced_filter.setToolTip(f'当前条件（{self._logic.upper()}）：{summary}')
+    def _preview_count(self, rules, logic):
+        query, ctx = self._query(rules, logic), self._filter_context()
+        return sum(query.matches(row, ctx) for row in self._rows.values())
+
+    def _set_column_values(self, field, values):
+        if values is None:
+            self._column_values.pop(field, None)
         else:
-            self.btn_advanced_filter.setToolTip(
-                '自由组合条件：候选数、磁链、来源、文件名特征、检索时间、置信度…可保存成预设')
+            self._column_values[field] = set(str(value) for value in values)
+        self._save_filters()
+        self._filter()
 
-    def _clear_filters(self) -> None:
+    def _column_counts(self, field):
+        query, ctx = self._query(), self._filter_context()
+        counts = {}
+        for row in self._rows.values():
+            key = str(FIELDS[field].getter(row, ctx))
+            counts.setdefault(key, 0)
+            if query.matches(row, ctx, exclude_column=field):
+                counts[key] += 1
+        return counts
+
+    def _header_menu(self, pos):
+        header = self.table.horizontalHeader()
+        col = header.logicalIndexAt(pos)
+        if col < 0:
+            return
+        field = _COLUMN_FIELDS[col]
+        spec = FIELDS[field]
+        # Numeric/date columns offer an in-page comparison editor as well.
+        menu = ColumnFilterMenu(spec.label, self._column_counts(field),
+            self._column_values.get(field), self._column_labels(field), self)
+        menu.applied.connect(lambda values: self._set_column_values(field, values))
+        menu.addSeparator()
+        menu.addAction('编辑比较条件…', lambda: self.filter_bar.select_field(field))
+        menu.addAction('升序排列', lambda: self.table.sortItems(col, Qt.AscendingOrder))
+        menu.addAction('降序排列', lambda: self.table.sortItems(col, Qt.DescendingOrder))
+        menu.exec(header.mapToGlobal(pos))
+        menu.deleteLater()
+
+    def _column_labels(self, field):
+        labels = dict(FIELDS[field].choices)
+        if field == 'queried':
+            from datetime import datetime
+            labels.update({key: datetime.fromtimestamp(float(key)).strftime('%Y-%m-%d %H:%M:%S')
+                           if float(key) > 0 else '从未检索' for key in self._column_counts(field)})
+        elif field == 'magnet_size':
+            labels.update({key: f'{float(key) / (1024 ** 3):.2f} GB' if float(key) > 0 else '无已知大小'
+                           for key in self._column_counts(field)})
+        return labels
+
+    def _sync_filter_summary(self):
+        parts = []
+        if self.search.text().strip():
+            parts.append('搜索：' + self.search.text().strip())
+        for control in (self.state_filter, self.combo_favorite, self.combo_playback):
+            if control.isEnabled() and control.currentData() not in ('', 'all', None):
+                parts.append(control.currentText())
+        for field, values in self._column_values.items():
+            labels = dict(FIELDS[field].choices)
+            text = '、'.join(labels.get(v, v) for v in sorted(values)) if values else '未选择任何取值'
+            parts.append(FIELDS[field].label + '：' + text)
+        if self._only_keys:
+            parts.append(f'仅选中范围 {len(self._only_keys)} 部')
+        if self._rules:
+            parts.append(f'页内条件 {len(self._rules)} 条（{self._logic.upper()}）')
+        self.lbl_active_filters.setText('；'.join(parts) if parts else '未设置筛选 · 点击表头 ▾ 选择取值，上方可添加比较条件')
+        for col, field in enumerate(_COLUMN_FIELDS):
+            active = field in self._column_values or any(r.field == field for r in self._rules)
+            self.table.horizontalHeaderItem(col).setText(_COLUMNS[col] + (' ●' if active else ''))
+
+    def _clear_filters(self):
+        controls = (self.search, self.state_filter, self.combo_favorite, self.combo_playback)
+        for control in controls:
+            control.blockSignals(True)
         self.search.clear()
-        self.state_filter.setCurrentIndex(0)
-        self.combo_favorite.setCurrentIndex(0)
-        self.combo_playback.setCurrentIndex(0)
+        for control in controls[1:]:
+            control.setCurrentIndex(0)
+        for control in controls:
+            control.blockSignals(False)
         self._only_keys = set()
-        self._rules = []
-        self._logic = 'and'
-        self.workspace.state['filter_rules'] = []
-        self.workspace.state['filter_logic'] = 'and'
-        self.workspace.save()
-        self._sync_filter_button()
+        self._column_values = {}
+        self._rules, self._logic = [], 'and'
+        self.filter_bar.set_rules([])
+        self._save_filters()
         self._filter()
 
     # ── 选中与拖出 ──
@@ -766,7 +792,7 @@ class CensorReplacePage(QWidget):
             index = self.table.currentRow()
             item = self.table.item(index, 0) if index >= 0 else None
             row = self._rows.get(item.data(Qt.UserRole)) if item else None
-            rows = [row] if row is not None else []
+            rows = [row] if row is not None and not self.table.isRowHidden(index) else []
         paths: 'list[str]' = []
         for row in rows:
             paths.extend(row.paths)
@@ -831,7 +857,7 @@ class CensorReplacePage(QWidget):
             self.lbl_summary.setText('选中的文件都不在本地，无法送去 Lada')
             return
         events.lada_ready.emit(paths)
-        self.lbl_summary.setText(f'已把 {len(paths)} 个文件送去「马赛克破解」页')
+        self.lbl_summary.setText(f'已把 {len(paths)} 个文件送去「画面修复」页')
 
     def _open_selected_page(self) -> None:
         rows = [row for row in self._selected_rows() if row.report and row.report.candidates]
@@ -864,7 +890,7 @@ class CensorReplacePage(QWidget):
             self.lbl_summary.setText('先选择一个或多个作品')
 
     def lookup_targets(self, force=False) -> list[str]:
-        return [row.number for row in self._rows.values()
+        return [row.number for row in self._visible_rows()
                 if row.searchable and self._in_focus(row)
                 and (force or self._release.fresh(row.number) is None)]
 
@@ -918,7 +944,7 @@ class CensorReplacePage(QWidget):
         self.btn_lookup_new.setEnabled(False)
         self.btn_lookup_all.setEnabled(False)
         self.lbl_summary.setText(f"正在检索 {len(targets)} 个番号…")
-        if not start_task(self, worker, "无码版本检索", mutating=False):
+        if not start_task(self, worker, "替换版本检索", mutating=False):
             self._worker = None
             self.btn_stop.setEnabled(False)
             self.btn_lookup_new.setEnabled(True)
@@ -930,7 +956,7 @@ class CensorReplacePage(QWidget):
         if busy(self):
             self.lbl_summary.setText('正在准备或检索，请等待完成')
             return
-        numbers = [row.number for row in self._rows.values() if row.searchable]
+        numbers = [row.number for row in self._visible_rows() if row.searchable and self._in_focus(row)]
         if force:
             self._lookup(force=True, numbers=numbers)
             return
@@ -945,9 +971,15 @@ class CensorReplacePage(QWidget):
         worker.request_config = {k: deepcopy(v) for k, v in vars(self.cfg).items() if k.startswith('release_')}
         self._lookup_prepare = worker
         worker.result.connect(self._lookup_prepared)
+        worker.finished.connect(self._lookup_prepare_finished)
         worker.error.connect(self._refresh_error)
         self.lbl_summary.setText('后台校验检索缓存与待办…')
         start_task(self, worker, '校验检索缓存与待办')
+
+    @Slot()
+    def _lookup_prepare_finished(self):
+        if getattr(self, '_lookup_prepare', None) is self.sender():
+            self._lookup_prepare = None
 
     @Slot(object)
     def _lookup_prepared(self, targets):
@@ -1013,6 +1045,10 @@ class CensorReplacePage(QWidget):
                         cell.setText(text)
                         if offset == 3:
                             cell.setData(Qt.UserRole, len(row.report.candidates) if row.report else 0)
+                        if offset == 4:
+                            cell.setData(Qt.UserRole, FIELDS['magnet_size'].getter(row, {}))
+                        if offset == 5:
+                            cell.setData(Qt.UserRole, row.report.queried_at if row.report else 0)
                         if offset == 2:
                             cell.setForeground(QColor(theme.color(_STATE_TOKEN.get(row.state_key, "text_primary"))))
                 self.table.setSortingEnabled(sorting)
@@ -1045,25 +1081,26 @@ class CensorReplacePage(QWidget):
             events.replacement_ready.emit(paths, list(row.paths))
 
     def _export(self) -> None:
-        if not self._rows:
+        rows = self._visible_rows()
+        if not rows:
             self.lbl_summary.setText("清单是空的，没有可导出的内容")
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出清单", "已确认有码-找替换.csv", "CSV (*.csv)")
+            self, "导出清单", "需替换-版本检索.csv", "CSV (*.csv)")
         if not path:
             return
         try:
             with open(path, "w", encoding="utf-8-sig", newline="") as stream:
                 writer = csv.writer(stream)
                 writer.writerow(["番号", "文件数", "检索结果", "候选数", "最大种子", "磁链", "文件"])
-                for row in sorted(self._rows.values(), key=lambda r: r.key):
+                for row in sorted(rows, key=lambda r: r.key):
                     best = row.report.best if row.report else None
                     magnet = best.best_magnet.uri if (best and best.best_magnet) else ""
                     writer.writerow([row.number, len(row.paths), row.state_text,
                                      len(row.report.candidates) if row.report else 0,
                                      row.best_magnet_text, magnet,
                                      " | ".join(row.paths)])
-            self.lbl_summary.setText(f"已导出 {len(self._rows)} 个番号 → {path}")
+            self.lbl_summary.setText(f"已导出当前筛选的 {len(rows)} 个番号 → {path}")
         except OSError as exc:
             self.lbl_summary.setText(f"导出失败：{exc}")
 
@@ -1073,7 +1110,9 @@ class CensorReplacePage(QWidget):
         edit_release_settings(self.cfg, self)
 
     def on_config_changed(self) -> None:
+        self._censor = CensorService(self.cfg)
         self._release = ReleaseService(self.cfg)
+        self._snapshot_service = None
         self.refresh()
 
     def apply_theme(self):
@@ -1081,7 +1120,14 @@ class CensorReplacePage(QWidget):
             self._update_row_cells(row)
 
     def shutdown(self) -> None:
+        from shiboken6 import isValid
         self.workspace.save()
+        self._refresh_version += 1
+        self._refresh_dirty = False
+        for pending in (self._refresh_worker, getattr(self, '_lookup_prepare', None)):
+            if pending is not None and isValid(pending) and pending.isRunning():
+                pending.stop()
+                pending.wait(3000)
         worker = self._worker
         if worker is not None and worker.isRunning():
             worker.stop()

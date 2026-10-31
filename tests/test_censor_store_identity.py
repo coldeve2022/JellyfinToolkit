@@ -30,7 +30,13 @@ def test_strict_cache_requires_identity_signature_and_completion(tmp_path):
     assert store.get("sample", file_identity="v1", analysis_signature="algorithm2") is None
     result.status = ProcessingStatus.PARTIAL
     store.put(result)
-    assert store.get("sample", file_identity="v1", analysis_signature="algorithm1") is None
+    # 语义已修正（v4）：未完成的分析**不得覆盖**已完成的结论。
+    # 同一份身份 + 同一份分析签名，之前已经完整跑完过 → 仍然命中缓存。
+    # 以前这里断言"读不到"，等于承认"部分完成会把好结论冲掉"——
+    # 那样一来重扫一次失败就把上次的结果白扔了。
+    cached = store.get("sample", file_identity="v1", analysis_signature="algorithm1")
+    assert cached is not None, "部分完成不应冲掉已完成的结论"
+    assert cached.status is ProcessingStatus.COMPLETED
 
 
 def test_label_version_changes_preserve_history(tmp_path):

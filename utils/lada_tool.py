@@ -1,4 +1,4 @@
-"""第三方「马赛克破解」工具（Lada）的定位、能力探测与调用。
+"""第三方「画面修复」工具（Lada）的定位、能力探测与调用。
 
 为什么单独一个模块
 ------------------
@@ -43,7 +43,7 @@ __all__ = [
     "OUTPUT_PATTERN",
 ]
 
-TOOL_NAME = "Lada（马赛克破解）"
+TOOL_NAME = "Lada（画面修复）"
 EXE_NAME = "lada-cli.exe"
 #: 主仓库在 Codeberg，GitHub 只是镜像 —— 下载页要用主仓库那个。
 HOMEPAGE = "https://codeberg.org/ladaapp/lada"
@@ -511,7 +511,7 @@ def run_one(
 def describe_cli(cli: Optional[Path]) -> str:
     """一句话说明当前状态，供界面直接显示。"""
     if not cli:
-        return "未找到 lada-cli.exe —— 请在「设置 → 马赛克破解（Lada）」里指定它的位置"
+        return "未找到 lada-cli.exe —— 请在「设置 → 画面修复（Lada）」里指定它的位置"
     try:
         size_mb = Path(cli).stat().st_size / 1048576
     except OSError:
@@ -526,7 +526,7 @@ def prerequisites_hint() -> str:
         f"1. 到官方发布页下载 Windows 包：{DOWNLOAD_PAGE}\n"
         f"   （项目主页在 Codeberg：{HOMEPAGE}；GitHub 只是镜像 {MIRROR}）\n"
         "2. 用 7-Zip 解压（发行包是 .7z），解压后会看到 lada.exe 与 lada-cli.exe\n"
-        "3. 回到「设置 → 马赛克破解（Lada）」，指向 lada-cli.exe 或它所在目录\n\n"
+        "3. 回到「设置 → 画面修复（Lada）」，指向 lada-cli.exe 或它所在目录\n\n"
         "前置条件：\n"
         "· 需要 NVIDIA 显卡（Turing 及更新：RTX 20 系 ~ 50 系）或 Intel Arc，显存 4-6GB 起\n"
         "· 1080p 建议 6-8GB 内存；4K 需要明显更多\n"

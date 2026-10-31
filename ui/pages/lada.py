@@ -1,4 +1,4 @@
-"""马赛克破解页（Lada）—— 驱动第三方的 ``lada-cli.exe``。
+"""画面修复页（Lada）—— 驱动第三方的 ``lada-cli.exe``。
 
 设计要点
 --------
@@ -90,7 +90,7 @@ class _CensoredScan(QThread):
 
 
 class LadaPage(QWidget):
-    """马赛克破解（需要用户自行准备 Lada）。"""
+    """画面修复（需要用户自行准备 Lada）。"""
 
     def __init__(self, cfg: ToolkitConfig, parent=None):
         super().__init__(parent)
@@ -112,7 +112,7 @@ class LadaPage(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        title = QLabel("马赛克破解（Lada）")
+        title = QLabel("画面修复（Lada）")
         title.setProperty("cssClass", "page-title")
         layout.addWidget(title)
         layout.addWidget(FileInputActions(self, self._add_paths))

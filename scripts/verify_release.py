@@ -33,13 +33,14 @@ def git_commit(root):
 
 
 def source_files(root):
+    deleted = set(_git(root, 'ls-files', '-z', '--deleted').split('\0'))
     return sorted(
         set(
             name
             for name in _git(
                 root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"
             ).split("\0")
-            if name
+            if name and name not in deleted
         )
     )
 

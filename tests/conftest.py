@@ -17,6 +17,12 @@ from pathlib import Path
 
 import pytest
 
+# 诊断用：C 层崩溃（Qt 析构、访问违例）不会抛 Python 异常，只会让进程静默退出，
+# 表现为"所有用例都通过、却没有汇总行、退出码非零"。faulthandler 能把栈打出来。
+import faulthandler  # noqa: E402
+
+faulthandler.enable()
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -82,9 +88,81 @@ def qapp():
     yield app
 
 
+#: 哪些用例留下了后台任务（session 收尾时汇总打印）
+_LEFTOVER_TASKS: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _drain_background_tasks(request):
+    """用例之间不留后台任务。
+
+    `TaskManager` 是**进程级单例**，而 `start_task` 判断"能不能开始"用的是全局
+    状态（有写任务在跑就拒绝）。上一个用例没停干净的 worker 会让下一个用例的
+    启动被静默拒绝，表现为"某两个用例单独跑都过、全量跑必挂一个且每次挂的
+    还不是同一个"——最典型的就是
+    `test_gui_smoke::test_censorship_page_classifies` 与
+    `test_input_workflows_followup::test_folder_picker_…[censorship-…]` 交替失败。
+
+    这里做两件事：
+    1. 每个用例开始前把残留任务收掉（顺带记录是谁留下的，收尾时汇总）；
+    2. 实在收不掉就直接清空注册表 —— 测试宁可丢一个僵尸条目，
+       也不要让污染传递给下一个用例。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    if QApplication.instance() is None:
+        yield
+        return
+
+    import time
+
+    from PySide6.QtCore import QObject
+    from shiboken6 import isValid
+
+    from ui.services import TaskManager
+
+    manager = TaskManager.instance()
+    manager._poll()
+    if manager._active:
+        _LEFTOVER_TASKS.append(f"{request.node.nodeid}：开始前残留 {len(manager._active)} 个")
+        try:
+            manager.stop_all()
+        except Exception:  # noqa: BLE001 - 清理失败不该把这个用例判成失败
+            pass
+        # 关键：必须**真的等线程退出**再放手。
+        # 早先这里直接 `manager._active.clear()`，等于把还在跑的 QThread 从注册表
+        # 摘掉 —— 没有引用管理之后它们会随解释器收尾一起析构，触发
+        # "QThread destroyed while running"，进程以非零码结束、且连 pytest 的
+        # 汇总行都打不出来（表现为"全部用例都通过，CI 却红"）。
+        for entry in list(manager._active.values()):
+            worker = entry["worker"]
+            stop = getattr(worker, "stop", None)
+            if callable(stop):
+                try:
+                    stop()
+                except (RuntimeError, TypeError):
+                    pass
+            if isinstance(worker, QObject) and isValid(worker):
+                try:
+                    worker.wait(5000)
+                except (RuntimeError, TypeError):
+                    pass
+        deadline = time.monotonic() + 3.0
+        while manager._active and time.monotonic() < deadline:
+            manager._poll()
+            QApplication.processEvents()
+            time.sleep(0.02)
+        if manager._active:
+            # 极少数连 wait 都收不掉的，才强制摘除 —— 且必须记录，别静默
+            _LEFTOVER_TASKS.append(
+                f"{request.node.nodeid}：wait 后仍有 {len(manager._active)} 个，强制清空"
+            )
+            manager._active.clear()
+    yield
+
+
 def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
     """会话收尾时，趁 QApplication 还在，把残留的 Qt 对象先有序释放掉。
-
     为什么必须做：本套件里很多页面/窗口是**不带父部件**单独构造的
     （``DeletePage(cfg)``、``MainWindow()``…），它们彼此成环、又被若干闭包
     握着，因此不会被引用计数立即回收，只能等到**解释器退出阶段**才由
@@ -103,23 +181,43 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
     import gc
     import sys
 
+    def _mark(text):
+        """阶段标记：崩溃时用它定位死在哪一步（stderr 不会被 pytest 捕获）。"""
+        print(f"[sessionfinish] {text}", file=sys.stderr, flush=True)
+
+    _mark("start")
+
+    if _LEFTOVER_TASKS:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        lines = ["", "⚠️ 以下用例留下了未结束的后台任务（已在本轮被强制收掉）："]
+        lines += [f"   - {item}" for item in _LEFTOVER_TASKS]
+        if reporter is not None:
+            reporter.write_line("\n".join(lines))
+        else:
+            print("\n".join(lines))
+
     from PySide6.QtCore import QEvent
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance()
+    _mark(f"app={app is not None}")
 
     # 1) 顶层部件：先真的销毁，别留给解释器收尾阶段
     if app is not None:
-        for widget in list(app.topLevelWidgets()):
+        widgets = list(app.topLevelWidgets())
+        _mark(f"顶层部件 {len(widgets)} 个")
+        for widget in widgets:
             try:
                 widget.deleteLater()
             except RuntimeError:  # C++ 侧已先行销毁
                 continue
         app.sendPostedEvents(None, QEvent.DeferredDelete)
         app.processEvents()
+        _mark("顶层部件已清理")
 
     # 2) 模块级 Qt 单例（TaskManager 还挂着运行中的 QTimer）
     services = sys.modules.get("ui.services")
+    _mark("开始清理 TaskManager")
     if services is not None:
         manager = getattr(services.TaskManager, "_instance", None)
         services.TaskManager._instance = None
@@ -132,12 +230,15 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
         if app is not None:
             app.sendPostedEvents(None, QEvent.DeferredDelete)
             app.processEvents()
+    _mark("TaskManager 已清理")
 
     # 3) 在**运行时**（而不是解释器 finalizing 阶段）把循环垃圾收干净。
     #    PySide6 在 Py3.11 的退出期 GC 上会踩到 bool 引用计数断言，
     #    提前收集可以把这一步挪出收尾路径。
-    for _ in range(3):
+    for index in range(3):
         gc.collect()
+        _mark(f"gc 第 {index + 1} 轮完成")
         if app is not None:
             app.sendPostedEvents(None, QEvent.DeferredDelete)
             app.processEvents()
+    _mark("finish")

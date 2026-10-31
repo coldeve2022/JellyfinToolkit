@@ -2,6 +2,14 @@
 from pathlib import Path
 
 from tests.test_data_profile import library
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def release_profile_lock():
+    yield
+    from ui.data_profiles import release_startup_profile
+    release_startup_profile()
 
 
 def setup_roots(tmp_path, monkeypatch):
@@ -21,9 +29,11 @@ def setup_roots(tmp_path, monkeypatch):
 def test_startup_chooses_and_rebinds_existing_library(qapp, tmp_path, monkeypatch):
     import config
     from ui import data_profiles
-    shared, _ = setup_roots(tmp_path, monkeypatch)
+    shared, program = setup_roots(tmp_path, monkeypatch)
     old = library(tmp_path / 'project', 5, 2)
     library(shared, 1, 0)
+    from utils.data_profile import remember_profile
+    remember_profile(old, shared / 'data-profile.json')
     monkeypatch.setattr(data_profiles, 'choose_profile', lambda rows: old)
     assert data_profiles.prepare_startup_profile()
     assert config.BASE_DIR == old.resolve()
@@ -32,21 +42,23 @@ def test_startup_chooses_and_rebinds_existing_library(qapp, tmp_path, monkeypatc
 
 def test_cancel_startup_never_creates_empty_database(qapp, tmp_path, monkeypatch):
     from ui import data_profiles
-    shared, _ = setup_roots(tmp_path, monkeypatch)
+    shared, program = setup_roots(tmp_path, monkeypatch)
     old = library(tmp_path / 'project', 5, 2)
     library(shared, 1, 0)
+    from utils.data_profile import remember_profile
+    remember_profile(old, shared / 'data-profile.json')
     monkeypatch.setattr(data_profiles, 'choose_profile', lambda rows: None)
     monkeypatch.setattr(data_profiles, 'recover_profile', lambda message: False)
     assert data_profiles.prepare_startup_profile() is False
-    assert not (shared / 'data-profile.json').exists()
+    assert not (program / 'data/censor.db').exists()
     assert (old / 'data/censor.db').exists()
 
 
 def test_switch_profile_only_affects_next_normal_startup(qapp, tmp_path, monkeypatch):
     import config
     from ui import data_profiles
-    from utils.data_profile import registered_root
-    shared, _ = setup_roots(tmp_path, monkeypatch)
+    from utils.profile_runtime import read_local_pointer
+    shared, program = setup_roots(tmp_path, monkeypatch)
     current = library(tmp_path / 'current')
     selected = library(tmp_path / 'next')
     config.set_data_root(current)
@@ -54,7 +66,8 @@ def test_switch_profile_only_affects_next_normal_startup(qapp, tmp_path, monkeyp
     monkeypatch.setattr(data_profiles.QMessageBox, 'question', lambda *a, **k: data_profiles.QMessageBox.Yes)
     monkeypatch.setattr(data_profiles.QMessageBox, 'information', lambda *a, **k: None)
     assert data_profiles.select_existing_profile()
-    assert registered_root(shared / 'data-profile.json') == selected.resolve()
+    assert read_local_pointer(program) == selected.resolve()
+    assert not (shared / 'data-profile.json').exists()
     assert config.BASE_DIR == current.resolve()
 
 
@@ -81,3 +94,17 @@ def test_main_window_has_visible_library_entry(qapp, qtbot, monkeypatch):
     assert button is not None and '资料库' in button.text()
     button.click()
     assert seen == [True]
+
+
+def test_stale_global_registration_allows_explicit_new_local_profile(qapp, tmp_path, monkeypatch):
+    import config
+    from ui import data_profiles
+    import json
+    shared, program = setup_roots(tmp_path, monkeypatch)
+    shared.mkdir()
+    (shared / 'data-profile.json').write_text(json.dumps(dict(schema_version=1, root=str(tmp_path / 'deleted-v2'), database_required=True)))
+    monkeypatch.setattr(data_profiles, 'recover_profile', lambda message: 'new_local')
+    assert data_profiles.prepare_startup_profile()
+    assert config.BASE_DIR == program.resolve()
+    assert (program / 'profile.json').is_file()
+    assert (program / 'data/censor.db').is_file()

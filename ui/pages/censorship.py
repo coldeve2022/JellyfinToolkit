@@ -10,7 +10,7 @@ import os
 from collections import Counter, deque
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QItemSelectionModel
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QItemSelectionModel, QSignalBlocker
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
@@ -38,6 +38,7 @@ from ui.widgets import FileInputActions
 from ui.censor_scan import CensorScanWorker
 from ui.censor_history import HistoryLoadWorker
 from ui.censor_release import ConnectionCheck
+from utils.media_review_query import ReviewQuery, favorite_state, playback_state
 
 __all__ = ["CensorshipPage"]
 
@@ -66,7 +67,8 @@ class _SavedHistoryWorker(HistoryLoadWorker):
 
 class _FavoriteItem(QTableWidgetItem):
     def __lt__(self, other):
-        return (self.data(Qt.UserRole + 1) or 0) < (other.data(Qt.UserRole + 1) or 0)
+        return ((self.data(Qt.UserRole + 1) or 0, self.data(Qt.UserRole + 2) or '')
+                < (other.data(Qt.UserRole + 1) or 0, other.data(Qt.UserRole + 2) or ''))
 
 #: 结论（有没有码）用状态色
 _STATE_COLOR = {
@@ -170,6 +172,7 @@ class CensorshipPage(QWidget):
         self._conn_check: Optional[ConnectionCheck] = None
         self._review_shortcuts = {}
         self._normal_sort = None
+        self._setting_library_sort = False
         from ui.jellyfin_review_controls import JellyfinReviewController
         self.library_review = JellyfinReviewController(self)
         self._setup_ui()
@@ -302,6 +305,7 @@ class CensorshipPage(QWidget):
         self.combo_library_sort.setProperty('taskInteractive', True)
         self.combo_library_sort.addItem('沿用表格排序', 'normal')
         self.combo_library_sort.addItem('喜欢优先', 'favorite_first')
+        self.combo_library_sort.addItem('播放中优先', 'progress_first')
         for control in (self.combo_favorite, self.combo_playback):
             control.currentIndexChanged.connect(self._apply_filter)
             library_filters.addWidget(control)
@@ -313,7 +317,14 @@ class CensorshipPage(QWidget):
         self.search.setClearButtonEnabled(True)
         self.search.setProperty('taskInteractive', True)
         self.search.textChanged.connect(self._apply_filter)
-        left_lay.addWidget(self.search)
+        search_row = QHBoxLayout()
+        search_row.addWidget(self.search, 1)
+        self.btn_clear_filters = QPushButton('清除筛选')
+        self.btn_clear_filters.setProperty('taskInteractive', True)
+        self.btn_clear_filters.setToolTip('清除搜索、结论、喜欢和播放条件；保留当前视图与排序，不删除记录')
+        self.btn_clear_filters.clicked.connect(self._clear_scope_filters)
+        search_row.addWidget(self.btn_clear_filters)
+        left_lay.addLayout(search_row)
         self.table = _DropTable(0,len(_COLUMNS))
         self.table.setProperty('taskInteractive',True)
         self.table.setHorizontalHeaderLabels(_COLUMNS)
@@ -423,9 +434,9 @@ class CensorshipPage(QWidget):
         row.addWidget(next_button)
         right_lay.addLayout(row)
         # 顺序是"先确认有没有无码版，再替换"：所以这里只负责把选中项送去核查，
-        # 替换入口在「找无码版」页。之前直接跳到版本管理，等于跳过了核查这一步。
+        # 替换入口在「替换版本检索」页。之前直接跳到版本管理，等于跳过了核查这一步。
         self.btn_send_versions = QPushButton('送去查无码版')
-        self.btn_send_versions.setToolTip('把选中的作品送到「找无码版」页核查，只查这些')
+        self.btn_send_versions.setToolTip('把选中的作品送到「替换版本检索」页核查，只查这些')
         self.btn_send_versions.clicked.connect(self._send_to_lookup)
         right_lay.addWidget(self.btn_send_versions)
         splitter.addWidget(right)
@@ -488,6 +499,7 @@ class CensorshipPage(QWidget):
             gallery=self.gallery, filters={'view': self.combo_filter, 'conclusion': self.combo_conclusion,
                                           'search': self.search, 'favorite': self.combo_favorite,
                                           'playback': self.combo_playback, 'library_sort': self.combo_library_sort})
+        self.table.horizontalHeader().sortIndicatorChanged.connect(self._header_sort_changed)
         if not self.workspace.state.get('jellyfin_columns_added'):
             self.table.setColumnHidden(7, False)
             self.table.horizontalHeader().moveSection(self.table.horizontalHeader().visualIndex(7), 1)
@@ -548,8 +560,8 @@ class CensorshipPage(QWidget):
             '抽样低风险不证明全片没有像素化。Alt+1 标有码、Alt+2 标无码、Alt+3 下一条。\n'
             '更多菜单可恢复任务、选择延后视频、查看历史或忽略缓存重新分析。\n\n'
             '这件事分两步，刻意分开算：\n'
-            '① 定标记 —— 你的任务只有一个：确认哪些片确实有码（红「标记有码」）。\n'
-            '② 找无码版 —— 在左侧「找无码版」页里，对已标记「有码」的番号去网上查\n'
+            '① 定标记 —— 你的任务只有一个：确认哪些片需要替换（红「标记有码」）。\n'
+            '② 替换版本检索 —— 在左侧「替换版本检索」页里，对已标记的作品编号去外部站点查\n'
             '（JavDB / JavBus 直连；Supjav 站内优先、索引补充），可反复重查、可导出清单。\n'
             '这一页只管定标记；检索结果不在本页显示。')
 
@@ -588,9 +600,14 @@ class CensorshipPage(QWidget):
         self._load_history()
 
     def _show_saved_stats(self, stats):
+        # 这一行以前只报 total，于是"界面 226 行 / 已保存 0 条"会同时出现，
+        # 用户只能理解为数据丢了。现在把"完整 / 未完成"分开报，
+        # 未完成的行也入库（见 censor/store.py::_write_result）。
+        incomplete = getattr(stats, "incomplete", 0)
+        detail = f"（其中 {incomplete} 条未跑完，重新扫描会重算）" if incomplete else ""
         self.data_status.setText(
             f'当前资料库：{self._service.store.db_path.resolve()} · '
-            f'已保存扫描 {stats.total} 条 · 人工确认 {stats.labeled} 条')
+            f'已入库 {stats.total} 条{detail} · 人工确认 {stats.labeled} 条')
 
     def _cancel_startup(self):
         self._restored = True
@@ -1234,43 +1251,40 @@ class CensorshipPage(QWidget):
         view = self._current_view()
         return view is WorkflowView.ALL or in_view(view, review_bucket(result))
 
-    def _matches_scope(self, result) -> bool:
+    def _scope_query(self):
+        return ReviewQuery.from_values(self.search.text(), self.combo_conclusion.currentData(),
+                                       self.combo_favorite.currentData(), self.combo_playback.currentData())
+
+    def _matches_scope(self, result, query=None) -> bool:
         """The shared favorite/playback/conclusion/search scope, without view."""
-        words = self.search.text().casefold().split()
         item = self.library_review.item(result.path)
-        labels = ' '.join(str(value) for value in [item.get('name', ''),
-            *(item.get('tags') or []), *(item.get('genres') or [])])
-        text = f'{result.path} {result.number} {result.verdict.reason} {labels}'.casefold()
-        if not all(word in text for word in words):
-            return False
-        state = self.combo_conclusion.currentData()
-        if state and result.state.value != state:
-            return False
-        favorite, played = item.get('is_favorite'), item.get('played')
-        preference = self.combo_favorite.currentData()
-        if ((preference == 'favorite' and favorite is not True)
-                or (preference == 'not_favorite' and favorite is not False)
-                or (preference == 'unknown' and favorite is not None)):
-            return False
-        watching = self.combo_playback.currentData()
-        progress = bool(item.get('has_progress') or item.get('playback_ticks', 0))
-        return not ((watching == 'played' and played is not True)
-                    or (watching == 'unplayed' and (played is not False or progress))
-                    or (watching == 'progress' and (played is None or played or not progress))
-                    or (watching == 'unknown' and played is not None))
+        return (query or self._scope_query()).matches(result.path, result.number, result.state.value,
+                                                      result.verdict.reason, item)
+
+    def _clear_scope_filters(self):
+        controls = (self.search, self.combo_conclusion, self.combo_favorite, self.combo_playback)
+        blockers = [QSignalBlocker(control) for control in controls]
+        self.search.clear()
+        for control in controls[1:]:
+            control.setCurrentIndex(0)
+        for blocker in blockers:
+            blocker.unblock()
+        self._apply_filter()
+        self.workspace.schedule()
 
     def _set_library_cells(self, row, path):
         item = self.library_review.item(path)
-        favorite = item.get('is_favorite')
-        cell = _FavoriteItem('♥ 喜欢' if favorite is True else '未喜欢' if favorite is False else '未同步')
-        cell.setData(Qt.UserRole + 1, 2 if favorite is True else 1 if favorite is False else 0)
+        favorite = favorite_state(item)
+        cell = _FavoriteItem({'favorite': '♥ 喜欢', 'not_favorite': '未喜欢', 'unknown': '未同步'}[favorite])
+        cell.setData(Qt.UserRole + 1, {'favorite': 2, 'not_favorite': 1, 'unknown': 0}[favorite])
+        cell.setData(Qt.UserRole + 2, str(path).casefold())
         cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
         cell.setToolTip('所选 Jellyfin 账号的状态；未匹配或未同步保持未知')
         self.table.setItem(row, 7, cell)
-        played = item.get('played')
-        text = ('未同步' if played is None else '已播放' if played else '播放中'
-                if item.get('has_progress') or item.get('playback_ticks', 0) else '未播放')
-        cell = QTableWidgetItem(text)
+        played = playback_state(item)
+        cell = _FavoriteItem({'unknown': '未同步', 'played': '已播放', 'progress': '播放中', 'unplayed': '未播放'}[played])
+        cell.setData(Qt.UserRole + 1, {'unknown': 0, 'played': 1, 'unplayed': 2, 'progress': 3}[played])
+        cell.setData(Qt.UserRole + 2, str(path).casefold())
         cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
         self.table.setItem(row, 8, cell)
 
@@ -1278,14 +1292,27 @@ class CensorshipPage(QWidget):
         if not hasattr(self, 'table'):
             return
         header = self.table.horizontalHeader()
-        if self.combo_library_sort.currentData() == 'favorite_first':
+        mode = self.combo_library_sort.currentData()
+        if mode in ('favorite_first', 'progress_first'):
             if self._normal_sort is None:
                 self._normal_sort = (header.sortIndicatorSection(), header.sortIndicatorOrder())
-            self.table.sortItems(7, Qt.DescendingOrder)
+            self._setting_library_sort = True
+            try:
+                self.table.sortItems(7 if mode == 'favorite_first' else 8, Qt.DescendingOrder)
+            finally:
+                self._setting_library_sort = False
         elif self._normal_sort is not None:
             column, order = self._normal_sort
             self._normal_sort = None
             self.table.sortItems(column, order)
+
+    def _header_sort_changed(self, *_):
+        if self._setting_library_sort or self.combo_library_sort.currentData() == 'normal':
+            return
+        self._normal_sort = None
+        with QSignalBlocker(self.combo_library_sort):
+            self.combo_library_sort.setCurrentIndex(self.combo_library_sort.findData('normal'))
+        self.workspace.schedule()
 
     def _show_favorite_censored(self):
         self.combo_filter.setCurrentIndex(self.combo_filter.findData(WorkflowView.ALL.value))
@@ -1310,7 +1337,7 @@ class CensorshipPage(QWidget):
             return
         from ui.services import events
         events.release_lookup_requested.emit(list(dict.fromkeys(paths)))
-        self._flash(f'已把 {len(paths)} 个作品送去「找无码版」核查；还没查、也没动文件')
+        self._flash(f'已把 {len(paths)} 个作品送去「替换版本检索」核查；还没查、也没动文件')
 
     def set_review_shortcut(self, name, sequence):
         button = getattr(self, {'censored': 'btn_censored', 'uncensored': 'btn_uncensored', 'next': 'btn_next'}[name])
@@ -1503,9 +1530,9 @@ class CensorshipPage(QWidget):
             self._on_item(refreshed)
             if state is CensorState.CENSORED:
                 # 标记完成 = 进入阶段二。这里只**入队**，不联网：
-                # 真正去查是在「找无码版」页点检索（可以反复重查）。
+                # 真正去查是在「替换版本检索」页点检索（可以反复重查）。
                 number = normalize_number(refreshed.number)
-                tail = " —— 已进入「找无码版」清单"
+                tail = " —— 已进入「替换版本检索」清单"
                 if number:
                     try:
                         self._release_service.queue([number], note="界面标记有码")
@@ -1675,9 +1702,10 @@ class CensorshipPage(QWidget):
         confirmed_censored = 0
         visible = 0
         view = self._current_view()
+        query = self._scope_query()
         for path, result in self._results.items():
             value = review_bucket(result)
-            matches = self._matches_scope(result)
+            matches = self._matches_scope(result, query)
             counts[value] += 1
             membership[path] = (value, matches)
             if value is ReviewBucket.CONFIRMED and result.state is CensorState.CENSORED:
@@ -1714,7 +1742,7 @@ class CensorshipPage(QWidget):
         self._stats_label.setText(
             f'列表 {len(self._results)} · 筛选匹配 {sum(projection["scoped"].values())}'
             f' · 当前显示 {projection["visible"]} · 全列表统计：待处理 {todo}'
-            f' · 已确认有码 {confirmed_censored}（在「找无码版」页检索）'
+            f' · 已确认有码 {confirmed_censored}（在「替换版本检索」页提交）'
             f' · 已确认无码 {confirmed_clean}'
             f' · 低风险 {counts[ReviewBucket.LOW_RISK]}'
             f' · 已延后 {counts[ReviewBucket.DEFERRED]}'

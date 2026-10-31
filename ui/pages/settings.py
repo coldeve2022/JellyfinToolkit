@@ -514,10 +514,10 @@ class SettingsPage(QWidget):
         mg.addWidget(merge_hint)
         layout.addWidget(merge_group)
 
-        # ── 第三方工具（批量生成字幕 / 马赛克破解）──
+        # ── 第三方工具（批量生成字幕 / 画面修复）──
         # 这两项功能的主体都在**别人写的程序**里，所以这里最重要的是
         # "告诉我在哪" + "去哪儿拿"。路径留空 = 自动查找，不写死任何目录。
-        ext_group = QGroupBox("第三方工具（批量生成字幕 / 马赛克破解）")
+        ext_group = QGroupBox("第三方工具（批量生成字幕 / 画面修复）")
         ext_lay = QVBoxLayout(ext_group)
         ext_hint = QLabel(
             "这两项功能依赖你自己安装的第三方程序，本程序不附带也不下载它们。\n"
@@ -540,7 +540,7 @@ class SettingsPage(QWidget):
         ext_lay.addLayout(w1)
 
         w2 = QHBoxLayout()
-        w2.addWidget(QLabel("马赛克破解 lada-cli.exe："))
+        w2.addWidget(QLabel("画面修复 lada-cli.exe："))
         self.input_lada_cli = QLineEdit(self.cfg.lada_cli_path)
         self.input_lada_cli.setPlaceholderText("留空 = 自动查找")
         w2.addWidget(self.input_lada_cli, 1)
@@ -651,7 +651,7 @@ class SettingsPage(QWidget):
         self.lbl_ext_tools.setText(
             "实际状态：\n"
             f"· 字幕识别：{'✅ ' + str(whisper) if whisper else '❌ 未找到（该页会给出下载指引）'}\n"
-            f"· 马赛克破解：{'✅ ' + str(lada) if lada else '❌ 未找到（该页会给出下载指引）'}"
+            f"· 画面修复：{'✅ ' + str(lada) if lada else '❌ 未找到（该页会给出下载指引）'}"
         )
 
     def _refresh_ext_tools_safe(self) -> None:
@@ -1245,6 +1245,9 @@ class SettingsPage(QWidget):
         self.spin_merge_dup_sim.setValue(DEFAULT_CONFIG["merge_dup_sim_threshold"])
         self.input_jf_server.setText(DEFAULT_CONFIG["jellyfin_server"])
         self.input_jf_key.setText(DEFAULT_CONFIG["jellyfin_api_key"])
+        # 版本检索那 15 个 release_* 以前不参与「恢复默认」，界面看着干净、
+        # 一保存又把旧值写回去。现在一并恢复（只改控件，等点保存才落盘）。
+        self.release_settings.reset_to_defaults()
         QMessageBox.information(self, "提示", "已恢复默认设置，点击「保存」生效。")
 
     def _background(self, title, function, result):

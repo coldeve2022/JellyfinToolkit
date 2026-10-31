@@ -90,7 +90,8 @@ def page(qapp, qtbot, cfg, monkeypatch):
     widget = CensorReplacePage(cfg)
     monkeypatch.setattr(
         widget._censor, "store",
-        type("S", (), {"confirmed_censored": staticmethod(lambda: records)})(),
+        type("S", (), {"confirmed_censored": staticmethod(lambda: records),
+                       "db_path": widget._censor.store.db_path})(),
         raising=False)
     monkeypatch.setattr(
         widget._release, "cached",
@@ -103,7 +104,11 @@ def page(qapp, qtbot, cfg, monkeypatch):
     widget.refresh()
     qtbot.waitUntil(lambda: widget.table.rowCount() == 3, timeout=15000)
     yield widget
+    qtbot.waitUntil(lambda: widget._refresh_worker is None, timeout=15000)
     widget.shutdown()
+    from ui.services import TaskManager
+    qtbot.waitUntil(lambda: not TaskManager.instance().running(widget._refresh_owner), timeout=5000)
+    qtbot.waitUntil(lambda: not TaskManager.instance().running(widget), timeout=5000)
 
 
 def _rows(page):
@@ -117,7 +122,7 @@ def _rows(page):
 def test_columns_are_number_oriented(page):
     from ui.pages.censor_replace import _COLUMNS
 
-    assert _COLUMNS == ["番号", "片数", "检索结果", "候选", "最大种子", "最近检索"]
+    assert _COLUMNS == ["番号", "片数", "检索结果", "候选", "最大种子", "最近检索", "喜欢", "播放状态"]
 
 
 def test_groups_paths_by_number(page):
@@ -181,7 +186,8 @@ def test_report_updates_row_and_panel(page):
 
 def test_empty_list_is_handled(page, monkeypatch, qtbot):
     monkeypatch.setattr(page._censor, "store",
-                        type("S", (), {"confirmed_censored": staticmethod(lambda: [])})())
+                        type("S", (), {"confirmed_censored": staticmethod(lambda: []),
+                                       "db_path": page._censor.store.db_path})())
     page.refresh()
     qtbot.waitUntil(lambda: page.table.rowCount() == 0, timeout=15000)
     assert page.table.rowCount() == 0

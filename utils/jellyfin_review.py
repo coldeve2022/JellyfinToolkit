@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+from weakref import WeakValueDictionary
 from urllib.parse import quote, urlencode
 
 from utils import jellyfin_api as api
@@ -20,6 +21,24 @@ from utils.library import (_readonly_conn, _column_names, _guid_str, _behavior_u
 from utils.library_source import _get, map_media_path
 from utils.library_scope import normalize_scope_path, path_in_scope, scope_id, _paths
 from utils.media_server import server_identity
+
+
+_review_services = WeakValueDictionary()
+
+
+def shared_review_service(cfg, data_dir=None):
+    """Reuse resolved source identity only for this exact profile and context.
+
+    Owned by views/controllers; this registry neither discovers a source nor
+    persists credentials or selects another account's most recent snapshot.
+    """
+    candidate = JellyfinReviewService(cfg, data_dir=data_dir)
+    key = (str(candidate._db_path.resolve()), candidate.context_key)
+    previous = _review_services.get(key)
+    if previous is not None:
+        return previous
+    _review_services[key] = candidate
+    return candidate
 
 
 class JellyfinReviewError(Exception):
@@ -204,13 +223,11 @@ class JellyfinReviewService:
 
     def _publish(self, collected, summary, should_stop):
         self._check(should_stop)
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute('CREATE TABLE IF NOT EXISTS snapshots (context TEXT PRIMARY KEY, payload TEXT NOT NULL)')
-            self._check(should_stop)
-            conn.execute('INSERT OR REPLACE INTO snapshots VALUES (?, ?)',
-                         (self._snapshot_key(), json.dumps(collected, ensure_ascii=False)))
-            self._check(should_stop)
+        from utils.user_state_store import UserStateStore
+        try:
+            UserStateStore(self._db_path).publish(self._snapshot_key(), collected, should_stop=should_stop)
+        except InterruptedError as exc:
+            raise _Cancelled() from exc
         summary.update(ok=True, count=len(collected), favorites=sum(r['is_favorite'] is True for r in collected.values()),
                        unknown=summary['unknown'] + sum(r['is_favorite'] is None for r in collected.values()))
 
@@ -332,6 +349,11 @@ class JellyfinReviewService:
         except Exception:
             summary['error'] = '无法完成用户状态快照，已保留上次结果'
         return summary
+
+    def read_snapshot(self):
+        """Structured generic read; the legacy cached_items API remains unchanged."""
+        from utils.user_state_store import UserStateStore
+        return UserStateStore(self._db_path).read(self._snapshot_key(), self.user_id)
 
     def cached_items(self):
         if not self._db_path.is_file() or not self.user_id or not self._snapshot_key():

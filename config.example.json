@@ -162,7 +162,7 @@
   "censor_edge_threshold": 1.5,
   "_comment_release": "无码版本检索：判定「有码」后到站点查是否存在流出/破解版。结论分确有/疑似/未见/未查，未查会说明原因（站点被拦≠没有资源）。",
   "release_enabled": true,
-  "release_auto_lookup": true,
+  "release_auto_lookup": false,
   "release_sources": ["javdb", "javbus", "supjav"],
   "_comment_release_supjav": "Supjav 默认站内优先：用独立浏览器会话读站内搜索与详情页（只取文字元数据）；站内被 Cloudflare 拦时退到搜索引擎索引（site:supjav.com 番号）。三种方式在设置里可选：auto=站内优先+索引补充，direct=只查站内，index=只查索引。",
   "release_supjav_engines": ["bing", "duckduckgo"],

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -126,7 +127,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "whisper_cleanup_max_duration": 20.0, # 单条字幕最长秒数
     "whisper_cleanup_similarity": 0.88,   # 相邻两条视为重复的相似度阈值
 
-    # ── 马赛克破解（第三方 Lada）─────────────────────────────────────
+    # ── 画面修复（第三方 Lada）─────────────────────────────────────
     "lada_cli_path": "",                  # lada-cli.exe 或其所在目录；留空 = 自动探测
     "lada_device": "cuda:0",              # 取值以工具 --list-devices 为准
     "lada_encoding_preset": "",           # 留空 = 用 Lada 默认（hevc-nvidia-gpu-hq）
@@ -272,21 +273,16 @@ def _resolve_base_dir() -> Path:
     override = os.environ.get(DATA_DIR_ENV)
     if override:
         return Path(override).expanduser().resolve()
-    if portable_mode():
-        return program_dir() / "AppData"
-    # All normal releases share a stable library registration. Import only reads
-    # it; startup validates missing/corrupt profiles before creating any stores.
-    from utils.data_profile import PROFILE_FILENAME, ProfileError, registered_root
+    # Ordinary releases own their local data; only an explicit per-install
+    # pointer may select an external profile. Global legacy selection is a UI
+    # import hint and must never affect import-time config reads.
+    from utils.profile_runtime import read_local_pointer
+    from utils.data_profile import ProfileError
     try:
-        registered = registered_root(user_data_root() / PROFILE_FILENAME)
-    except (ProfileError, OSError):
-        registered = None
-    if registered is not None:
-        return registered
-    if getattr(sys, "frozen", False):
-        return user_data_root()
-    # 源码模式：写项目目录，方便开发与随手查看
-    return program_dir()
+        selected = read_local_pointer(program_dir())
+    except ProfileError:
+        selected = None  # Startup displays the invalid-pointer error before writes.
+    return selected or program_dir()
 
 BASE_DIR = _resolve_base_dir()
 CONFIG_FILE = BASE_DIR / "config.json"
@@ -349,8 +345,15 @@ def _drive_exists(path: str) -> bool:
 
 
 def _coerce_config(data: dict) -> dict:
-    """把磁盘 JSON 里的值收敛到期望类型；非法值回退到默认。"""
-    out = dict(DEFAULT_CONFIG)
+    """把磁盘 JSON 里的值收敛到期望类型；非法值回退到默认。
+
+    注意 ``out`` 必须是 ``DEFAULT_CONFIG`` 的**深拷贝**：`dict(DEFAULT_CONFIG)` 只
+    复制了外层，里面的 list 仍与默认值共享同一个对象。随后 ``load()`` 把这些
+    共享 list 直接装进 ``ToolkitConfig``，于是任何一次
+    ``cfg.uncensored_keywords.append(...)`` 都会**永久污染进程级的默认值** ——
+    连"恢复默认设置"按钮都会读到被污染的值。
+    """
+    out = copy.deepcopy(DEFAULT_CONFIG)
     for key, default in DEFAULT_CONFIG.items():
         value = data.get(key)
         if value is None:
@@ -538,7 +541,7 @@ class ToolkitConfig:
     whisper_cleanup_max_duration: float = DEFAULT_CONFIG["whisper_cleanup_max_duration"]
     whisper_cleanup_similarity: float = DEFAULT_CONFIG["whisper_cleanup_similarity"]
 
-    # ── 马赛克破解（第三方 Lada）──
+    # ── 画面修复（第三方 Lada）──
     lada_cli_path: str = DEFAULT_CONFIG["lada_cli_path"]
     lada_device: str = DEFAULT_CONFIG["lada_device"]
     lada_encoding_preset: str = DEFAULT_CONFIG["lada_encoding_preset"]

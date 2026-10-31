@@ -1,4 +1,4 @@
-"""Supjav 检索源 —— 破解版（Decensored / Leak）最集中的地方，但它整站挂在 Cloudflare 后面。
+"""Supjav 检索源适配器 —— 该站替代版本条目较集中，但整站挂在 Cloudflare 后面。
 
 为什么不直接抓
 --------------

@@ -192,7 +192,9 @@ class SupjavBrowserSession(QObject):
         from config import DATA_DIR
 
         folder = Path(DATA_DIR) / 'supjav-browser' / 'pages'
-        return folder / (hashlib.sha1(url.encode('utf-8')).hexdigest() + '.json')
+        # 缓存文件名用的摘要，不承担安全职责；显式声明以免被判成弱哈希漏洞
+        name = hashlib.sha1(url.encode('utf-8'), usedforsecurity=False).hexdigest()
+        return folder / (name + '.json')
 
     def _cache_ttl(self) -> float:
         try:

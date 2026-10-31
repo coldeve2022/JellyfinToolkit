@@ -72,6 +72,10 @@ def alive_is_sufficient(alive_checks: int, total: int) -> bool:
     return alive_checks == total
 
 
+def profile_was_initialized(data_root: Path) -> bool:
+    return (data_root / 'profile.json').is_file() and (data_root / 'data/censor.db').is_file()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="打包产物启动冒烟测试")
     parser.add_argument("--exe", default="")
@@ -102,7 +106,8 @@ def main() -> int:
     print(f"启动: {exe}")
     print(f"数据目录: {data_dir}")
     proc = subprocess.Popen(
-        [str(exe)], env=env, creationflags=DETACHED_FLAGS if sys.platform == "win32" else 0
+        [str(exe), *(['--init-profile'] if not args.data_dir else [])],
+        env=env, creationflags=DETACHED_FLAGS if sys.platform == "win32" else 0
     )
 
     alive_checks = 0
@@ -124,6 +129,9 @@ def main() -> int:
     print(f"存活采样: {alive_checks}/{total} 秒")
     if not alive_is_sufficient(alive_checks, total):
         print("[失败] 进程过早退出 —— 大概率是构造期异常（窗口根本没显示）。")
+        ok = False
+    if not profile_was_initialized(data_dir):
+        print('[失败] 资料库未完成初始化，错误提示窗口不能视为启动成功。')
         ok = False
 
     if log.exists() and log.stat().st_size:

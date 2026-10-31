@@ -132,7 +132,40 @@ def test_censorship_page_classifies(qapp, cfg, tmp_path, qtbot):
     qtbot.waitUntil(lambda: page._worker is not None, timeout=5000)
     # 必须用 waitUntil（内部会 processEvents）等行数：表格是被信号填的，
     # 用 worker.wait() 阻塞 GUI 线程会让队列信号送不到，行永远是 0。
-    qtbot.waitUntil(lambda: page.table.rowCount() == 2, timeout=30000)
+    try:
+        qtbot.waitUntil(lambda: page.table.rowCount() == 2, timeout=30000)
+    except Exception:
+        # 这条断言在"单独跑必过、全量跑偶发"时最难查，所以把现场打出来：
+        # 到底是被其它用例的全局状态污染（检测器注册表 / 任务槽位），
+        # 还是扫描自己失败。
+        from censor.registry import detectors as _detectors
+        from ui.services import TaskManager as _TM
+
+        worker = page._worker
+        running = None
+        if worker is not None and hasattr(worker, "isRunning"):
+            try:
+                running = worker.isRunning()
+            except RuntimeError:
+                running = "invalid"
+        log_panel = getattr(page, "log", None) or getattr(page, "log_panel", None)
+        log_text = ""
+        if log_panel is not None and hasattr(log_panel, "toPlainText"):
+            log_text = log_panel.toPlainText()[-600:]
+        active = [
+            (entry["record"].get("title"), entry["record"].get("status"))
+            for entry in _TM.instance()._active.values()
+        ]
+        raise AssertionError(
+            "扫描没有产出 2 行 —— 现场：\n"
+            f"  worker={type(worker).__name__ if worker else None} running={running}\n"
+            f"  stopped={getattr(worker, '_stopped', None)}\n"
+            f"  results={len(page._results)} rows={page.table.rowCount()}\n"
+            f"  状态栏={getattr(page, '_stats_label', None) and page._stats_label.text()!r}\n"
+            f"  已注册检测器={sorted(_detectors.names())}\n"
+            f"  任务占位={active}\n"
+            f"  页面日志尾部={log_text!r}"
+        ) from None
     assert _wait_worker(page._worker)
     qapp.processEvents()
 

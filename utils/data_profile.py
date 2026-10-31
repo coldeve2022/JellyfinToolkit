@@ -79,6 +79,71 @@ def inspect_root(root):
     return result
 
 
+def profile_diagnostics(root, registry=None):
+    """Read metadata only; never select, repair, create or merge a profile."""
+    info = inspect_root(root)
+    info.update(registered_root=None, registry_error=False, schema_versions={}, schema_error=False,
+                snapshot_status='missing', snapshot_contexts=0,
+                snapshot_database=info['root'] / 'data/jellyfin_review.sqlite3',
+                evidence_directory=info['root'] / 'data/censor_thumbs')
+    if registry is not None:
+        try:
+            from utils.profile_runtime import read_local_pointer
+            info['registered_root'] = read_local_pointer(Path(registry).parent) if Path(registry).name == PROFILE_FILENAME else registered_root(registry)
+        except (ProfileError, OSError):
+            info['registry_error'] = True
+    if info['database_exists']:
+        try:
+            with closing(sqlite3.connect(info['database'].as_uri() + '?mode=ro', uri=True, timeout=2)) as conn:
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name='toolkit_schema_versions'").fetchone():
+                    info['schema_versions'] = dict(conn.execute(
+                        "SELECT component,version FROM toolkit_schema_versions WHERE component='censor_verdict'"))
+        except (OSError, sqlite3.Error):
+            info['schema_error'] = True
+    db = info['snapshot_database']
+    if db.is_file():
+        try:
+            with closing(sqlite3.connect(db.as_uri() + '?mode=ro', uri=True, timeout=2)) as conn:
+                conn.execute('PRAGMA query_only=ON')
+                conn.execute('BEGIN')
+                tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if 'snapshots' in tables:
+                    info['snapshot_contexts'] = conn.execute('SELECT count(*) FROM snapshots').fetchone()[0]
+                    info['snapshot_status'] = 'legacy'
+                if 'user_state_schema' in tables:
+                    version = conn.execute('SELECT version FROM user_state_schema WHERE id=1').fetchone()
+                    info['snapshot_status'] = 'ready' if version and version[0] == 1 else 'unsupported'
+        except (OSError, sqlite3.Error):
+            info['snapshot_status'] = 'unavailable'
+    return info
+
+
+def format_profile_diagnostics(info):
+    lines = ['本次运行资料库：' + str(info['root']), '扫描数据库：' + str(info['database'])]
+    if info['database_exists']:
+        lines.append(f"扫描记录 {info['scans']} · 当前人工标记 {info['labels']} · 文件版本标记 {info['history']}")
+        versions = info['schema_versions']
+        version_text = ', '.join(f'{k}={v}' for k, v in versions.items()) or '旧结构，未登记版本'
+        lines.append('结构版本：' + ('暂不可读，请刷新重试' if info['schema_error'] else version_text))
+    else:
+        lines.append('未找到扫描数据库；未创建空库')
+    registered = info['registered_root']
+    lines.append('下次普通启动登记：' + (str(registered) if registered else '尚未登记'))
+    if registered is not None and registered != info['root']:
+        lines.append('登记位置与本次不同：重启后才可能切换；本次没有切换或合并。显式目录和便携模式优先。')
+    if info['registry_error']:
+        lines.append('默认资料库登记不可读；本次未修改登记')
+    state = info['snapshot_status']
+    description = {'missing': '尚无用户状态库', 'legacy': '旧格式；可兼容读取，快照时间未知',
+                   'ready': '关系格式与旧格式兼容保存', 'unsupported': '结构版本不受支持',
+                   'unavailable': '用户状态库不可读，扫描记录统计不受影响'}[state]
+    lines.extend(['用户状态数据库：' + str(info['snapshot_database']),
+                  f"用户状态：{description} · 上下文快照 {info['snapshot_contexts']} 份（不是视频条数）",
+                  '证据图片目录：' + str(info['evidence_directory']),
+                  '以上为数据库原始条数，不等于当前筛选可见数；诊断不读取密钥、媒体内容或快照明细。'])
+    return '\n'.join(lines)
+
+
 def discover_roots(program_root, shared_root):
     program = Path(program_root).expanduser().resolve()
     locations = [Path(shared_root), program, program / 'AppData']

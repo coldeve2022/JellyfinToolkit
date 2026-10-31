@@ -36,6 +36,14 @@ from utils.fonts import ui_font
 from version import APP_NAME_CN, __version__, window_title
 
 
+#: 这些页面的数据来自"库分析范围"（媒体库/目录选择），范围没定时主操作无意义。
+#: 以前这个集合在 `_config_changed` 与 `_update_scope_pages` 各写了一遍，
+#: 改一处漏一处；现在只有这一份。
+_SCOPE_BOUND_PAGES = frozenset(
+    {"insight", "profile", "review", "delete", "dedup", "automation"}
+)
+
+
 class SidebarButton(QPushButton):
     """侧边栏导航按钮 — 带图标和文本，支持选中态（颜色跟随主题）。"""
 
@@ -91,11 +99,11 @@ class MainWindow(QMainWindow):
         ("🗑️", "删除暂存"),
         ("🔁", "重复处理"),
         ("🎬", "视频像素化检测"),
-        ("🔎", "找无码版"),
+        ("🔎", "替换版本检索"),
         ("📝", "字幕缺失检测"),
         ("✍️", "批量生成字幕"),
         ("🔄", "视频版本管理"),
-        ("🔓", "马赛克破解"),
+        ("🔓", "画面修复（Lada）"),
         ("🔧", "视频修复转码"),
         ("📋", "NFO 关联修复"),
         ("🗄️", "数据库工具"),
@@ -272,6 +280,7 @@ class MainWindow(QMainWindow):
         for i, btn in enumerate(self._nav_buttons):
             btn.set_active(i == idx)
         self.stack.setCurrentIndex(idx)
+        self._prompt_scope_if_needed()
 
     def _config_changed(self):
         current, context = asdict(self.cfg), state_context(self.cfg)
@@ -283,7 +292,7 @@ class MainWindow(QMainWindow):
         self._last_config_values, self._last_config_context = current, context
         for page in self._pages:
             module = type(page).__module__.rsplit(".", 1)[-1]
-            if scope_only and module not in {"insight", "profile", "review", "delete", "dedup", "automation"}:
+            if scope_only and module not in _SCOPE_BOUND_PAGES:
                 continue
             changed = getattr(page, "on_config_changed", None)
             if callable(changed):
@@ -296,14 +305,60 @@ class MainWindow(QMainWindow):
         ready = self.scope_bar.selection_ready()
         for page in self._pages:
             module = type(page).__module__.rsplit(".", 1)[-1]
-            if module in {"insight", "profile", "review", "delete", "dedup", "automation"}:
-                page.setEnabled(ready)
+            if module in _SCOPE_BOUND_PAGES:
+                # 老做法是 `page.setEnabled(ready)` —— 未选范围时整页变灰。
+                # 用户看到的是"侧边栏能点、点进去全灰、连扫描都按不了"，
+                # 而新手引导恰恰把用户送进「库概览」。
+                # 现在页面照常可读可滚动，只禁用主操作按钮（底部动作栏），
+                # 原因由顶部范围条常驻说明，导航空闲时也会弹一次提示。
+                page.setProperty("scopeReady", ready)
                 footer = getattr(page, "_action_footer", None)
                 if footer is not None:
                     footer.setEnabled(ready)
+                    footer.setToolTip("" if ready else "请先在顶部选择媒体库 / 目录范围")
+                else:
+                    # 工作区式页面（复核/找无码版）没有底部动作栏，直接管主按钮
+                    from ui.layout import primary_action
+
+                    button = primary_action(page)
+                    if button is not None:
+                        button.setEnabled(ready)
+                        button.setToolTip("" if ready else "请先在顶部选择媒体库 / 目录范围")
             elif module in {"subtitle_gen", "lada"}:
                 page.btn_scan.setEnabled(ready and not busy(page))
 
+    def _current_page_module(self) -> str:
+        index = self.stack.currentIndex()
+        if 0 <= index < len(self._pages):
+            return type(self._pages[index]).__module__.rsplit(".", 1)[-1]
+        return ""
+
+    def _prompt_scope_if_needed(self) -> bool:
+        """进入需要库范围的页面时，若还没选范围就明确提示（返回是否已就绪）。"""
+        if self.scope_bar.selection_ready():
+            return True
+        if self._current_page_module() in _SCOPE_BOUND_PAGES:
+            self.statusBar().showMessage(
+                "这个页面需要先选定库分析范围：点顶部「选择媒体库 / 目录…」，选好后再按主按钮。",
+                15000,
+            )
+        return False
+
+    def goto_label(self, label: str) -> bool:
+        """按侧边栏标题跳转；目标是"需要范围"的页面且范围未定时，直接弹选择框。
+
+        新手引导第 ① 步就是"点「库概览」→「扫描库」"。以前这里只做
+        `NAV_LABELS.index(label)`，于是用户被送进一个全灰的页面、无从下手。
+        现在跳转时顺手把"该做的事"（选范围）打开。
+        """
+        if label not in NAV_LABELS:
+            return False
+        self._navigate(NAV_LABELS.index(label))
+        if (not self.scope_bar.selection_ready()
+                and self._current_page_module() in _SCOPE_BOUND_PAGES):
+            self.scope_bar.open_selector()
+            return False
+        return True
     def _task_summary(self):
         manager = TaskManager.instance()
         active = [entry["record"] for entry in manager._active.values()]

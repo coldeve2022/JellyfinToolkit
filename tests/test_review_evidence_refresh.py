@@ -210,6 +210,10 @@ def test_capture_keeps_partial_analysis_status_and_its_error(capture_service):
     service, path, previous = capture_service
     previous.status = ProcessingStatus.PARTIAL
     previous.error = 'synthetic original visual failure'
+    # fixture 里那次 probe 已经写进一条 COMPLETED；现在要构造"基线是部分完成"的场景。
+    # 注意：不能靠 put() 把 COMPLETED 覆盖成 PARTIAL —— v4 起 store 明确禁止
+    # 用未完成的结果顶掉已完成的结论。
+    service.store.clear_probes()
     service.store.put(previous)
     result = service.refresh_evidence(path, count=12)
     assert len(result.candidates) == 12

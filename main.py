@@ -74,7 +74,15 @@ def _install_excepthook() -> None:
 
 
 def _goto(window, label: str) -> None:
-    """按页面标题跳转（供新手引导使用）。"""
+    """按页面标题跳转（供新手引导使用）。
+
+    走 ``MainWindow.goto_label``：范围未定时会直接打开范围选择框，
+    避免把用户送进一个"主按钮全灰"的页面。
+    """
+    goto = getattr(window, "goto_label", None)
+    if callable(goto):
+        goto(label)
+        return
     from ui.main_window import NAV_LABELS
 
     if label in NAV_LABELS:
@@ -91,16 +99,16 @@ def _wire_media_upgrades(window, replace_page):
 
 
 def _wire_release_lookup(window, censor_replace_page):
-    """检查页 →「找无码版」：只查用户在检查页挑出来的那些。
+    """检查页 →「替换版本检索」：只查用户在检查页挑出来的那些。
 
-    业务流程是"先确认有没有无码版，再决定替不替代"，所以从检查页出去的
+    业务流程是"先确认有没有可替换的版本，再决定替不替代"，所以从检查页出去的
     第一步是核查，不是替换。这里只做转发，范围判定在目标页里。
     """
     from ui.services import events
 
     def send_for_lookup(paths):
         censor_replace_page.receive_requests(paths)
-        _goto(window, "找无码版")
+        _goto(window, "替换版本检索")
 
     events.release_lookup_requested.connect(send_for_lookup)
     return send_for_lookup
@@ -154,11 +162,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--doctor", action="store_true", help="打印环境自检结果后退出（不启动界面）"
     )
     parser.add_argument(
-        "--portable", action="store_true", help="强制便携模式：配置与数据写在程序目录下的 AppData/"
+        "--portable", action="store_true", help="便携模式（默认）：配置与 data 保存在程序文件夹内"
     )
     parser.add_argument(
-        "--data-dir", default="", help="自定义数据目录（等价于环境变量 JELLYFIN_TOOLKIT_DATA_DIR）"
+        "--data-dir", default="", help="已有资料库根目录（包含 config.json 和 data 子目录）"
     )
+    parser.add_argument('--init-profile', action='store_true', help='明确初始化新资料库；已有身份文件的缺失库不会重建')
+    parser.add_argument('--profile-info', action='store_true', help='只读显示实际资料库位置和状态后退出')
     return parser
 
 
@@ -198,24 +208,35 @@ def main(argv: list[str] | None = None) -> int:
     if args.data_dir:
         os.environ["JELLYFIN_TOOLKIT_DATA_DIR"] = args.data_dir
 
+    if args.profile_info:
+        _force_utf8_when_piped()
+        import config
+        from utils.data_profile import format_profile_diagnostics, profile_diagnostics, ProfileError
+        try:
+            print(format_profile_diagnostics(profile_diagnostics(config.BASE_DIR, config.program_dir() / 'data-profile.json')))
+            return 0
+        except (ProfileError, OSError) as exc:
+            print(str(exc))
+            return 1
+
     if args.doctor:
         _force_utf8_when_piped()
         return print_doctor()
 
-    # QtWebEngine 只认进程级 `--proxy-server`，必须在 QApplication 之前注入。
-    # 不注入的话，Supjav 浏览器会话会按"系统网络设置"走；而 Clash 常见
-    # "只开端口、没开系统代理"，浏览器就会和普通 HTTP 一样直连超时 ——
-    # 表现为"浏览器会话开了也抓不到"。代理来源与 HTTP 层完全一致。
-    _inject_webengine_proxy()
-
+    # Only profile-selection widgets may be created before proxy selection;
+    # WebEngine imports and browser profiles follow the validated data root.
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import Qt
 
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv[:1])
-    from ui.data_profiles import prepare_startup_profile
-    if not prepare_startup_profile():
+    from ui.data_profiles import prepare_startup_profile, release_startup_profile
+    if not prepare_startup_profile(create=args.init_profile):
         return 1
+    app.aboutToQuit.connect(release_startup_profile)
+    # No WebEngine modules or profiles have been loaded yet. Read the proxy
+    # only after the selected profile has been validated and locked.
+    _inject_webengine_proxy()
     _install_excepthook()
 
     from config import ToolkitConfig
@@ -300,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
     lada_page = LadaPage(cfg)
     def send_lada(paths):
         lada_page._add_paths(paths)
-        _goto(window, "马赛克破解")
+        _goto(window, "画面修复（Lada）")
     events.lada_ready.connect(send_lada)
     lada_page.set_ffprobe(resolve_tool("ffprobe") or "ffprobe")
     window.register_page(lada_page)
