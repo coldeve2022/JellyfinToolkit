@@ -1,5 +1,6 @@
 """Real Qt input dispatch and end-to-end file queue regression tests."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -99,6 +100,27 @@ def queue_paths(page, view):
     return widget.get_all_paths()
 
 
+def _norm(path) -> str:
+    """比较前统一成绝对路径 + 平台大小写。
+
+    CI 的临时目录（``D:\\a\\_temp\\…``）和本机不同，页面又可能返回 resolve 过的
+    路径，直接比字符串会永远不相等 —— 表现出来就是"等满 45 秒队列还是空"。
+    """
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _wait_queued(qtbot, page, view, target, *, label: str) -> None:
+    expect = _norm(target)
+
+    def present() -> bool:
+        return expect in [_norm(p) for p in queue_paths(page, view)]
+
+    try:
+        qtbot.waitUntil(present, timeout=45000)
+    except Exception as exc:  # noqa: BLE001 - 换成带现场的断言
+        raise AssertionError(f"{label}之后队列里没有 {expect}；实际={queue_paths(page, view)}") from exc
+
+
 @pytest.mark.parametrize("module,name,view,role", PAGES)
 def test_visible_file_picker_to_queue(
     qapp, qtbot, cfg, tmp_path, monkeypatch, module, name, view, role
@@ -145,14 +167,14 @@ def test_folder_picker_and_viewport_drop_share_queue(
     assert button is not None, "Folder selection must not depend on dragging"
     button.click()
     expected_first = str(first) if module in ("replace", "merge", "subtitle") else str(one)
-    qtbot.waitUntil(lambda: expected_first in queue_paths(page, view), timeout=45000)
+    _wait_queued(qtbot, page, view, expected_first, label="选择文件夹")
     qtbot.waitUntil(lambda: not busy(page), timeout=45000)
     enter, dropped = drop_urls(getattr(page, view), [second])
     assert enter and dropped
     expected_second = str(second) if module in ("replace", "merge", "subtitle") else str(two)
-    qtbot.waitUntil(lambda: expected_second in queue_paths(page, view), timeout=45000)
+    _wait_queued(qtbot, page, view, expected_second, label="拖入文件夹")
     qtbot.waitUntil(lambda: not busy(page), timeout=45000)
-    assert expected_first in queue_paths(page, view)
+    assert _norm(expected_first) in [_norm(p) for p in queue_paths(page, view)]
 
 
 def test_busy_page_background_rejects_drag(qapp, qtbot, cfg, tmp_path):
