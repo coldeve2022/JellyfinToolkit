@@ -100,6 +100,10 @@ jobs:
     name: 测试 (Python ${{ matrix.python }} / ${{ matrix.os }})
     timeout-minutes: 40
     runs-on: ${{ matrix.os }}
+    # macOS 不是发布平台（README 写明"可源码运行、未做发布验证"）。它的 Qt
+    # offscreen 在 runner 上会偶发进程级崩溃（exit 138，pytest 连 junit 都写不出来），
+    # 重跑就过。让它不阻塞整体流程，但结果颜色照旧保留，信号不丢。
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     strategy:
       fail-fast: false
       matrix:

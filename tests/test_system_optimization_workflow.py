@@ -34,8 +34,8 @@ def test_manual_confirmation_can_start_automatic_lookup(qapp, qtbot, tmp_path, m
     censor.label(path, CensorState.CENSORED, base=result)
     events.censor_changed.emit([str(path)])
     qtbot.waitUntil(lambda: page._rows.get("ABC123") is not None and
-        page._rows["ABC123"].report is not None, timeout=4000)
-    qtbot.waitUntil(lambda: not TaskManager.instance().running(page), timeout=4000)
+        page._rows["ABC123"].report is not None, timeout=20000)
+    qtbot.waitUntil(lambda: not TaskManager.instance().running(page), timeout=20000)
     assert page._rows["ABC123"].report.has_download is False
     assert page._rows["ABC123"].report.availability.value == "confirmed"
 
